@@ -1,0 +1,21 @@
+[package]
+name = "sonium-control"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+sonium-common   = { path = "../common" }
+sonium-protocol = { path = "../protocol" }
+
+tokio           = { workspace = true }
+serde           = { workspace = true }
+serde_json      = { workspace = true }
+tracing         = { workspace = true }
+thiserror       = { workspace = true }
+axum            = { workspace = true }
+tokio-tungstenite = { workspace = true }
+parking_lot     = "0.12"
+uuid            = { version = "1", features = ["v4"] }
+chrono          = { version = "0.4", features = ["serde"] }
+mdns-sd         = { workspace = true }
