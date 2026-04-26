@@ -20,7 +20,7 @@
 //!
 //! Each `diff` sample is pushed into a 200-entry circular buffer.  The median
 //! of that buffer is used as the current offset — this is robust against
-//! transient network spikes (same approach as Snapcast).
+//! transient network spikes.
 //!
 //! ## Thread safety
 //!

@@ -44,9 +44,12 @@ async fn connect_and_run(addr: &str, cfg: &ClientConfig) -> anyhow::Result<()> {
     let hostname = hostname::get()
         .map(|h| h.to_string_lossy().to_string())
         .unwrap_or_else(|_| "sonium-client".into());
-    let client_id = format!("{}-1", hostname);
+    let display_name = cfg.client_name.as_deref().unwrap_or(&hostname);
+    let client_id    = format!("{}-1", hostname);
 
-    let hello = Message::Hello(Hello::new(&hostname, &client_id));
+    let mut hello_msg = Hello::new(display_name, &client_id);
+    hello_msg.hostname = display_name.to_owned();
+    let hello = Message::Hello(hello_msg);
     stream.write_all(&hello.encode()).await?;
     info!("Hello sent");
 
@@ -77,7 +80,7 @@ async fn connect_and_run(addr: &str, cfg: &ClientConfig) -> anyhow::Result<()> {
                         info!(codec = %ch.codec, "CodecHeader received");
                         let dec = ActiveDecoder::from_codec(&ch.codec, &ch.header_data)?;
                         let fmt = dec.sample_format();
-                        let p   = Player::new(fmt)?;
+                        let p   = Player::new(fmt, cfg.device.as_deref())?;
                         let buf = SyncBuffer::new(fmt, cfg.latency_ms.unsigned_abs() + 1000);
                         decoder  = Some(dec);
                         player   = Some(p);

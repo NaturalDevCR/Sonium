@@ -332,6 +332,12 @@ impl ServerState {
             .collect()
     }
 
+    /// Fast accessor for volume/mute — avoids cloning the full `ClientInfo`.
+    pub fn get_volume(&self, client_id: &str) -> Option<(u8, bool)> {
+        let clients = self.clients.read();
+        clients.get(client_id).map(|c| (c.volume, c.muted))
+    }
+
     pub fn get_client(&self, id: &str) -> Option<ClientInfo> {
         self.clients.read().get(id).cloned()
     }
@@ -342,6 +348,25 @@ impl ServerState {
 
     pub fn get_group(&self, id: &str) -> Option<Group> {
         self.groups.read().get(id).cloned()
+    }
+
+    /// Returns the stream_id currently assigned to a client's group.
+    pub fn client_stream_id(&self, client_id: &str) -> Option<String> {
+        let group_id = self.clients.read().get(client_id)?.group_id.clone();
+        let stream_id = self.groups.read().get(&group_id)?.stream_id.clone();
+        Some(stream_id)
+    }
+
+    /// Register a new stream in the state (idempotent — updates status if already exists).
+    pub fn register_stream(&self, id: impl Into<String>, codec: impl Into<String>, format: impl Into<String>) {
+        let id = id.into();
+        let mut streams = self.streams.write();
+        streams.entry(id.clone()).or_insert_with(|| StreamInfo {
+            id:     id.clone(),
+            codec:  codec.into(),
+            format: format.into(),
+            status: StreamStatus::Idle,
+        });
     }
 
     pub fn all_streams(&self) -> Vec<StreamInfo> {

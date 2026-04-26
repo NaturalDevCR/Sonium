@@ -11,3 +11,4 @@ thiserror       = { workspace = true }
 bytes           = { workspace = true }
 audiopus        = { workspace = true }
 claxon          = { workspace = true }
+flacenc         = { workspace = true }

@@ -1,13 +1,14 @@
 # Binary Protocol Reference
 
-Sonium implements the **Snapcast v2 binary protocol** over TCP.  This page is a
-complete specification suitable for implementing a third-party client or server.
+Sonium uses a **compact binary protocol** over TCP for audio streaming and
+clock synchronization.  This page is a complete specification suitable for
+implementing a third-party client or server.
 
 ## Connection lifecycle
 
 ```
 Client                                 Server
-  │── TCP connect :1704 ───────────────►│
+  │── TCP connect :1710 ───────────────►│
   │── Hello ──────────────────────────►│
   │◄── CodecHeader ────────────────────│
   │◄── ServerSettings ─────────────────│
@@ -164,10 +165,13 @@ Implementations **must** reject messages that violate these constraints:
 | Codec name length | ≤ 64 bytes |
 | JSON fields | UTF-8 encoded |
 
-## Snapcast compatibility notes
+## Snapcast compatibility
 
-- The protocol is **identical** to Snapcast v2.  A Snapcast client connects to
-  Sonium server without modification, and vice versa.
+Sonium's wire encoding is binary-compatible with the Snapcast v2 protocol.
+When configured with matching ports (`stream_port = 1704`, `control_port = 1780`)
+and `snapcast_compat = true`, legacy Snapcast clients can connect to a Sonium
+server without modification — useful as a migration path.
+
 - `SnapStreamProtocolVersion` in `Hello` must be `2`.
 - The server ignores unknown JSON fields in `Hello`, `ServerSettings`, and
   `ClientInfo` — forward-compatible.

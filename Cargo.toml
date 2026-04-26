@@ -9,6 +9,8 @@ members = [
     "server",
     "client",
 ]
+# fuzz/ is excluded from the normal workspace — run with: cargo +nightly fuzz run <target>
+exclude = ["fuzz"]
 
 [workspace.package]
 version = "0.1.0"
@@ -27,9 +29,16 @@ anyhow      = "1"
 rubato      = "0.15"
 audiopus    = "0.2"
 claxon      = "0.4"
+flacenc     = "0.5"
 mdns-sd     = "0.11"
 axum        = { version = "0.7", features = ["ws"] }
 tokio-tungstenite = "0.21"
 toml        = "0.8"
 uuid        = { version = "1", features = ["v4"] }
 chrono      = { version = "0.4", features = ["serde"] }
+clap        = { version = "4", features = ["derive", "env"] }
+rust-embed  = { version = "8", features = ["compression"] }
+mime_guess  = "2"
+cpal        = "0.15"
+argon2      = "0.5"
+jsonwebtoken = "9"

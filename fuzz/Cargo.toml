@@ -1,0 +1,31 @@
+[package]
+name    = "sonium-fuzz"
+version = "0.0.0"
+edition = "2021"
+publish = false
+
+[package.metadata]
+cargo-fuzz = true
+
+[dependencies]
+libfuzzer-sys    = "0.4"
+sonium-protocol  = { path = "../crates/protocol" }
+sonium-common    = { path = "../crates/common" }
+
+[[bin]]
+name = "fuzz_message_parser"
+path = "src/fuzz_message_parser.rs"
+test = false
+doc  = false
+
+[[bin]]
+name = "fuzz_wire_chunk"
+path = "src/fuzz_wire_chunk.rs"
+test = false
+doc  = false
+
+[[bin]]
+name = "fuzz_codec_header"
+path = "src/fuzz_codec_header.rs"
+test = false
+doc  = false

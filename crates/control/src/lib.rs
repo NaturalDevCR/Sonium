@@ -10,7 +10,7 @@
 //! - **[`api`]** — `axum` HTTP handlers for the REST control API.
 //! - **[`ws`]** — WebSocket event broadcaster (real-time push to web UI).
 //! - **[`discovery`]** — mDNS advertisement + subnet scanner for finding
-//!   Sonium/Snapcast-compatible clients on the network.
+//!   Sonium clients and servers on the network.
 
 pub mod state;
 pub mod api;

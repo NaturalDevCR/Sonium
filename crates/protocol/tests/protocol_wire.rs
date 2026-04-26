@@ -1,9 +1,9 @@
-//! Integration tests: parse known-good binary fixtures derived from the
-//! Snapcast v2 wire format specification.
+//! Integration tests: parse known-good binary fixtures for the
+//! Sonium binary protocol wire format.
 //!
 //! These tests verify that [`sonium_protocol`] produces and consumes bytes
-//! that are byte-identical to what a real Snapcast server or client would
-//! send, using hand-crafted little-endian byte sequences as ground truth.
+//! that match the exact wire specification (which happens to ensure 
+//! backward compatibility with legacy systems).
 
 use sonium_protocol::{
     MessageHeader, MessageType, Timestamp,
@@ -158,11 +158,10 @@ fn error_msg_code_and_message() {
     } else { panic!("expected Error"); }
 }
 
-// ── Snapcast binary fixture — hand-crafted known-good bytes ───────────────
+// ── Binary protocol fixture — hand-crafted known-good bytes ───────────────
 //
-// These bytes were computed from the Snapcast v2 wire format spec and
-// cross-checked against the C++ source.  They are the ground truth for
-// parser correctness.
+// These bytes were computed from the Sonium wire format spec.
+// They are the ground truth for parser correctness.
 
 /// A minimal `Time` request message:
 ///   type=4, id=1, refers_to=0, sent=(0,0), recv=(0,0), size=8

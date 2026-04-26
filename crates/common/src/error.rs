@@ -22,6 +22,9 @@ pub enum SoniumError {
 
     #[error("Unsupported codec: {0}")]
     UnsupportedCodec(String),
+
+    #[error("Audio error: {0}")]
+    Audio(String),
 }
 
 pub type Result<T> = std::result::Result<T, SoniumError>;

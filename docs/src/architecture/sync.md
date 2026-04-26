@@ -12,9 +12,8 @@ clearly audible echo effect.  The target is **< 1 ms** of desync.
 
 ## Current approach — NTP-like software sync
 
-Sonium uses the same algorithm as Snapcast: a lightweight NTP-inspired
-request–response loop that estimates the offset between the client clock and
-the server clock.
+Sonium uses a lightweight **NTP-inspired** request–response loop that estimates
+the offset between the client clock and the server clock.
 
 ### Exchange flow
 
@@ -75,8 +74,9 @@ excellent for most home setups.  However, modern Ethernet controllers support
 **IEEE 1588v2 (PTPv2) hardware timestamping**, which gives **nanosecond-level**
 accuracy — comparable to professional Dante/AES67 systems.
 
-> This feature was [requested for Snapcast](https://github.com/badaix/snapcast/issues/1478)
-> but has not been implemented.  Sonium is designed to support it.
+> Existing self-hosted multiroom solutions lack hardware clock support
+> ([example discussion](https://github.com/badaix/snapcast/issues/1478)).
+> Sonium is designed to support it natively.
 
 ### Why it matters
 

@@ -11,7 +11,7 @@ a single responsibility and can be tested in isolation.
 │                              │                              │
 │                       control API (Fase 7)                  │
 └─────────────────────────────────────────────────────────────┘
-           │ TCP :1704       │ HTTP :1780
+           │ TCP :1710       │ HTTP :1711
            ▼                 ▼
 ┌─────────────────┐   ┌──────────────────┐
 │  sonium-client  │   │  browser / app   │
@@ -81,5 +81,5 @@ TCP socket
    a reference-counted `Bytes` handle to every session.
 4. **Clock sync isolated** — `sonium-sync` has no I/O; it is pure computation,
    making it trivially unit-testable.
-5. **Snapcast-compatible by default** — protocol type IDs and payload formats
-   match Snapcast v2, enabling incremental migration.
+5. **Migration-friendly** — optional Snapcast compatibility mode lets existing
+   Snapcast clients connect during migration (see configuration docs).

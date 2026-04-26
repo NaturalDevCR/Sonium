@@ -1,6 +1,6 @@
 //! # sonium-protocol
 //!
-//! Binary wire protocol compatible with [Snapcast v2].
+//! Sonium's compact binary wire protocol for audio streaming and clock sync.
 //!
 //! ## Message framing
 //!
@@ -39,7 +39,14 @@
 //! [`Hello`]:          messages::Hello
 //! [`ClientInfo`]:     messages::ClientInfo
 //! [`ErrorMsg`]:       messages::ErrorMsg
-//! [Snapcast v2]: https://github.com/badaix/snapcast/blob/master/doc/binary_protocol.md
+//!
+//! ## Snapcast compatibility
+//!
+//! The wire encoding is compatible with Snapcast v2 clients when Sonium is
+//! configured with matching ports (`stream_port = 1704`) and
+//! `snapcast_compat = true`.  See the [Snapcast protocol spec] for reference.
+//!
+//! [Snapcast protocol spec]: https://github.com/badaix/snapcast/blob/master/doc/binary_protocol.md
 
 pub mod header;
 pub mod wire;

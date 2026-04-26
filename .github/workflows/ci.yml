@@ -41,7 +41,7 @@ jobs:
 
       - name: Install system dependencies (Linux)
         if: runner.os == 'Linux'
-        run: sudo apt-get update && sudo apt-get install -y libopus-dev
+        run: sudo apt-get update && sudo apt-get install -y libopus-dev libasound2-dev
 
       - name: Install system dependencies (macOS)
         if: runner.os == 'macOS'
@@ -56,8 +56,11 @@ jobs:
       - name: Build workspace
         run: cargo build --workspace
 
-      - name: Run tests
+      - name: Unit tests
         run: cargo test --workspace --lib --bins -- --test-threads=4
+
+      - name: Integration tests
+        run: cargo test --workspace --tests -- --test-threads=4
 
   # ── Lightweight compile-only check on Windows ───────────────────────────
   windows-check:
@@ -76,3 +79,40 @@ jobs:
           key: windows-cargo-${{ hashFiles('**/Cargo.lock') }}
       - name: Build
         run: cargo build --workspace
+
+  # ── Nightly fuzz (60-second smoke, catches regressions) ─────────────────
+  fuzz:
+    name: Fuzz smoke (Linux)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install nightly + cargo-fuzz
+        uses: dtolnay/rust-toolchain@nightly
+
+      - name: Cache
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry/index/
+            ~/.cargo/registry/cache/
+            target/
+          key: fuzz-cargo-${{ hashFiles('fuzz/Cargo.lock') }}
+
+      - name: Install system dependencies
+        run: sudo apt-get update && sudo apt-get install -y libopus-dev
+
+      - name: Install cargo-fuzz
+        run: cargo install cargo-fuzz --locked
+
+      - name: Fuzz message parser (60 s)
+        run: cargo +nightly fuzz run fuzz_message_parser -- -max_total_time=60
+        working-directory: ${{ github.workspace }}
+
+      - name: Fuzz wire chunk (60 s)
+        run: cargo +nightly fuzz run fuzz_wire_chunk -- -max_total_time=60
+        working-directory: ${{ github.workspace }}
+
+      - name: Fuzz codec header (60 s)
+        run: cargo +nightly fuzz run fuzz_codec_header -- -max_total_time=60
+        working-directory: ${{ github.workspace }}

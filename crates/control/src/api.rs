@@ -8,11 +8,11 @@ use axum::{
     extract::{Path, State, WebSocketUpgrade},
     http::StatusCode,
     response::{IntoResponse, Json, Response},
-    routing::{delete, get, patch, post},
+    routing::{delete, get, patch},
     Router,
 };
 use serde::{Deserialize, Serialize};
-use crate::state::{ServerState, StreamStatus};
+use crate::state::ServerState;
 
 /// Shared state injected by `axum`.
 pub type AppState = Arc<ServerState>;

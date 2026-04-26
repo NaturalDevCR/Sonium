@@ -19,7 +19,7 @@ ffmpeg -f lavfi -i "sine=frequency=440" -f s16le -ar 48000 -ac 2 - \
   | ./target/release/sonium-server
 
 # Connect a client (same machine or any host on the LAN)
-./target/release/sonium-client
+./target/release/sonium-client --discover
 ```
 
 ## Documentation
@@ -33,19 +33,21 @@ Full documentation: **[jdavidoa91.github.io/sonium](https://jdavidoa91.github.io
 
 ## Why Sonium?
 
-[Snapcast](https://github.com/badaix/snapcast) is the standard for self-hosted
-multiroom audio.  Sonium is a Rust rewrite that keeps full wire-protocol
-compatibility while adding:
+Sonium is a **next-generation** multiroom audio system built from scratch in Rust.
+It's designed for the modern home network: zero config, instant setup, and
+professional-grade synchronization — all without vendor lock-in.
 
 - **Zero required config** — works out of the box
-- **Built-in web UI** (Fase 7)
-- **mDNS auto-discovery** (Fase 8)
-- **Automatic reconnection**
-- **PTPv2 hardware clock support** (Fase 10) — nanosecond-accurate sync
+- **Built-in web UI** with drag-and-drop group management
+- **mDNS auto-discovery** — clients find the server automatically
+- **Automatic reconnection** with exponential backoff
+- **PTPv2 hardware clock support** (planned) — nanosecond-accurate sync on commodity hardware
+- **Multi-codec** — Opus, FLAC, and PCM out of the box
+- **Interoperable** — optional backward compatibility with Snapcast v2 clients for easy migration
 
 ## Status
 
-Early development — **Fase 0 complete**.  Not production-ready yet.
+Early development — core audio pipeline complete. Not production-ready yet.
 See the [roadmap](https://jdavidoa91.github.io/sonium/contributing/roadmap.html).
 
 ## License

@@ -94,6 +94,45 @@ pub fn parse_opus_codec_header(data: &[u8]) -> Result<(u32, u16, u16)> {
     Ok((rate, bits, channels))
 }
 
+/// Build a FLAC codec header for the Sonium wire protocol.
+///
+/// The header is a simplified FLAC STREAMINFO-like structure:
+///
+/// ```text
+/// u32  magic = 0x464C_4143  ('F','L','A','C' as little-endian u32)
+/// u32  sample_rate
+/// u16  bits_per_sample
+/// u16  channel_count
+/// u32  block_size  (samples per frame)
+/// ```
+pub fn flac_codec_header(rate: u32, bits: u16, channels: u16, block_size: u32) -> Vec<u8> {
+    let mut h = Vec::with_capacity(16);
+    h.extend_from_slice(&0x464C_4143u32.to_le_bytes()); // "FLAC"
+    h.extend_from_slice(&rate.to_le_bytes());
+    h.extend_from_slice(&bits.to_le_bytes());
+    h.extend_from_slice(&channels.to_le_bytes());
+    h.extend_from_slice(&block_size.to_le_bytes());
+    h
+}
+
+/// Parse a FLAC codec header and return `(rate, bits, channels, block_size)`.
+pub fn parse_flac_codec_header(data: &[u8]) -> Result<(u32, u16, u16, u32)> {
+    if data.len() < 16 {
+        return Err(sonium_common::SoniumError::Protocol("flac header too short".into()));
+    }
+    let magic = u32::from_le_bytes([data[0], data[1], data[2], data[3]]);
+    if magic != 0x464C_4143 {
+        return Err(sonium_common::SoniumError::Protocol(
+            format!("bad flac magic: {magic:#010x}"),
+        ));
+    }
+    let rate       = u32::from_le_bytes([data[4],  data[5],  data[6],  data[7]]);
+    let bits       = u16::from_le_bytes([data[8],  data[9]]);
+    let channels   = u16::from_le_bytes([data[10], data[11]]);
+    let block_size = u32::from_le_bytes([data[12], data[13], data[14], data[15]]);
+    Ok((rate, bits, channels, block_size))
+}
+
 // ─── Tests ───────────────────────────────────────────────────────────────────
 
 #[cfg(test)]

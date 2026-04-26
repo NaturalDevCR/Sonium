@@ -18,6 +18,7 @@
 - [Workspace Layout](./architecture/workspace.md)
 - [Clock Synchronization](./architecture/sync.md)
 - [Audio Pipeline](./architecture/pipeline.md)
+- [Web UI](./architecture/web-ui.md)
 
 ---
 

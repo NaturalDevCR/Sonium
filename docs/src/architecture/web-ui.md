@@ -1,0 +1,95 @@
+# Web UI
+
+Sonium ships a built-in admin UI served directly from the control port (`1711`).
+No separate process, no separate install — open a browser and you're done.
+
+## Technology stack
+
+| Layer | Choice | Reason |
+|---|---|---|
+| Framework | Vue 3 (Composition API) | Lightweight, reactive, no build-time SSR needed |
+| State | Pinia | Official Vue state library; simpler than Vuex |
+| Build | Vite 5 | Fast HMR in dev; single-bundle output for embedding |
+| Types | TypeScript | Shared type definitions with `lib/api.ts` |
+| Serving | Rust (`rust-embed`) | SPA assets baked into the binary; zero runtime dependencies |
+
+## Project layout
+
+```
+web/
+  index.html          Entry HTML
+  vite.config.ts      Vite + proxy config (dev → localhost:1711)
+  tsconfig.json
+  src/
+    main.ts           Mount Vue app, bootstrap store
+    App.vue           Root component (dashboard layout)
+    lib/
+      api.ts          REST client + WebSocket + TypeScript types
+    stores/
+      server.ts       Pinia store — mirrors ServerState from the Rust backend
+    components/
+      ClientCard.vue      Per-client: volume slider, mute, group picker
+      GroupCard.vue       Per-group: stream picker, client list, delete
+      StreamBadge.vue     Colored status pill
+      NewGroupModal.vue   Create-group dialog
+```
+
+## State architecture
+
+The Pinia store (`useServerStore`) is the single source of truth for all
+server-side state in the browser:
+
+```
+REST bootstrap (loadAll)
+       │
+       ▼
+┌──────────────────────┐
+│  useServerStore      │   clients[], groups[], streams[], uptime
+│  (Pinia)             │   connectedClients (computed)
+└──────────────────────┘   clientsById, streamsById (computed)
+       ▲
+       │ applyEvent(event)
+       │
+WebSocket (/api/events)
+```
+
+On startup `main.ts` calls `loadAll()` (REST snapshot) then
+`startLiveUpdates()` (WS subscription).  Every mutation that happens on the
+server is pushed as a typed JSON event and applied in-place — the UI never
+polls.
+
+Auto-reconnect: if the WebSocket closes, the store waits 3 seconds, re-fetches
+the full REST snapshot, and opens a new WebSocket connection.
+
+## Development workflow
+
+```bash
+cd web
+npm install
+npm run dev        # Vite dev server on :5173, proxies /api → :1711
+```
+
+The Vite proxy config (`vite.config.ts`) forwards all `/api` requests
+(including the WebSocket upgrade) to a running `sonium-server` on port `1711`.
+
+## Production build
+
+```bash
+cd web
+npm run build      # outputs to web/dist/
+```
+
+The Rust control server embeds the `web/dist/` directory at compile time using
+`rust-embed` (planned Fase 7).  Any request that does not match `/api/*` is
+served as the SPA `index.html` (catch-all SPA routing).
+
+## Features
+
+- **Dashboard** — live count of connected clients, groups, streams, server uptime
+- **Client cards** — volume slider (debounced 150 ms), mute toggle, group picker,
+  latency display; cards fade when client disconnects
+- **Group cards** — stream picker, connected client chips, delete button
+  (the built-in `default` group cannot be deleted)
+- **Streams panel** — codec, format, and live status for every configured stream
+- **New Group modal** — create a named group and assign a stream in one step
+- **Dark theme** — CSS custom properties, no external CSS framework

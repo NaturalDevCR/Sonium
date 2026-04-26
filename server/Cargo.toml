@@ -26,3 +26,7 @@ parking_lot     = "0.12"
 axum            = { workspace = true }
 uuid            = { workspace = true }
 hostname        = "0.4"
+clap            = { workspace = true }
+rust-embed      = { workspace = true }
+mime_guess      = { workspace = true }
+tokio-util = "0.7.18"

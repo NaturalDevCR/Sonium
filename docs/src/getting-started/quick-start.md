@@ -38,8 +38,8 @@ ffmpeg -f lavfi -i "sine=frequency=440:duration=3600" \
 Output:
 
 ```
-2024-01-15T12:00:00Z  INFO sonium_server: Sonium server starting stream_port=1704 control_port=1780 codec=opus format=48000Hz/16bit/2ch
-2024-01-15T12:00:00Z  INFO sonium_server: Listening on 0.0.0.0:1704
+2024-01-15T12:00:00Z  INFO sonium_server: Sonium server starting stream_port=1710 control_port=1711 codec=opus format=48000Hz/16bit/2ch
+2024-01-15T12:00:00Z  INFO sonium_server: Listening on 0.0.0.0:1710
 2024-01-15T12:00:00Z  INFO sonium_server::streamreader: Stream reader started — reading PCM from stdin
 ```
 
@@ -83,7 +83,7 @@ sonium-server --pipe /tmp/sonium.pcm
 Once the server is running, navigate to:
 
 ```
-http://<server-ip>:1780
+http://<server-ip>:1711
 ```
 
 > The web interface is planned for **Fase 7**.  In the current build this

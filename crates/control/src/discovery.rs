@@ -2,11 +2,12 @@
 //!
 //! ## mDNS (same-subnet, zero-config)
 //!
-//! The server calls [`advertise`] once on startup.  It registers two services:
+//! The server calls [`advertise`] once on startup.  It registers:
 //!
-//! - `_snapcast._tcp` (port 1704) — Snapcast-compatible clients find the server
-//! - `_sonium._tcp`   (port 1704) — future Sonium-native clients
-//! - `_sonium-http._tcp` (port 1780) — web UI / REST API
+//! - `_sonium._tcp`      — Sonium audio stream port
+//! - `_sonium-http._tcp` — web UI / REST API port
+//! - `_snapcast._tcp`    — only when `snapcast_compat = true` in config
+//!                         (allows legacy Snapcast clients to discover this server)
 //!
 //! Clients that call [`browse_servers`] will receive these advertisements
 //! and can auto-connect without manual IP configuration.
@@ -15,7 +16,7 @@
 //!
 //! For networks where mDNS is blocked (VLANs, corporate Wi-Fi), the web UI
 //! lets the admin specify CIDR ranges to probe.  [`scan_subnet`] connects to
-//! port 1704 on each host and checks for a valid `Hello` response.
+//! the Sonium stream port on each host and checks for a valid `Hello` response.
 
 use std::net::{IpAddr, Ipv4Addr, SocketAddr};
 use std::sync::Arc;
@@ -25,8 +26,6 @@ use tokio::net::TcpStream;
 use tokio::time::timeout;
 use tracing::{debug, info, warn};
 
-use crate::state::ServerState;
-
 const SNAPCAST_SVC:  &str = "_snapcast._tcp.local.";
 const SONIUM_SVC:    &str = "_sonium._tcp.local.";
 const SONIUM_HTTP:   &str = "_sonium-http._tcp.local.";
@@ -34,10 +33,13 @@ const SONIUM_HTTP:   &str = "_sonium-http._tcp.local.";
 /// Advertise the server on the local network via mDNS.
 ///
 /// This is a long-running task — spawn it with `tokio::spawn`.
+/// Set `snapcast_compat` to also register `_snapcast._tcp` so legacy
+/// Snapcast clients can discover this server.
 pub async fn advertise(
-    hostname:     &str,
-    stream_port:  u16,
-    control_port: u16,
+    hostname:        &str,
+    stream_port:     u16,
+    control_port:    u16,
+    snapcast_compat: bool,
 ) {
     let daemon = match ServiceDaemon::new() {
         Ok(d)  => d,
@@ -64,9 +66,12 @@ pub async fn advertise(
         }
     };
 
-    register(SNAPCAST_SVC,  stream_port);
-    register(SONIUM_SVC,    stream_port);
-    register(SONIUM_HTTP,   control_port);
+    register(SONIUM_SVC,  stream_port);
+    register(SONIUM_HTTP, control_port);
+    if snapcast_compat {
+        register(SNAPCAST_SVC, stream_port);
+        info!(stream_port, "mDNS: also advertising _snapcast._tcp for Snapcast client compatibility");
+    }
 
     info!(
         stream_port,
@@ -87,7 +92,7 @@ pub struct DiscoveredServer {
     pub service:  String,
 }
 
-/// Browse for Sonium/Snapcast servers on the local network.
+/// Browse for Sonium servers on the local network.
 ///
 /// Returns discovered servers as they appear.  Run this in a background task
 /// and send results through a channel.
@@ -119,9 +124,10 @@ pub async fn browse_servers(
                     Ok(event) => {
                         if let mdns_sd::ServiceEvent::ServiceResolved(info) = event {
                             for addr in info.get_addresses() {
+                                let ip = IpAddr::from(*addr);
                                 let _ = tx2.send(DiscoveredServer {
                                     hostname: info.get_hostname().to_string(),
-                                    addr:     IpAddr::V4(*addr),
+                                    addr:     ip,
                                     port:     info.get_port(),
                                     service:  svc.clone(),
                                 }).await;
@@ -142,14 +148,14 @@ pub async fn browse_servers(
 pub struct ScanResult {
     pub addr:        String,
     pub port:        u16,
-    /// `true` if the host responded with a valid Sonium/Snapcast port.
+    /// `true` if the host responded with a valid Sonium audio stream port.
     pub is_sonium:   bool,
 }
 
-/// Scan a CIDR range for Sonium/Snapcast-compatible servers or clients.
+/// Scan a CIDR range for Sonium-compatible servers.
 ///
 /// Probes each host in `cidr` (e.g. `"192.168.2.0/24"`) by attempting a
-/// TCP connection to `port` (default 1704).  Returns all reachable hosts.
+/// TCP connection to `port` (default `1710`).  Returns all reachable hosts.
 ///
 /// `concurrency` controls how many probes run simultaneously (default: 64).
 pub async fn scan_subnet(

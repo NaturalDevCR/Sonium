@@ -1,4 +1,4 @@
-//! 26-byte message header, shared by every Snapcast v2 message.
+//! 26-byte message header, shared by every Sonium protocol message.
 //!
 //! ## Wire layout (all fields little-endian)
 //!
@@ -220,7 +220,7 @@ mod tests {
 
     #[test]
     fn unknown_type_returns_error() {
-        // Type 6 is not assigned in the Snapcast protocol
+        // Type 6 is not assigned in the Sonium protocol
         assert!(MessageType::try_from(6u16).is_err());
         assert!(MessageType::try_from(9u16).is_err());
         assert!(MessageType::try_from(u16::MAX).is_err());

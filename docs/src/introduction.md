@@ -6,36 +6,41 @@ no cloud, no subscription, no configuration file required to get started.
 
 ## Why Sonium?
 
-[Snapcast](https://github.com/badaix/snapcast) is the standard for self-hosted
-multiroom audio.  Sonium is a spiritual successor that preserves full
-**wire-protocol compatibility** with Snapcast v2 while fixing the rough edges:
+Most self-hosted multiroom audio solutions were designed years ago and show it:
+manual configuration, brittle reconnection, no web interface, and architectures
+that don't take advantage of modern async runtimes or hardware clock capabilities.
+Sonium is built from scratch for correctness, performance, and ease of use:
 
-| | Snapcast | **Sonium** |
+| | Typical self-hosted | **Sonium** |
 |---|---|---|
-| Config to start | Required (`snapserver.conf`) | **Zero** — works out of the box |
+| Config to start | Required config files | **Zero** — works out of the box |
 | Auto-discovery | No | **mDNS built-in** |
-| Web interface | Third-party only | **Bundled** (Fase 7) |
+| Web interface | Third-party only | **Bundled** with drag-and-drop |
 | Reconnection | Manual restart | **Automatic** with backoff |
-| Installation | Build from source / apt | **Single static binary** (target) |
-| Language | C++ | **Rust** — memory-safe, cross-platform |
-| PTP clock support | Planned (open issue) | **Designed for it** (pluggable `TimeSource`) |
+| Installation | Build from source | **Single static binary** per platform |
+| Language | C / C++ | **Rust** — memory-safe, cross-platform |
+| Clock precision | Software only (~1 ms) | **PTP-ready** — pluggable `TimeSource` for nanosecond sync |
+| Codecs | Limited | **Opus + FLAC + PCM** out of the box |
+| Multi-stream | One global stream | **Per-group streams** with live switching |
 
 ## Key features
 
-- **Snapcast-compatible** — connect existing Snapcast clients to Sonium server and vice versa during migration.
-- **Zero required config** — `sonium-server` runs immediately. Point a browser at `http://server:1780` and you're done.
+- **Zero required config** — `sonium-server` runs immediately. Point a browser at `http://server:1711` and you're done.
+- **Multi-codec** — Opus for bandwidth efficiency, FLAC for lossless quality, PCM for zero-latency.
 - **Tokio async** — handles hundreds of clients on a Raspberry Pi without threads-per-client overhead.
 - **Pluggable clock sync** — NTP-like software sync today, PTPv2 hardware timestamping tomorrow.
 - **Single binary per role** — `sonium-server` and `sonium-client`, each under 10 MB stripped.
+- **Snapcast migration path** — optional compatibility mode lets existing Snapcast clients connect
+  to a Sonium server during migration (see [configuration](./getting-started/configuration.md)).
 
 ## Current status
 
-Sonium is in active early development.  The wire protocol and clock-sync crates
-are feature-complete and tested.  The audio playback path (CPAL integration) is
-targeted for **Fase 4** of the roadmap.
+Sonium is in active early development. The wire protocol, clock-sync, and codec
+crates are feature-complete and tested. The full audio playback path with CPAL
+integration is functional.
 
-> **Not production-ready yet.** Use Snapcast for production deployments until
-> Sonium reaches its Fase 4 milestone.
+> **Not production-ready yet.** Sonium is approaching its first stable release.
+> Follow the [roadmap](./contributing/roadmap.md) for progress.
 
 ## Quick look
 
@@ -43,8 +48,8 @@ targeted for **Fase 4** of the roadmap.
 # Start the server — streams PCM from stdin
 ffmpeg -f lavfi -i "sine=frequency=440" -f s16le -ar 48000 -ac 2 - | sonium-server
 
-# On any client machine
-sonium-client --server 192.168.1.100
+# On any client machine — auto-discover the server
+sonium-client --discover
 ```
 
 See the [Quick Start](./getting-started/quick-start.md) for a full walkthrough.
