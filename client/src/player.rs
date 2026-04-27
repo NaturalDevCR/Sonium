@@ -217,7 +217,10 @@ fn try_open_stream(
                 move |data: &mut [i16], _: &cpal::OutputCallbackInfo| {
                     let mut ring = ring.lock().unwrap();
                     for sample in data.iter_mut() {
-                        *sample = ring.pop_front().map(|s| fade.feed(s)).unwrap_or_else(|| fade.drain());
+                        *sample = ring
+                            .pop_front()
+                            .map(|s| fade.feed(s))
+                            .unwrap_or_else(|| fade.drain());
                     }
                 },
                 err_fn,
@@ -232,7 +235,10 @@ fn try_open_stream(
                 move |data: &mut [u16], _: &cpal::OutputCallbackInfo| {
                     let mut ring = ring.lock().unwrap();
                     for sample in data.iter_mut() {
-                        let s16 = ring.pop_front().map(|s| fade.feed(s)).unwrap_or_else(|| fade.drain());
+                        let s16 = ring
+                            .pop_front()
+                            .map(|s| fade.feed(s))
+                            .unwrap_or_else(|| fade.drain());
                         *sample = (s16 as i32 + 32768) as u16;
                     }
                 },
@@ -248,7 +254,10 @@ fn try_open_stream(
                 move |data: &mut [f32], _: &cpal::OutputCallbackInfo| {
                     let mut ring = ring.lock().unwrap();
                     for sample in data.iter_mut() {
-                        let s16 = ring.pop_front().map(|s| fade.feed(s)).unwrap_or_else(|| fade.drain());
+                        let s16 = ring
+                            .pop_front()
+                            .map(|s| fade.feed(s))
+                            .unwrap_or_else(|| fade.drain());
                         *sample = s16 as f32 / 32768.0;
                     }
                 },
