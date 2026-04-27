@@ -15,11 +15,16 @@ FIFO_PATH="${SONIUM_FIFO:-/tmp/sonium.fifo}"
 STREAM_PORT="${SONIUM_STREAM_PORT:-1710}"
 CONTROL_PORT="${SONIUM_CONTROL_PORT:-1711}"
 
-# Detect if we are in an interactive terminal
+# Detect if we can be interactive
 if [[ -t 0 ]]; then
   INTERACTIVE=true
+  TTY_PATH="/dev/stdin"
+elif [[ -c /dev/tty ]]; then
+  INTERACTIVE=true
+  TTY_PATH="/dev/tty"
 else
   INTERACTIVE=false
+  TTY_PATH="/dev/null"
 fi
 
 while [[ $# -gt 0 ]]; do
@@ -73,7 +78,7 @@ check_dependencies() {
     if ! command -v ffmpeg >/dev/null 2>&1; then
       warn "ffmpeg is recommended to feed audio streams to sonium-server."
       if [[ "${INTERACTIVE}" == "true" ]]; then
-        read -p "  -> Install ffmpeg now? [Y/n] " -n 1 -r
+        read -p "  -> Install ffmpeg now? [Y/n] " -n 1 -r < "$TTY_PATH"
         echo
         if [[ $REPLY =~ ^[Yy]$ ]] || [[ -z $REPLY ]]; then
           install_pkg ffmpeg
@@ -86,7 +91,7 @@ check_dependencies() {
     if ! dpkg -l libasound2 >/dev/null 2>&1; then
       info "sonium-client requires libasound2 for audio output."
       if [[ "${INTERACTIVE}" == "true" ]]; then
-        read -p "  -> Install libasound2? [Y/n] " -n 1 -r
+        read -p "  -> Install libasound2? [Y/n] " -n 1 -r < "$TTY_PATH"
         echo
         if [[ $REPLY =~ ^[Yy]$ ]] || [[ -z $REPLY ]]; then
           install_pkg libasound2
@@ -102,7 +107,7 @@ do_uninstall() {
   echo
   
   if [[ "${INTERACTIVE}" == "true" ]]; then
-    read -p "  -> This will remove Sonium from your system. Continue? [y/N] " -n 1 -r
+    read -p "  -> This will remove Sonium from your system. Continue? [y/N] " -n 1 -r < "$TTY_PATH"
     echo
     if [[ ! $REPLY =~ ^[Yy]$ ]]; then
       die "Aborted."
@@ -133,7 +138,7 @@ do_uninstall() {
 
   if [[ -d "${CONF_DIR}" ]]; then
     if [[ "${INTERACTIVE}" == "true" ]]; then
-      read -p "  -> Delete configuration directory ${CONF_DIR}? [y/N] " -n 1 -r
+      read -p "  -> Delete configuration directory ${CONF_DIR}? [y/N] " -n 1 -r < "$TTY_PATH"
       echo
       if [[ $REPLY =~ ^[Yy]$ ]]; then
         rm -rf "${CONF_DIR}"
@@ -145,7 +150,7 @@ do_uninstall() {
   fi
 
   if [[ "${INTERACTIVE}" == "true" ]]; then
-    read -p "  -> Uninstall system dependencies (ffmpeg, libasound2)? [y/N] " -n 1 -r
+    read -p "  -> Uninstall system dependencies (ffmpeg, libasound2)? [y/N] " -n 1 -r < "$TTY_PATH"
     echo
     if [[ $REPLY =~ ^[Yy]$ ]]; then
       info "To safely remove unused dependencies, run: apt-get autoremove"
@@ -178,7 +183,7 @@ if [[ "${INTERACTIVE}" == "true" ]]; then
   echo "  1) Full (Server + Client) [Default]"
   echo "  2) Server only"
   echo "  3) Client only"
-  read -p "Selection [1-3]: " -n 1 -r
+  read -p "Selection [1-3]: " -n 1 -r < "$TTY_PATH"
   echo
   case "$REPLY" in
     2) INSTALL_CLIENT=false ;;
