@@ -6,12 +6,21 @@ REPO="${SONIUM_REPO:-NaturalDevCR/Sonium}"
 VERSION="${SONIUM_VERSION:-latest}"
 PREFIX="${PREFIX:-/usr/local}"
 INSTALL_SERVICE=true
+INSTALL_SERVER=true
 INSTALL_CLIENT=true
+UNINSTALL=false
 SONIUM_USER="${SONIUM_USER:-sonium}"
 CONF_DIR="${SONIUM_CONFIG_DIR:-/etc/sonium}"
 FIFO_PATH="${SONIUM_FIFO:-/tmp/sonium.fifo}"
 STREAM_PORT="${SONIUM_STREAM_PORT:-1710}"
 CONTROL_PORT="${SONIUM_CONTROL_PORT:-1711}"
+
+# Detect if we are in an interactive terminal
+if [[ -t 0 ]]; then
+  INTERACTIVE=true
+else
+  INTERACTIVE=false
+fi
 
 while [[ $# -gt 0 ]]; do
   case "$1" in
@@ -20,6 +29,8 @@ while [[ $# -gt 0 ]]; do
     --repo) REPO="$2"; shift 2 ;;
     --no-service) INSTALL_SERVICE=false; shift ;;
     --server-only) INSTALL_CLIENT=false; shift ;;
+    --client-only) INSTALL_SERVER=false; shift ;;
+    --uninstall) UNINSTALL=true; shift ;;
     -h|--help)
       cat <<EOF
 Sonium Linux installer
@@ -33,7 +44,9 @@ Options:
   --repo OWNER/REPO
   --prefix DIR    Install into DIR/bin
   --no-service    Install binaries and config only
-  --server-only   Skip sonium-client
+  --server-only   Install only sonium-server
+  --client-only   Install only sonium-client
+  --uninstall     Remove Sonium from this system
 EOF
       exit 0
       ;;
@@ -42,8 +55,107 @@ EOF
 done
 
 info() { printf '  \033[34m->\033[0m %s\n' "$*"; }
+warn() { printf '  \033[33m!!\033[0m %s\n' "$*"; }
 ok() { printf '  \033[32mOK\033[0m %s\n' "$*"; }
 die() { printf '  \033[31mERR\033[0m %s\n' "$*" >&2; exit 1; }
+
+install_pkg() {
+  local pkg="$1"
+  if ! dpkg -l "$pkg" >/dev/null 2>&1; then
+    info "Installing system dependency: $pkg"
+    apt-get update -y >/dev/null
+    apt-get install -y "$pkg" >/dev/null || warn "Could not install $pkg. You may need to install it manually."
+  fi
+}
+
+check_dependencies() {
+  if [[ "${INSTALL_SERVER}" == "true" ]]; then
+    if ! command -v ffmpeg >/dev/null 2>&1; then
+      warn "ffmpeg is recommended to feed audio streams to sonium-server."
+      if [[ "${INTERACTIVE}" == "true" ]]; then
+        read -p "  -> Install ffmpeg now? [Y/n] " -n 1 -r
+        echo
+        if [[ $REPLY =~ ^[Yy]$ ]] || [[ -z $REPLY ]]; then
+          install_pkg ffmpeg
+        fi
+      fi
+    fi
+  fi
+
+  if [[ "${INSTALL_CLIENT}" == "true" ]]; then
+    if ! dpkg -l libasound2 >/dev/null 2>&1; then
+      info "sonium-client requires libasound2 for audio output."
+      if [[ "${INTERACTIVE}" == "true" ]]; then
+        read -p "  -> Install libasound2? [Y/n] " -n 1 -r
+        echo
+        if [[ $REPLY =~ ^[Yy]$ ]] || [[ -z $REPLY ]]; then
+          install_pkg libasound2
+        fi
+      fi
+    fi
+  fi
+}
+
+do_uninstall() {
+  echo
+  echo "Sonium Uninstaller"
+  echo
+  
+  if [[ "${INTERACTIVE}" == "true" ]]; then
+    read -p "  -> This will remove Sonium from your system. Continue? [y/N] " -n 1 -r
+    echo
+    if [[ ! $REPLY =~ ^[Yy]$ ]]; then
+      die "Aborted."
+    fi
+  fi
+
+  if [[ -d /run/systemd/system ]] && systemctl is-active --quiet sonium-server; then
+    info "Stopping sonium-server.service"
+    systemctl stop sonium-server
+  fi
+
+  if [[ -f /etc/systemd/system/sonium-server.service ]]; then
+    systemctl disable sonium-server >/dev/null 2>&1 || true
+    rm -f /etc/systemd/system/sonium-server.service
+    systemctl daemon-reload
+    ok "Removed systemd service"
+  fi
+
+  rm -f "${BIN_DIR}/sonium-server" "${BIN_DIR}/sonium-client"
+  ok "Removed binaries from ${BIN_DIR}"
+
+  if id "${SONIUM_USER}" >/dev/null 2>&1; then
+    userdel "${SONIUM_USER}" 2>/dev/null || true
+    ok "Removed system user ${SONIUM_USER}"
+  fi
+
+  rm -f "${FIFO_PATH}"
+
+  if [[ -d "${CONF_DIR}" ]]; then
+    if [[ "${INTERACTIVE}" == "true" ]]; then
+      read -p "  -> Delete configuration directory ${CONF_DIR}? [y/N] " -n 1 -r
+      echo
+      if [[ $REPLY =~ ^[Yy]$ ]]; then
+        rm -rf "${CONF_DIR}"
+        ok "Deleted ${CONF_DIR}"
+      else
+        info "Kept ${CONF_DIR}"
+      fi
+    fi
+  fi
+
+  if [[ "${INTERACTIVE}" == "true" ]]; then
+    read -p "  -> Uninstall system dependencies (ffmpeg, libasound2)? [y/N] " -n 1 -r
+    echo
+    if [[ $REPLY =~ ^[Yy]$ ]]; then
+      info "To safely remove unused dependencies, run: apt-get autoremove"
+    fi
+  fi
+
+  echo
+  ok "Sonium has been uninstalled."
+  exit 0
+}
 
 if [[ "$(uname -s)" != "Linux" ]]; then
   die "This installer is for Linux. Download macOS/Windows packages from GitHub Releases."
@@ -52,6 +164,30 @@ fi
 if [[ "${EUID}" -ne 0 ]]; then
   die "Run as root, for example: curl ... | sudo bash"
 fi
+
+BIN_DIR="${PREFIX}/bin"
+
+if [[ "${UNINSTALL}" == "true" ]]; then
+  do_uninstall
+fi
+
+if [[ "${INTERACTIVE}" == "true" ]]; then
+  echo
+  echo "Sonium Installer"
+  echo "Select components to install:"
+  echo "  1) Full (Server + Client) [Default]"
+  echo "  2) Server only"
+  echo "  3) Client only"
+  read -p "Selection [1-3]: " -n 1 -r
+  echo
+  case "$REPLY" in
+    2) INSTALL_CLIENT=false ;;
+    3) INSTALL_SERVER=false ;;
+    *) ;;
+  esac
+fi
+
+check_dependencies
 
 case "$(uname -m)" in
   x86_64|amd64) PACKAGE_ARCH="linux-x86_64" ;;
@@ -87,27 +223,30 @@ PACKAGE_DIR="$(find "${TMP_DIR}" -maxdepth 1 -type d -name 'sonium-*' | head -n 
 [[ -n "${PACKAGE_DIR}" ]] || die "Release archive did not contain a sonium package directory"
 
 install -d "${BIN_DIR}"
-install -m 0755 "${PACKAGE_DIR}/sonium-server" "${BIN_DIR}/sonium-server"
+if [[ "${INSTALL_SERVER}" == "true" ]]; then
+  install -m 0755 "${PACKAGE_DIR}/sonium-server" "${BIN_DIR}/sonium-server"
+fi
 if [[ "${INSTALL_CLIENT}" == "true" ]]; then
   install -m 0755 "${PACKAGE_DIR}/sonium-client" "${BIN_DIR}/sonium-client"
 fi
 ok "Installed binaries to ${BIN_DIR}"
 
-if ! id "${SONIUM_USER}" >/dev/null 2>&1; then
-  useradd --system --no-create-home --shell /usr/sbin/nologin "${SONIUM_USER}"
-  ok "Created system user ${SONIUM_USER}"
-fi
+if [[ "${INSTALL_SERVER}" == "true" ]]; then
+  if ! id "${SONIUM_USER}" >/dev/null 2>&1; then
+    useradd --system --no-create-home --shell /usr/sbin/nologin "${SONIUM_USER}"
+    ok "Created system user ${SONIUM_USER}"
+  fi
 
-install -d -m 0755 -o "${SONIUM_USER}" "${CONF_DIR}"
+  install -d -m 0755 -o "${SONIUM_USER}" "${CONF_DIR}"
 
-if [[ ! -p "${FIFO_PATH}" ]]; then
-  rm -f "${FIFO_PATH}"
-  mkfifo "${FIFO_PATH}"
-fi
-chown "${SONIUM_USER}" "${FIFO_PATH}" 2>/dev/null || true
+  if [[ ! -p "${FIFO_PATH}" ]]; then
+    rm -f "${FIFO_PATH}"
+    mkfifo "${FIFO_PATH}"
+  fi
+  chown "${SONIUM_USER}" "${FIFO_PATH}" 2>/dev/null || true
 
-if [[ ! -f "${CONF_DIR}/sonium.toml" ]]; then
-  cat > "${CONF_DIR}/sonium.toml" <<EOF
+  if [[ ! -f "${CONF_DIR}/sonium.toml" ]]; then
+    cat > "${CONF_DIR}/sonium.toml" <<EOF
 [server]
 bind = "0.0.0.0"
 stream_port = ${STREAM_PORT}
@@ -126,14 +265,14 @@ silence_on_idle = true
 [log]
 level = "info"
 EOF
-  chown "${SONIUM_USER}" "${CONF_DIR}/sonium.toml" 2>/dev/null || true
-  ok "Wrote ${CONF_DIR}/sonium.toml"
-else
-  info "${CONF_DIR}/sonium.toml already exists; leaving it untouched"
-fi
+    chown "${SONIUM_USER}" "${CONF_DIR}/sonium.toml" 2>/dev/null || true
+    ok "Wrote ${CONF_DIR}/sonium.toml"
+  else
+    info "${CONF_DIR}/sonium.toml already exists; leaving it untouched"
+  fi
 
-if [[ "${INSTALL_SERVICE}" == "true" && -d /run/systemd/system && -x "$(command -v systemctl)" ]]; then
-  cat > /etc/systemd/system/sonium-server.service <<EOF
+  if [[ "${INSTALL_SERVICE}" == "true" && -d /run/systemd/system && -x "$(command -v systemctl)" ]]; then
+    cat > /etc/systemd/system/sonium-server.service <<EOF
 [Unit]
 Description=Sonium multiroom audio server
 After=network-online.target
@@ -154,11 +293,12 @@ ReadWritePaths=${CONF_DIR} /tmp
 WantedBy=multi-user.target
 EOF
 
-  systemctl daemon-reload
-  systemctl enable --now sonium-server
-  ok "Enabled and started sonium-server.service"
-else
-  info "Skipping systemd service"
+    systemctl daemon-reload
+    systemctl enable --now sonium-server
+    ok "Enabled and started sonium-server.service"
+  else
+    info "Skipping systemd service"
+  fi
 fi
 
 HOST_IP="$(hostname -I 2>/dev/null | awk '{print $1}')"
@@ -167,15 +307,26 @@ HOST_IP="$(hostname -I 2>/dev/null | awk '{print $1}')"
 cat <<EOF
 
 Sonium is installed.
+EOF
+
+if [[ "${INSTALL_SERVER}" == "true" ]]; then
+  cat <<EOF
 
 Server UI:
   http://${HOST_IP}:${CONTROL_PORT}
 
 Feed audio into the server:
   ffmpeg -re -i song.flac -f s16le -ar 48000 -ac 2 - > ${FIFO_PATH}
+EOF
+fi
+
+if [[ "${INSTALL_CLIENT}" == "true" ]]; then
+  cat <<EOF
 
 Run a client:
   sonium-client --discover
   sonium-client ${HOST_IP}
-
 EOF
+fi
+
+echo
