@@ -9,10 +9,10 @@
 //! - [`SyncBuffer`] — jitter buffer that releases PCM chunks at their scheduled playout time.
 //! - [`PcmChunk`] — a decoded audio chunk with its playout timestamp.
 
+pub mod buffer;
 pub mod time_provider;
 pub mod time_source;
-pub mod buffer;
 
+pub use buffer::{PcmChunk, SyncBuffer};
 pub use time_provider::TimeProvider;
-pub use time_source::{TimeSource, NtpTimeSource};
-pub use buffer::{SyncBuffer, PcmChunk};
+pub use time_source::{NtpTimeSource, TimeSource};

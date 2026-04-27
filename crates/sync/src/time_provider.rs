@@ -32,7 +32,7 @@ use std::sync::Arc;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 const SAMPLE_BUFFER_SIZE: usize = 200;
-const STALE_TIMEOUT_SECS: u64   = 60;
+const STALE_TIMEOUT_SECS: u64 = 60;
 
 /// Estimates the signed offset between the local clock and the server clock.
 ///
@@ -42,7 +42,7 @@ const STALE_TIMEOUT_SECS: u64   = 60;
 pub struct TimeProvider {
     /// Median-filtered offset in microseconds (server - local).
     offset_us: Arc<AtomicI64>,
-    samples:   parking_lot::Mutex<SampleBuffer>,
+    samples: parking_lot::Mutex<SampleBuffer>,
     last_sync: parking_lot::Mutex<Option<Instant>>,
 }
 
@@ -54,7 +54,11 @@ struct SampleBuffer {
 
 impl SampleBuffer {
     fn new() -> Self {
-        Self { buf: [0i64; SAMPLE_BUFFER_SIZE], len: 0, pos: 0 }
+        Self {
+            buf: [0i64; SAMPLE_BUFFER_SIZE],
+            len: 0,
+            pos: 0,
+        }
     }
 
     fn push(&mut self, v: i64) {
@@ -89,7 +93,7 @@ impl TimeProvider {
     pub fn new() -> Self {
         Self {
             offset_us: Arc::new(AtomicI64::new(0)),
-            samples:   parking_lot::Mutex::new(SampleBuffer::new()),
+            samples: parking_lot::Mutex::new(SampleBuffer::new()),
             last_sync: parking_lot::Mutex::new(None),
         }
     }
@@ -101,9 +105,9 @@ impl TimeProvider {
     /// - `t_recv_us`        — local clock when the server echo was received
     /// - `server_latency_us` — `(t_server_recv - t_client_sent)` as reported by the server
     pub fn update(&self, t_sent_us: i64, t_recv_us: i64, server_latency_us: i64) {
-        let rtt_us  = t_recv_us - t_sent_us;
-        let c2s_us  = server_latency_us;
-        let s2c_us  = rtt_us.saturating_sub(c2s_us);
+        let rtt_us = t_recv_us - t_sent_us;
+        let c2s_us = server_latency_us;
+        let s2c_us = rtt_us.saturating_sub(c2s_us);
         let diff_us = (c2s_us - s2c_us) / 2;
 
         let mut buf = self.samples.lock();
@@ -138,7 +142,7 @@ impl TimeProvider {
     /// `true` if no sync has been received in the last 60 seconds.
     pub fn is_stale(&self) -> bool {
         match *self.last_sync.lock() {
-            None    => true,
+            None => true,
             Some(t) => t.elapsed() > Duration::from_secs(STALE_TIMEOUT_SECS),
         }
     }
@@ -160,7 +164,9 @@ impl TimeProvider {
 }
 
 impl Default for TimeProvider {
-    fn default() -> Self { Self::new() }
+    fn default() -> Self {
+        Self::new()
+    }
 }
 
 /// Current wall-clock time in microseconds since the UNIX epoch.
@@ -221,7 +227,11 @@ mod tests {
         // One massive outlier
         tp.update(0, 10_000, 9_999);
         // Median of 200 samples still very close to 0
-        assert!(tp.offset_us().abs() < 500, "outlier leaked: {}", tp.offset_us());
+        assert!(
+            tp.offset_us().abs() < 500,
+            "outlier leaked: {}",
+            tp.offset_us()
+        );
     }
 
     /// Offset converges within 100 samples (not just at 200).

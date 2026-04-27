@@ -4,11 +4,11 @@
 //! The file is small (< 10 KB for typical deployments) so synchronous disk I/O
 //! is fine; we never call this on the hot audio path.
 
-use std::path::{Path, PathBuf};
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
-use tracing::{info, warn};
 use sonium_protocol::messages::EqBand;
+use std::path::{Path, PathBuf};
+use tracing::{info, warn};
 
 const STATE_FILE: &str = "sonium-state.json";
 const CURRENT_VERSION: u32 = 1;
@@ -17,32 +17,32 @@ const CURRENT_VERSION: u32 = 1;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct PersistedGroup {
-    pub id:        String,
-    pub name:      String,
+    pub id: String,
+    pub name: String,
     pub stream_id: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct PersistedClient {
-    pub id:           String,
-    pub hostname:     String,
+    pub id: String,
+    pub hostname: String,
     /// Optional display name set by the operator (overrides hostname in the UI).
     #[serde(default)]
     pub display_name: Option<String>,
-    pub volume:       u8,
-    pub muted:        bool,
-    pub latency_ms:   i32,
-    pub group_id:     String,
-    pub last_seen:    DateTime<Utc>,
+    pub volume: u8,
+    pub muted: bool,
+    pub latency_ms: i32,
+    pub group_id: String,
+    pub last_seen: DateTime<Utc>,
     /// Per-client EQ bands (empty = flat).
     #[serde(default)]
-    pub eq_bands:     Vec<EqBand>,
+    pub eq_bands: Vec<EqBand>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 struct StateFile {
     version: u32,
-    groups:  Vec<PersistedGroup>,
+    groups: Vec<PersistedGroup>,
     clients: Vec<PersistedClient>,
 }
 
@@ -59,7 +59,9 @@ pub struct PersistenceStore {
 impl PersistenceStore {
     /// Create a store pointing at `<config_dir>/sonium-state.json`.
     pub fn new(config_dir: &Path) -> Self {
-        Self { path: config_dir.join(STATE_FILE) }
+        Self {
+            path: config_dir.join(STATE_FILE),
+        }
     }
 
     /// Load persisted state from disk.  Returns an empty state if the file
@@ -95,7 +97,7 @@ impl PersistenceStore {
     pub fn save(&self, groups: &[PersistedGroup], clients: &[PersistedClient]) {
         let file = StateFile {
             version: CURRENT_VERSION,
-            groups:  groups.to_vec(),
+            groups: groups.to_vec(),
             clients: clients.to_vec(),
         };
         match serde_json::to_string_pretty(&file) {

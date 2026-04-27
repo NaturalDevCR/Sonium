@@ -9,15 +9,15 @@ use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
-use sha2::{Digest, Sha256};
 use argon2::{
+    password_hash::{rand_core::OsRng, PasswordHash, PasswordHasher, PasswordVerifier, SaltString},
     Argon2,
-    password_hash::{PasswordHash, PasswordHasher, PasswordVerifier, SaltString, rand_core::OsRng},
 };
-use jsonwebtoken::{DecodingKey, EncodingKey, Header, Validation, decode, encode};
+use jsonwebtoken::{decode, encode, DecodingKey, EncodingKey, Header, Validation};
 use parking_lot::RwLock;
 use rand::distributions::{Alphanumeric, DistString};
 use serde::{Deserialize, Serialize};
+use sha2::{Digest, Sha256};
 use tracing::{info, warn};
 use uuid::Uuid;
 
@@ -37,43 +37,47 @@ pub enum Role {
 impl std::fmt::Display for Role {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            Role::Admin    => write!(f, "admin"),
+            Role::Admin => write!(f, "admin"),
             Role::Operator => write!(f, "operator"),
-            Role::Viewer   => write!(f, "viewer"),
+            Role::Viewer => write!(f, "viewer"),
         }
     }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct User {
-    pub id:            String,
-    pub username:      String,
+    pub id: String,
+    pub username: String,
     #[serde(skip_serializing)]
     pub password_hash: String,
-    pub role:          Role,
+    pub role: Role,
 }
 
 /// Public view of a user (no password hash).
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct UserView {
-    pub id:       String,
+    pub id: String,
     pub username: String,
-    pub role:     Role,
+    pub role: Role,
 }
 
 impl From<&User> for UserView {
     fn from(u: &User) -> Self {
-        UserView { id: u.id.clone(), username: u.username.clone(), role: u.role.clone() }
+        UserView {
+            id: u.id.clone(),
+            username: u.username.clone(),
+            role: u.role.clone(),
+        }
     }
 }
 
 /// JWT claims payload.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Claims {
-    pub sub:      String,   // user id
+    pub sub: String, // user id
     pub username: String,
-    pub role:     String,
-    pub exp:      usize,
+    pub role: String,
+    pub exp: usize,
 }
 
 // ── Serialisation shim for the users file ────────────────────────────────
@@ -87,19 +91,19 @@ struct UsersFile {
 
 #[derive(Serialize, Deserialize)]
 struct UserRecord {
-    id:            String,
-    username:      String,
+    id: String,
+    username: String,
     password_hash: String,
-    role:          Role,
+    role: Role,
 }
 
 // ── UserStore ─────────────────────────────────────────────────────────────
 
 pub struct UserStore {
-    users:      RwLock<HashMap<String, User>>,
+    users: RwLock<HashMap<String, User>>,
     jwt_secret: RwLock<String>,
-    file_path:  PathBuf,
-    revoked:    RwLock<HashSet<String>>,
+    file_path: PathBuf,
+    revoked: RwLock<HashSet<String>>,
 }
 
 impl UserStore {
@@ -108,10 +112,10 @@ impl UserStore {
     pub fn load_or_init(config_dir: &Path) -> Arc<Self> {
         let file_path = config_dir.join("users.json");
         let store = Arc::new(Self {
-            users:      RwLock::new(HashMap::new()),
+            users: RwLock::new(HashMap::new()),
             jwt_secret: RwLock::new(Self::generate_secret()),
-            file_path:  file_path.clone(),
-            revoked:    RwLock::new(HashSet::new()),
+            file_path: file_path.clone(),
+            revoked: RwLock::new(HashSet::new()),
         });
 
         if file_path.exists() {
@@ -126,16 +130,12 @@ impl UserStore {
             let password = Alphanumeric.sample_string(&mut rand::thread_rng(), 16);
             store.create_user_internal("admin", &password, Role::Admin);
             let _ = store.persist();
-            warn!(
-                "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
-            );
+            warn!("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━");
             warn!(" No users found — created default admin account.");
             warn!(" Username: admin");
             warn!(" Password: {password}");
             warn!(" Change this immediately in the web UI → /admin/users");
-            warn!(
-                "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
-            );
+            warn!("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━");
         }
         // Ensure older users.json files gain a persistent JWT secret.
         let _ = store.persist();
@@ -155,23 +155,31 @@ impl UserStore {
         }
         let mut map = self.users.write();
         for r in file.users {
-            map.insert(r.id.clone(), User {
-                id:            r.id,
-                username:      r.username,
-                password_hash: r.password_hash,
-                role:          r.role,
-            });
+            map.insert(
+                r.id.clone(),
+                User {
+                    id: r.id,
+                    username: r.username,
+                    password_hash: r.password_hash,
+                    role: r.role,
+                },
+            );
         }
         Ok(())
     }
 
     fn persist(&self) -> anyhow::Result<()> {
-        let records: Vec<UserRecord> = self.users.read().values().map(|u| UserRecord {
-            id:            u.id.clone(),
-            username:      u.username.clone(),
-            password_hash: u.password_hash.clone(),
-            role:          u.role.clone(),
-        }).collect();
+        let records: Vec<UserRecord> = self
+            .users
+            .read()
+            .values()
+            .map(|u| UserRecord {
+                id: u.id.clone(),
+                username: u.username.clone(),
+                password_hash: u.password_hash.clone(),
+                role: u.role.clone(),
+            })
+            .collect();
         let file = UsersFile {
             users: records,
             jwt_secret: Some(self.jwt_secret.read().clone()),
@@ -191,15 +199,19 @@ impl UserStore {
     }
 
     fn verify_password(password: &str, hash: &str) -> bool {
-        let Ok(parsed) = PasswordHash::new(hash) else { return false; };
-        Argon2::default().verify_password(password.as_bytes(), &parsed).is_ok()
+        let Ok(parsed) = PasswordHash::new(hash) else {
+            return false;
+        };
+        Argon2::default()
+            .verify_password(password.as_bytes(), &parsed)
+            .is_ok()
     }
 
     fn create_user_internal(&self, username: &str, password: &str, role: Role) -> User {
         let hash = Self::hash_password(password).expect("argon2 hash failed");
         let user = User {
-            id:            Uuid::new_v4().to_string(),
-            username:      username.to_owned(),
+            id: Uuid::new_v4().to_string(),
+            username: username.to_owned(),
             password_hash: hash,
             role,
         };
@@ -215,7 +227,10 @@ impl UserStore {
 
     pub fn authenticate(&self, username: &str, password: &str) -> Option<User> {
         let users = self.users.read();
-        users.values().find(|u| u.username == username && Self::verify_password(password, &u.password_hash)).cloned()
+        users
+            .values()
+            .find(|u| u.username == username && Self::verify_password(password, &u.password_hash))
+            .cloned()
     }
 
     pub fn create_token(&self, user: &User, ttl_hours: u64) -> String {
@@ -223,19 +238,21 @@ impl UserStore {
         let exp = SystemTime::now()
             .duration_since(UNIX_EPOCH)
             .unwrap()
-            .as_secs() as usize + (ttl_hours * 3600) as usize;
+            .as_secs() as usize
+            + (ttl_hours * 3600) as usize;
 
         let claims = Claims {
-            sub:      user.id.clone(),
+            sub: user.id.clone(),
             username: user.username.clone(),
-            role:     user.role.to_string(),
+            role: user.role.to_string(),
             exp,
         };
         encode(
             &Header::default(),
             &claims,
             &EncodingKey::from_secret(self.jwt_secret.read().as_bytes()),
-        ).expect("JWT encode failed")
+        )
+        .expect("JWT encode failed")
     }
 
     fn token_hash(token: &str) -> String {
@@ -257,7 +274,9 @@ impl UserStore {
             token,
             &DecodingKey::from_secret(self.jwt_secret.read().as_bytes()),
             &Validation::default(),
-        ).ok().map(|d| d.claims)
+        )
+        .ok()
+        .map(|d| d.claims)
     }
 
     pub fn all_users(&self) -> Vec<UserView> {
@@ -283,7 +302,9 @@ impl UserStore {
     pub fn update_user(&self, id: &str, role: Option<Role>, new_password: Option<&str>) -> bool {
         let mut users = self.users.write();
         if let Some(u) = users.get_mut(id) {
-            if let Some(r) = role       { u.role = r; }
+            if let Some(r) = role {
+                u.role = r;
+            }
             if let Some(p) = new_password {
                 u.password_hash = Self::hash_password(p).expect("hash failed");
             }

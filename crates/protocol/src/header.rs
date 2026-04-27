@@ -26,21 +26,21 @@ pub const HEADER_SIZE: usize = 26;
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum MessageType {
     /// Unused base type.
-    Base          = 0,
+    Base = 0,
     /// Codec initialisation data — sent once per stream.
-    CodecHeader   = 1,
+    CodecHeader = 1,
     /// One encoded audio frame with its playout timestamp.
-    WireChunk     = 2,
+    WireChunk = 2,
     /// Server-side volume, mute, and buffer settings.
     ServerSettings = 3,
     /// NTP-like clock synchronisation request/response.
-    Time          = 4,
+    Time = 4,
     /// Client greeting — first message after TCP connect.
-    Hello         = 5,
+    Hello = 5,
     /// Volume or mute change initiated by the client.
-    ClientInfo    = 7,
+    ClientInfo = 7,
     /// Error notification from the server.
-    ErrorMsg      = 8,
+    ErrorMsg = 8,
 }
 
 impl TryFrom<u16> for MessageType {
@@ -63,14 +63,14 @@ impl TryFrom<u16> for MessageType {
 impl std::fmt::Display for MessageType {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         let s = match self {
-            Self::Base           => "Base",
-            Self::CodecHeader    => "CodecHeader",
-            Self::WireChunk      => "WireChunk",
+            Self::Base => "Base",
+            Self::CodecHeader => "CodecHeader",
+            Self::WireChunk => "WireChunk",
             Self::ServerSettings => "ServerSettings",
-            Self::Time           => "Time",
-            Self::Hello          => "Hello",
-            Self::ClientInfo     => "ClientInfo",
-            Self::ErrorMsg       => "Error",
+            Self::Time => "Time",
+            Self::Hello => "Hello",
+            Self::ClientInfo => "ClientInfo",
+            Self::ErrorMsg => "Error",
         };
         f.write_str(s)
     }
@@ -92,8 +92,13 @@ impl Timestamp {
     /// Capture the current wall-clock time.
     pub fn now() -> Self {
         use std::time::{SystemTime, UNIX_EPOCH};
-        let d = SystemTime::now().duration_since(UNIX_EPOCH).unwrap_or_default();
-        Self { sec: d.as_secs() as i32, usec: d.subsec_micros() as i32 }
+        let d = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap_or_default();
+        Self {
+            sec: d.as_secs() as i32,
+            usec: d.subsec_micros() as i32,
+        }
     }
 
     /// Convert to a single microsecond value (since the Unix epoch).
@@ -104,7 +109,7 @@ impl Timestamp {
     /// Reconstruct from a microsecond value.
     pub fn from_micros(us: i64) -> Self {
         Self {
-            sec:  (us / 1_000_000) as i32,
+            sec: (us / 1_000_000) as i32,
             usec: (us % 1_000_000) as i32,
         }
     }
@@ -120,15 +125,15 @@ impl std::fmt::Display for Timestamp {
 #[derive(Debug, Clone)]
 pub struct MessageHeader {
     /// Payload type.
-    pub msg_type:     MessageType,
+    pub msg_type: MessageType,
     /// Monotonically increasing sender sequence number.
-    pub id:           u16,
+    pub id: u16,
     /// For replies: the `id` of the message being answered.
-    pub refers_to:    u16,
+    pub refers_to: u16,
     /// Wall-clock time when the message was sent.
-    pub sent:         Timestamp,
+    pub sent: Timestamp,
     /// Wall-clock time when the message was received (filled by the receiver).
-    pub received:     Timestamp,
+    pub received: Timestamp,
     /// Number of payload bytes that follow this header.
     pub payload_size: u32,
 }
@@ -153,24 +158,31 @@ impl MessageHeader {
     pub fn from_bytes(b: &[u8]) -> sonium_common::error::Result<Self> {
         if b.len() < HEADER_SIZE {
             return Err(SoniumError::Protocol(format!(
-                "header too short: {} < {HEADER_SIZE}", b.len()
+                "header too short: {} < {HEADER_SIZE}",
+                b.len()
             )));
         }
-        let msg_type     = MessageType::try_from(u16::from_le_bytes([b[0],  b[1]]))?;
-        let id           = u16::from_le_bytes([b[2],  b[3]]);
-        let refers_to    = u16::from_le_bytes([b[4],  b[5]]);
-        let sent_sec     = i32::from_le_bytes([b[6],  b[7],  b[8],  b[9]]);
-        let sent_usec    = i32::from_le_bytes([b[10], b[11], b[12], b[13]]);
-        let recv_sec     = i32::from_le_bytes([b[14], b[15], b[16], b[17]]);
-        let recv_usec    = i32::from_le_bytes([b[18], b[19], b[20], b[21]]);
+        let msg_type = MessageType::try_from(u16::from_le_bytes([b[0], b[1]]))?;
+        let id = u16::from_le_bytes([b[2], b[3]]);
+        let refers_to = u16::from_le_bytes([b[4], b[5]]);
+        let sent_sec = i32::from_le_bytes([b[6], b[7], b[8], b[9]]);
+        let sent_usec = i32::from_le_bytes([b[10], b[11], b[12], b[13]]);
+        let recv_sec = i32::from_le_bytes([b[14], b[15], b[16], b[17]]);
+        let recv_usec = i32::from_le_bytes([b[18], b[19], b[20], b[21]]);
         let payload_size = u32::from_le_bytes([b[22], b[23], b[24], b[25]]);
 
         Ok(Self {
             msg_type,
             id,
             refers_to,
-            sent:     Timestamp { sec: sent_sec,  usec: sent_usec },
-            received: Timestamp { sec: recv_sec,  usec: recv_usec },
+            sent: Timestamp {
+                sec: sent_sec,
+                usec: sent_usec,
+            },
+            received: Timestamp {
+                sec: recv_sec,
+                usec: recv_usec,
+            },
             payload_size,
         })
     }
@@ -202,13 +214,13 @@ mod tests {
     fn message_type_round_trip_all_variants() {
         let variants = [
             (0u16, MessageType::Base),
-            (1,    MessageType::CodecHeader),
-            (2,    MessageType::WireChunk),
-            (3,    MessageType::ServerSettings),
-            (4,    MessageType::Time),
-            (5,    MessageType::Hello),
-            (7,    MessageType::ClientInfo),
-            (8,    MessageType::ErrorMsg),
+            (1, MessageType::CodecHeader),
+            (2, MessageType::WireChunk),
+            (3, MessageType::ServerSettings),
+            (4, MessageType::Time),
+            (5, MessageType::Hello),
+            (7, MessageType::ClientInfo),
+            (8, MessageType::ErrorMsg),
         ];
         for (raw, expected) in variants {
             let got = MessageType::try_from(raw).expect("should parse");
@@ -230,10 +242,13 @@ mod tests {
 
     #[test]
     fn timestamp_micros_round_trip() {
-        let ts = Timestamp { sec: 1_700_000_000, usec: 123_456 };
+        let ts = Timestamp {
+            sec: 1_700_000_000,
+            usec: 123_456,
+        };
         let us = ts.to_micros();
         let back = Timestamp::from_micros(us);
-        assert_eq!(back.sec,  ts.sec);
+        assert_eq!(back.sec, ts.sec);
         assert_eq!(back.usec, ts.usec);
     }
 
@@ -255,22 +270,28 @@ mod tests {
     #[test]
     fn header_encode_decode_round_trip() {
         let hdr = MessageHeader {
-            msg_type:     MessageType::WireChunk,
-            id:           42,
-            refers_to:    0,
-            sent:         Timestamp { sec: 1_700_000_000, usec: 123_456 },
-            received:     Timestamp { sec: 1_700_000_000, usec: 200_000 },
+            msg_type: MessageType::WireChunk,
+            id: 42,
+            refers_to: 0,
+            sent: Timestamp {
+                sec: 1_700_000_000,
+                usec: 123_456,
+            },
+            received: Timestamp {
+                sec: 1_700_000_000,
+                usec: 200_000,
+            },
             payload_size: 512,
         };
         let bytes = hdr.to_bytes();
         assert_eq!(bytes.len(), HEADER_SIZE);
 
         let parsed = MessageHeader::from_bytes(&bytes).unwrap();
-        assert_eq!(parsed.msg_type,     MessageType::WireChunk);
-        assert_eq!(parsed.id,           42);
-        assert_eq!(parsed.refers_to,    0);
-        assert_eq!(parsed.sent.sec,     1_700_000_000);
-        assert_eq!(parsed.sent.usec,    123_456);
+        assert_eq!(parsed.msg_type, MessageType::WireChunk);
+        assert_eq!(parsed.id, 42);
+        assert_eq!(parsed.refers_to, 0);
+        assert_eq!(parsed.sent.sec, 1_700_000_000);
+        assert_eq!(parsed.sent.usec, 123_456);
         assert_eq!(parsed.received.sec, 1_700_000_000);
         assert_eq!(parsed.received.usec, 200_000);
         assert_eq!(parsed.payload_size, 512);
@@ -287,9 +308,9 @@ mod tests {
             MessageType::ClientInfo,
             MessageType::ErrorMsg,
         ] {
-            let hdr   = MessageHeader::new(t, 0);
+            let hdr = MessageHeader::new(t, 0);
             let bytes = hdr.to_bytes();
-            let back  = MessageHeader::from_bytes(&bytes).unwrap();
+            let back = MessageHeader::from_bytes(&bytes).unwrap();
             assert_eq!(back.msg_type, t);
         }
     }
@@ -304,21 +325,21 @@ mod tests {
     fn header_little_endian_byte_order() {
         // type = 2 (WireChunk) → bytes [0x02, 0x00]
         let hdr = MessageHeader::new(MessageType::WireChunk, 0);
-        let b   = hdr.to_bytes();
+        let b = hdr.to_bytes();
         assert_eq!(b[0], 0x02, "type LSB");
         assert_eq!(b[1], 0x00, "type MSB");
     }
 
     #[test]
     fn header_payload_size_zero() {
-        let hdr  = MessageHeader::new(MessageType::Hello, 0);
+        let hdr = MessageHeader::new(MessageType::Hello, 0);
         let back = MessageHeader::from_bytes(&hdr.to_bytes()).unwrap();
         assert_eq!(back.payload_size, 0);
     }
 
     #[test]
     fn header_max_payload_size() {
-        let hdr  = MessageHeader::new(MessageType::WireChunk, u32::MAX);
+        let hdr = MessageHeader::new(MessageType::WireChunk, u32::MAX);
         let back = MessageHeader::from_bytes(&hdr.to_bytes()).unwrap();
         assert_eq!(back.payload_size, u32::MAX);
     }

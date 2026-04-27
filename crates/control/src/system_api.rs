@@ -4,12 +4,12 @@ use std::path::Path;
 use std::sync::Arc;
 
 use axum::{
-    Router,
     extract::{Path as AxumPath, Request, State},
-    http::{StatusCode, header},
+    http::{header, StatusCode},
     middleware::{self, Next},
     response::{IntoResponse, Json, Response},
     routing::{get, post},
+    Router,
 };
 use serde::Serialize;
 use tokio::process::Command;
@@ -22,8 +22,14 @@ pub fn router(store: Arc<UserStore>) -> Router {
     Router::new()
         .route("/system/info", get(get_system_info))
         .route("/system/logs", get(get_logs))
-        .route("/system/dependencies/:id/:action", post(post_dependency_action))
-        .layer(middleware::from_fn_with_state(store.clone(), require_admin_auth))
+        .route(
+            "/system/dependencies/:id/:action",
+            post(post_dependency_action),
+        )
+        .layer(middleware::from_fn_with_state(
+            store.clone(),
+            require_admin_auth,
+        ))
         .with_state(store)
 }
 
@@ -84,16 +90,35 @@ async fn get_system_info() -> Json<SystemInfo> {
     let package_manager = detect_package_manager().await;
     let audio_stack = detect_audio_stack().await;
     let deps = [
-        ("ffmpeg", "FFmpeg", "ffmpeg", "Decode files, radio streams, devices, TCP wrappers"),
-        ("shairport-sync", "Shairport Sync", "shairport-sync", "AirPlay receiver source"),
+        (
+            "ffmpeg",
+            "FFmpeg",
+            "ffmpeg",
+            "Decode files, radio streams, devices, TCP wrappers",
+        ),
+        (
+            "shairport-sync",
+            "Shairport Sync",
+            "shairport-sync",
+            "AirPlay receiver source",
+        ),
         ("mpd", "MPD", "mpd", "Music Player Daemon FIFO source"),
-        ("librespot", "librespot", "librespot", "Spotify Connect source"),
+        (
+            "librespot",
+            "librespot",
+            "librespot",
+            "Spotify Connect source",
+        ),
     ];
 
     let mut dependencies = Vec::new();
     for (id, label, binary, purpose) in deps {
         let installed = command_exists(binary).await;
-        let version = if installed { version_of(binary).await } else { None };
+        let version = if installed {
+            version_of(binary).await
+        } else {
+            None
+        };
         dependencies.push(DependencyInfo {
             id: id.to_owned(),
             label: label.to_owned(),
@@ -130,7 +155,9 @@ async fn get_logs() -> Response {
                     return ([(header::CONTENT_TYPE, "text/plain; charset=utf-8")], logs)
                         .into_response();
                 }
-                Err(e) => return (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()).into_response(),
+                Err(e) => {
+                    return (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()).into_response()
+                }
             }
         }
     }
@@ -159,11 +186,12 @@ async fn get_logs() -> Response {
         .into_response()
 }
 
-async fn post_dependency_action(
-    AxumPath((id, action)): AxumPath<(String, String)>,
-) -> Response {
+async fn post_dependency_action(AxumPath((id, action)): AxumPath<(String, String)>) -> Response {
     let Some(package_manager) = detect_package_manager().await else {
-        return (StatusCode::UNPROCESSABLE_ENTITY, "No supported package manager detected")
+        return (
+            StatusCode::UNPROCESSABLE_ENTITY,
+            "No supported package manager detected",
+        )
             .into_response();
     };
 
@@ -180,7 +208,12 @@ async fn post_dependency_action(
         .collect::<Vec<_>>()
         .join(" ");
 
-    match timeout(Duration::from_secs(180), Command::new(&spec.program).args(&spec.args).output()).await {
+    match timeout(
+        Duration::from_secs(180),
+        Command::new(&spec.program).args(&spec.args).output(),
+    )
+    .await
+    {
         Ok(Ok(output)) => Json(DependencyActionResult {
             command: command_label,
             success: output.status.success(),
@@ -290,7 +323,10 @@ fn package_command(manager: &str, action: &str, package: &str) -> Option<Command
         ("brew", "update") => ("brew", vec!["upgrade", pkg]),
         ("brew", "remove") => ("brew", vec!["uninstall", pkg]),
         ("apt", "install") => ("sudo", vec!["-n", "apt-get", "install", "-y", pkg]),
-        ("apt", "update") => ("sudo", vec!["-n", "apt-get", "install", "--only-upgrade", "-y", pkg]),
+        ("apt", "update") => (
+            "sudo",
+            vec!["-n", "apt-get", "install", "--only-upgrade", "-y", pkg],
+        ),
         ("apt", "remove") => ("sudo", vec!["-n", "apt-get", "remove", "-y", pkg]),
         ("dnf", "install") => ("sudo", vec!["-n", "dnf", "install", "-y", pkg]),
         ("dnf", "update") => ("sudo", vec!["-n", "dnf", "upgrade", "-y", pkg]),
@@ -298,9 +334,18 @@ fn package_command(manager: &str, action: &str, package: &str) -> Option<Command
         ("pacman", "install") => ("sudo", vec!["-n", "pacman", "-S", "--noconfirm", pkg]),
         ("pacman", "update") => ("sudo", vec!["-n", "pacman", "-Syu", "--noconfirm", pkg]),
         ("pacman", "remove") => ("sudo", vec!["-n", "pacman", "-R", "--noconfirm", pkg]),
-        ("zypper", "install") => ("sudo", vec!["-n", "zypper", "--non-interactive", "install", pkg]),
-        ("zypper", "update") => ("sudo", vec!["-n", "zypper", "--non-interactive", "update", pkg]),
-        ("zypper", "remove") => ("sudo", vec!["-n", "zypper", "--non-interactive", "remove", pkg]),
+        ("zypper", "install") => (
+            "sudo",
+            vec!["-n", "zypper", "--non-interactive", "install", pkg],
+        ),
+        ("zypper", "update") => (
+            "sudo",
+            vec!["-n", "zypper", "--non-interactive", "update", pkg],
+        ),
+        ("zypper", "remove") => (
+            "sudo",
+            vec!["-n", "zypper", "--non-interactive", "remove", pkg],
+        ),
         _ => return None,
     };
 

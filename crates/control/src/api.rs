@@ -3,20 +3,19 @@
 //! Mount with [`router`] inside the server's `axum` application.
 //! All handlers share [`AppState`] via `axum::extract::State`.
 
-use std::sync::Arc;
-use axum::{
-    Extension,
-    extract::{Path, Query, Request, State, WebSocketUpgrade},
-    http::{StatusCode, header},
-    middleware::{self, Next},
-    response::{IntoResponse, Json, Response},
-    routing::{delete, get, patch, post},
-    Router,
-};
-use serde::{Deserialize, Serialize};
 use crate::auth::UserStore;
 use crate::auth_api::AuthUser;
 use crate::state::ServerState;
+use axum::{
+    extract::{Path, Query, Request, State, WebSocketUpgrade},
+    http::{header, StatusCode},
+    middleware::{self, Next},
+    response::{IntoResponse, Json, Response},
+    routing::{delete, get, patch, post},
+    Extension, Router,
+};
+use serde::{Deserialize, Serialize};
+use std::sync::Arc;
 
 /// Shared state injected by `axum`.
 pub type AppState = Arc<ServerState>;
@@ -32,26 +31,26 @@ pub type AppState = Arc<ServerState>;
 pub fn router(state: AppState) -> Router {
     // Any authenticated user (viewer+)
     let read_routes = Router::new()
-        .route("/status",          get(get_status))
-        .route("/clients",         get(get_clients))
-        .route("/groups",          get(get_groups))
-        .route("/streams",         get(get_streams))
-        .route("/events",          get(ws_handler))   // WS: also accepts ?token=
+        .route("/status", get(get_status))
+        .route("/clients", get(get_clients))
+        .route("/groups", get(get_groups))
+        .route("/streams", get(get_streams))
+        .route("/events", get(ws_handler)) // WS: also accepts ?token=
         .layer(middleware::from_fn(require_viewer));
 
     // Operator or admin only
     let write_routes = Router::new()
-        .route("/clients/:id/volume",  patch(patch_volume))
+        .route("/clients/:id/volume", patch(patch_volume))
         .route("/clients/:id/latency", patch(patch_latency))
-        .route("/clients/:id/group",   patch(patch_client_group))
-        .route("/clients/:id/name",    patch(patch_client_name))
-        .route("/clients/:id/eq",      patch(patch_client_eq))
-        .route("/clients/:id",         delete(delete_client))
-        .route("/groups",              post(post_group))
-        .route("/groups/:id",          delete(delete_group))
-        .route("/groups/:id",          patch(patch_group))
-        .route("/groups/:id/stream",   patch(patch_group_stream))
-        .route("/discover/scan",       get(get_discover_scan))
+        .route("/clients/:id/group", patch(patch_client_group))
+        .route("/clients/:id/name", patch(patch_client_name))
+        .route("/clients/:id/eq", patch(patch_client_eq))
+        .route("/clients/:id", delete(delete_client))
+        .route("/groups", post(post_group))
+        .route("/groups/:id", delete(delete_group))
+        .route("/groups/:id", patch(patch_group))
+        .route("/groups/:id/stream", patch(patch_group_stream))
+        .route("/discover/scan", get(get_discover_scan))
         .layer(middleware::from_fn(require_operator));
 
     Router::new()
@@ -83,7 +82,10 @@ async fn require_viewer(
     mut req: Request,
     next: Next,
 ) -> Response {
-    match extract_token(&req).as_deref().and_then(|t| auth.verify_token(t)) {
+    match extract_token(&req)
+        .as_deref()
+        .and_then(|t| auth.verify_token(t))
+    {
         Some(claims) => {
             req.extensions_mut().insert(AuthUser(claims));
             next.run(req).await
@@ -97,13 +99,16 @@ async fn require_operator(
     mut req: Request,
     next: Next,
 ) -> Response {
-    match extract_token(&req).as_deref().and_then(|t| auth.verify_token(t)) {
+    match extract_token(&req)
+        .as_deref()
+        .and_then(|t| auth.verify_token(t))
+    {
         Some(claims) if matches!(claims.role.as_str(), "admin" | "operator") => {
             req.extensions_mut().insert(AuthUser(claims));
             next.run(req).await
         }
         Some(_) => (StatusCode::FORBIDDEN, "operator or admin role required").into_response(),
-        None    => (StatusCode::UNAUTHORIZED, "missing or invalid token").into_response(),
+        None => (StatusCode::UNAUTHORIZED, "missing or invalid token").into_response(),
     }
 }
 
@@ -111,20 +116,20 @@ async fn require_operator(
 
 #[derive(Serialize)]
 struct StatusResponse {
-    version:   &'static str,
-    uptime_s:  i64,
-    clients:   usize,
-    groups:    usize,
-    streams:   usize,
+    version: &'static str,
+    uptime_s: i64,
+    clients: usize,
+    groups: usize,
+    streams: usize,
 }
 
 async fn get_status(State(s): State<AppState>) -> Json<StatusResponse> {
     Json(StatusResponse {
-        version:  env!("CARGO_PKG_VERSION"),
+        version: env!("CARGO_PKG_VERSION"),
         uptime_s: s.uptime_secs(),
-        clients:  s.all_clients().len(),
-        groups:   s.all_groups().len(),
-        streams:  s.all_streams().len(),
+        clients: s.all_clients().len(),
+        groups: s.all_groups().len(),
+        streams: s.all_streams().len(),
     })
 }
 
@@ -135,7 +140,10 @@ async fn get_clients(State(s): State<AppState>) -> impl IntoResponse {
 }
 
 #[derive(Deserialize)]
-struct VolumeBody { volume: u8, muted: bool }
+struct VolumeBody {
+    volume: u8,
+    muted: bool,
+}
 
 async fn patch_volume(
     State(s): State<AppState>,
@@ -144,12 +152,14 @@ async fn patch_volume(
 ) -> Response {
     match s.set_volume(&id, body.volume, body.muted) {
         Some(_) => StatusCode::NO_CONTENT.into_response(),
-        None    => StatusCode::NOT_FOUND.into_response(),
+        None => StatusCode::NOT_FOUND.into_response(),
     }
 }
 
 #[derive(Deserialize)]
-struct LatencyBody { latency_ms: i32 }
+struct LatencyBody {
+    latency_ms: i32,
+}
 
 async fn patch_latency(
     State(s): State<AppState>,
@@ -164,7 +174,9 @@ async fn patch_latency(
 }
 
 #[derive(Deserialize)]
-struct GroupAssignBody { group_id: String }
+struct GroupAssignBody {
+    group_id: String,
+}
 
 async fn patch_client_group(
     State(s): State<AppState>,
@@ -179,7 +191,9 @@ async fn patch_client_group(
 }
 
 #[derive(Deserialize)]
-struct ClientNameBody { display_name: Option<String> }
+struct ClientNameBody {
+    display_name: Option<String>,
+}
 
 async fn patch_client_name(
     State(s): State<AppState>,
@@ -194,7 +208,9 @@ async fn patch_client_name(
 }
 
 #[derive(Deserialize)]
-struct EqBody { bands: Vec<sonium_protocol::messages::EqBand> }
+struct EqBody {
+    bands: Vec<sonium_protocol::messages::EqBand>,
+}
 
 async fn patch_client_eq(
     State(s): State<AppState>,
@@ -208,10 +224,7 @@ async fn patch_client_eq(
     }
 }
 
-async fn delete_client(
-    State(s): State<AppState>,
-    Path(id): Path<String>,
-) -> Response {
+async fn delete_client(State(s): State<AppState>, Path(id): Path<String>) -> Response {
     if s.delete_client(&id) {
         StatusCode::NO_CONTENT.into_response()
     } else {
@@ -226,10 +239,15 @@ async fn get_groups(State(s): State<AppState>) -> impl IntoResponse {
 }
 
 #[derive(Deserialize)]
-struct CreateGroupBody { name: String, stream_id: String }
+struct CreateGroupBody {
+    name: String,
+    stream_id: String,
+}
 
 #[derive(Serialize)]
-struct CreateGroupResponse { id: String }
+struct CreateGroupResponse {
+    id: String,
+}
 
 async fn post_group(
     State(s): State<AppState>,
@@ -239,10 +257,7 @@ async fn post_group(
     (StatusCode::CREATED, Json(CreateGroupResponse { id }))
 }
 
-async fn delete_group(
-    State(s): State<AppState>,
-    Path(id): Path<String>,
-) -> Response {
+async fn delete_group(State(s): State<AppState>, Path(id): Path<String>) -> Response {
     if s.delete_group(&id) {
         StatusCode::NO_CONTENT.into_response()
     } else {
@@ -251,7 +266,9 @@ async fn delete_group(
 }
 
 #[derive(Deserialize)]
-struct RenameGroupBody { name: String }
+struct RenameGroupBody {
+    name: String,
+}
 
 async fn patch_group(
     State(s): State<AppState>,
@@ -266,7 +283,9 @@ async fn patch_group(
 }
 
 #[derive(Deserialize)]
-struct StreamAssignBody { stream_id: String }
+struct StreamAssignBody {
+    stream_id: String,
+}
 
 async fn patch_group_stream(
     State(s): State<AppState>,
@@ -289,7 +308,9 @@ struct ScanQuery {
     port: u16,
 }
 
-fn default_scan_port() -> u16 { 1710 }
+fn default_scan_port() -> u16 {
+    1710
+}
 
 async fn get_discover_scan(Query(q): Query<ScanQuery>) -> impl IntoResponse {
     let results = crate::discovery::scan_subnet(&q.cidr, q.port, 64).await;
@@ -304,17 +325,11 @@ async fn get_streams(State(s): State<AppState>) -> impl IntoResponse {
 
 // ── WebSocket events ──────────────────────────────────────────────────────
 
-async fn ws_handler(
-    ws:    WebSocketUpgrade,
-    State(s): State<AppState>,
-) -> Response {
+async fn ws_handler(ws: WebSocketUpgrade, State(s): State<AppState>) -> Response {
     ws.on_upgrade(move |socket| handle_ws(socket, s))
 }
 
-async fn handle_ws(
-    mut socket: axum::extract::ws::WebSocket,
-    state:      AppState,
-) {
+async fn handle_ws(mut socket: axum::extract::ws::WebSocket, state: AppState) {
     use axum::extract::ws::Message as WsMsg;
     let mut rx = state.events().subscribe();
 

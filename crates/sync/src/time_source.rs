@@ -52,7 +52,9 @@ pub struct NtpTimeSource {
 impl NtpTimeSource {
     /// Create a new source with a zeroed offset (not yet synced).
     pub fn new() -> Self {
-        Self { provider: TimeProvider::new() }
+        Self {
+            provider: TimeProvider::new(),
+        }
     }
 
     /// Access the underlying provider to feed RTT measurements into it.
@@ -62,7 +64,9 @@ impl NtpTimeSource {
 }
 
 impl Default for NtpTimeSource {
-    fn default() -> Self { Self::new() }
+    fn default() -> Self {
+        Self::new()
+    }
 }
 
 impl TimeSource for NtpTimeSource {

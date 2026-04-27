@@ -1,18 +1,18 @@
-pub mod hello;
-pub mod server_settings;
 pub mod client_info;
 pub mod codec_header;
-pub mod wire_chunk;
-pub mod time;
 pub mod error;
+pub mod hello;
+pub mod server_settings;
+pub mod time;
+pub mod wire_chunk;
 
-pub use hello::Hello;
-pub use server_settings::{EqBand, ServerSettings};
 pub use client_info::ClientInfo;
 pub use codec_header::CodecHeader;
-pub use wire_chunk::WireChunk;
-pub use time::TimeMsg;
 pub use error::ErrorMsg;
+pub use hello::Hello;
+pub use server_settings::{EqBand, ServerSettings};
+pub use time::TimeMsg;
+pub use wire_chunk::WireChunk;
 
 use crate::header::{MessageHeader, MessageType, HEADER_SIZE};
 use sonium_common::SoniumError;
@@ -32,27 +32,29 @@ pub enum Message {
 impl Message {
     pub fn message_type(&self) -> MessageType {
         match self {
-            Self::Hello(_)          => MessageType::Hello,
+            Self::Hello(_) => MessageType::Hello,
             Self::ServerSettings(_) => MessageType::ServerSettings,
-            Self::ClientInfo(_)     => MessageType::ClientInfo,
-            Self::CodecHeader(_)    => MessageType::CodecHeader,
-            Self::WireChunk(_)      => MessageType::WireChunk,
-            Self::Time(_)           => MessageType::Time,
-            Self::Error(_)          => MessageType::ErrorMsg,
+            Self::ClientInfo(_) => MessageType::ClientInfo,
+            Self::CodecHeader(_) => MessageType::CodecHeader,
+            Self::WireChunk(_) => MessageType::WireChunk,
+            Self::Time(_) => MessageType::Time,
+            Self::Error(_) => MessageType::ErrorMsg,
         }
     }
 
     /// Deserialize a message given a parsed header and its raw payload bytes.
     pub fn from_payload(hdr: &MessageHeader, payload: &[u8]) -> sonium_common::error::Result<Self> {
         match hdr.msg_type {
-            MessageType::Hello          => Ok(Self::Hello(Hello::decode(payload)?)),
-            MessageType::ServerSettings => Ok(Self::ServerSettings(ServerSettings::decode(payload)?)),
-            MessageType::ClientInfo     => Ok(Self::ClientInfo(ClientInfo::decode(payload)?)),
-            MessageType::CodecHeader    => Ok(Self::CodecHeader(CodecHeader::decode(payload)?)),
-            MessageType::WireChunk      => Ok(Self::WireChunk(WireChunk::decode(payload)?)),
-            MessageType::Time           => Ok(Self::Time(TimeMsg::decode(payload)?)),
-            MessageType::ErrorMsg          => Ok(Self::Error(ErrorMsg::decode(payload)?)),
-            MessageType::Base           => Err(SoniumError::Protocol("base message unsupported".into())),
+            MessageType::Hello => Ok(Self::Hello(Hello::decode(payload)?)),
+            MessageType::ServerSettings => {
+                Ok(Self::ServerSettings(ServerSettings::decode(payload)?))
+            }
+            MessageType::ClientInfo => Ok(Self::ClientInfo(ClientInfo::decode(payload)?)),
+            MessageType::CodecHeader => Ok(Self::CodecHeader(CodecHeader::decode(payload)?)),
+            MessageType::WireChunk => Ok(Self::WireChunk(WireChunk::decode(payload)?)),
+            MessageType::Time => Ok(Self::Time(TimeMsg::decode(payload)?)),
+            MessageType::ErrorMsg => Ok(Self::Error(ErrorMsg::decode(payload)?)),
+            MessageType::Base => Err(SoniumError::Protocol("base message unsupported".into())),
         }
     }
 
@@ -78,13 +80,13 @@ impl Message {
 
     fn encode_payload(&self) -> Vec<u8> {
         match self {
-            Self::Hello(m)          => m.encode(),
+            Self::Hello(m) => m.encode(),
             Self::ServerSettings(m) => m.encode(),
-            Self::ClientInfo(m)     => m.encode(),
-            Self::CodecHeader(m)    => m.encode(),
-            Self::WireChunk(m)      => m.encode(),
-            Self::Time(m)           => m.encode(),
-            Self::Error(m)          => m.encode(),
+            Self::ClientInfo(m) => m.encode(),
+            Self::CodecHeader(m) => m.encode(),
+            Self::WireChunk(m) => m.encode(),
+            Self::Time(m) => m.encode(),
+            Self::Error(m) => m.encode(),
         }
     }
 }

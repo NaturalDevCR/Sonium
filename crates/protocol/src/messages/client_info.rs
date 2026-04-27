@@ -1,7 +1,7 @@
 //! `ClientInfo` — volume / mute update sent by the client to the server.
 
-use serde::{Deserialize, Serialize};
 use crate::wire::{WireRead, WireWrite};
+use serde::{Deserialize, Serialize};
 use sonium_common::error::Result;
 
 /// Volume or mute change initiated by the client (e.g. from the web UI).
@@ -13,14 +13,14 @@ pub struct ClientInfo {
     /// Desired volume (0 – 100).
     pub volume: u8,
     /// Whether playback should be muted.
-    pub muted:  bool,
+    pub muted: bool,
 }
 
 impl ClientInfo {
     /// Deserialise from a wire payload slice.
     pub fn decode(payload: &[u8]) -> Result<Self> {
         let mut r = WireRead::new(payload);
-        let json  = r.read_str()?;
+        let json = r.read_str()?;
         serde_json::from_str(&json)
             .map_err(|e| sonium_common::SoniumError::Protocol(format!("ClientInfo JSON: {e}")))
     }
@@ -42,21 +42,30 @@ mod tests {
 
     #[test]
     fn round_trip_unmuted() {
-        let orig    = ClientInfo { volume: 75, muted: false };
+        let orig = ClientInfo {
+            volume: 75,
+            muted: false,
+        };
         let decoded = ClientInfo::decode(&orig.encode()).unwrap();
         assert_eq!(decoded, orig);
     }
 
     #[test]
     fn round_trip_muted() {
-        let orig    = ClientInfo { volume: 0, muted: true };
+        let orig = ClientInfo {
+            volume: 0,
+            muted: true,
+        };
         let decoded = ClientInfo::decode(&orig.encode()).unwrap();
         assert_eq!(decoded, orig);
     }
 
     #[test]
     fn round_trip_max_volume() {
-        let orig    = ClientInfo { volume: 100, muted: false };
+        let orig = ClientInfo {
+            volume: 100,
+            muted: false,
+        };
         let decoded = ClientInfo::decode(&orig.encode()).unwrap();
         assert_eq!(decoded.volume, 100);
     }

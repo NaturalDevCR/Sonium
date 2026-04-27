@@ -1,7 +1,7 @@
 mod controller;
-mod player;
 mod decoder;
 mod eq;
+mod player;
 
 use std::io::Write;
 use std::time::Duration;
@@ -14,19 +14,39 @@ use sonium_common::config::ClientConfig;
 use sonium_control::discovery::{self, DiscoveredServer};
 
 #[derive(Parser)]
-#[command(name = "sonium-client", version, about = "Sonium multiroom audio client")]
+#[command(
+    name = "sonium-client",
+    version,
+    about = "Sonium multiroom audio client"
+)]
 struct Cli {
     /// Server hostname or IP address.
     /// When --discover is used, this is ignored and mDNS discovery is used instead.
-    #[arg(value_name = "SERVER", default_value = "127.0.0.1", env = "SONIUM_SERVER")]
+    #[arg(
+        value_name = "SERVER",
+        default_value = "127.0.0.1",
+        env = "SONIUM_SERVER"
+    )]
     server: String,
 
     /// Server stream port.
-    #[arg(short, long, value_name = "PORT", default_value_t = 1710, env = "SONIUM_PORT")]
+    #[arg(
+        short,
+        long,
+        value_name = "PORT",
+        default_value_t = 1710,
+        env = "SONIUM_PORT"
+    )]
     port: u16,
 
     /// Extra playout latency offset in milliseconds (useful for Bluetooth sinks).
-    #[arg(short, long, value_name = "MS", default_value_t = 0, env = "SONIUM_LATENCY")]
+    #[arg(
+        short,
+        long,
+        value_name = "MS",
+        default_value_t = 0,
+        env = "SONIUM_LATENCY"
+    )]
     latency: i32,
 
     /// Client display name shown in the web UI (defaults to hostname).
@@ -49,7 +69,12 @@ struct Cli {
     discover: bool,
 
     /// How long to wait for mDNS discovery (seconds). Only used with --discover.
-    #[arg(long, value_name = "SECS", default_value_t = 3, env = "SONIUM_DISCOVER_TIMEOUT")]
+    #[arg(
+        long,
+        value_name = "SECS",
+        default_value_t = 3,
+        env = "SONIUM_DISCOVER_TIMEOUT"
+    )]
     discover_timeout: u64,
 }
 
@@ -74,9 +99,9 @@ async fn main() -> anyhow::Result<()> {
     let cfg = ClientConfig {
         server_host: server_host.clone(),
         server_port,
-        latency_ms:  cli.latency,
+        latency_ms: cli.latency,
         client_name: cli.name,
-        device:      cli.device,
+        device: cli.device,
         ..Default::default()
     };
 
@@ -87,7 +112,8 @@ async fn main() -> anyhow::Result<()> {
         "Sonium client starting"
     );
 
-    controller::run(server_addr, cfg).await
+    controller::run(server_addr, cfg)
+        .await
         .context("client controller error")
 }
 
@@ -151,11 +177,11 @@ fn select_server_interactive(servers: &[DiscoveredServer]) -> anyhow::Result<(St
     for (i, s) in servers.iter().enumerate() {
         eprintln!(
             "  [{n}] {host} — {addr}:{port}  ({svc})",
-            n    = i + 1,
+            n = i + 1,
             host = s.hostname,
             addr = s.addr,
             port = s.port,
-            svc  = s.service.trim_end_matches(".local."),
+            svc = s.service.trim_end_matches(".local."),
         );
     }
     eprintln!();

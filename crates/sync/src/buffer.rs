@@ -17,8 +17,8 @@
 //!                         PCM samples ─► speaker
 //! ```
 
-use std::collections::VecDeque;
 use sonium_common::SampleFormat;
+use std::collections::VecDeque;
 
 /// A decoded audio chunk with its scheduled playout timestamp.
 #[derive(Debug, Clone)]
@@ -26,17 +26,22 @@ pub struct PcmChunk {
     /// Absolute playout time in the **server clock** (µs since UNIX epoch).
     pub playout_us: i64,
     /// Interleaved i16 PCM samples (all channels).
-    pub samples:    Vec<i16>,
+    pub samples: Vec<i16>,
     /// Format of `samples`.
-    pub fmt:        SampleFormat,
+    pub fmt: SampleFormat,
     /// Read cursor in samples — allows partial consumption without copying.
-    pub read_pos:   usize,
+    pub read_pos: usize,
 }
 
 impl PcmChunk {
     /// Create a new chunk.
     pub fn new(playout_us: i64, samples: Vec<i16>, fmt: SampleFormat) -> Self {
-        Self { playout_us, samples, fmt, read_pos: 0 }
+        Self {
+            playout_us,
+            samples,
+            fmt,
+            read_pos: 0,
+        }
     }
 
     /// Number of samples (all channels) not yet consumed.
@@ -58,7 +63,7 @@ impl PcmChunk {
     /// Playout timestamp of the first unconsumed sample.
     pub fn current_playout_us(&self) -> i64 {
         let consumed_frames = self.read_pos / self.fmt.channels as usize;
-        let consumed_us     = (consumed_frames as f64 / self.fmt.rate as f64 * 1_000_000.0) as i64;
+        let consumed_us = (consumed_frames as f64 / self.fmt.rate as f64 * 1_000_000.0) as i64;
         self.playout_us + consumed_us
     }
 }
@@ -70,10 +75,10 @@ impl PcmChunk {
 /// 50 ms behind `now`) are silently dropped on the next call to
 /// [`pop_ready`][Self::pop_ready].
 pub struct SyncBuffer {
-    chunks:            VecDeque<PcmChunk>,
+    chunks: VecDeque<PcmChunk>,
     target_latency_us: i64,
-    buffered_samples:  usize,
-    fmt:               SampleFormat,
+    buffered_samples: usize,
+    fmt: SampleFormat,
 }
 
 impl SyncBuffer {
@@ -84,9 +89,9 @@ impl SyncBuffer {
     /// the cost of increased end-to-end latency.
     pub fn new(fmt: SampleFormat, target_latency_ms: u32) -> Self {
         Self {
-            chunks:            VecDeque::new(),
+            chunks: VecDeque::new(),
             target_latency_us: target_latency_ms as i64 * 1_000,
-            buffered_samples:  0,
+            buffered_samples: 0,
             fmt,
         }
     }
@@ -94,7 +99,8 @@ impl SyncBuffer {
     /// Insert a decoded chunk, maintaining playout-time order.
     pub fn push(&mut self, chunk: PcmChunk) {
         self.buffered_samples += chunk.remaining_samples();
-        let pos = self.chunks
+        let pos = self
+            .chunks
             .iter()
             .position(|c| c.playout_us > chunk.playout_us)
             .unwrap_or(self.chunks.len());
@@ -113,8 +119,9 @@ impl SyncBuffer {
             let end_us = front.playout_us + front.remaining_us();
             if end_us < now_server_us - STALE_THRESHOLD_US {
                 let dropped = self.chunks.pop_front().unwrap();
-                self.buffered_samples =
-                    self.buffered_samples.saturating_sub(dropped.remaining_samples());
+                self.buffered_samples = self
+                    .buffered_samples
+                    .saturating_sub(dropped.remaining_samples());
                 continue;
             }
             break;
@@ -123,8 +130,9 @@ impl SyncBuffer {
         let front = self.chunks.front()?;
         if front.playout_us <= now_server_us + self.target_latency_us {
             let chunk = self.chunks.pop_front().unwrap();
-            self.buffered_samples =
-                self.buffered_samples.saturating_sub(chunk.remaining_samples());
+            self.buffered_samples = self
+                .buffered_samples
+                .saturating_sub(chunk.remaining_samples());
             return Some(chunk);
         }
         None
@@ -137,10 +145,14 @@ impl SyncBuffer {
     }
 
     /// Number of chunks currently held.
-    pub fn len(&self) -> usize { self.chunks.len() }
+    pub fn len(&self) -> usize {
+        self.chunks.len()
+    }
 
     /// `true` when no chunks are buffered.
-    pub fn is_empty(&self) -> bool { self.chunks.is_empty() }
+    pub fn is_empty(&self) -> bool {
+        self.chunks.is_empty()
+    }
 
     /// Discard all buffered audio (e.g. after a reconnect).
     pub fn clear(&mut self) {
@@ -155,7 +167,9 @@ impl SyncBuffer {
 mod tests {
     use super::*;
 
-    fn fmt() -> SampleFormat { SampleFormat::new(48_000, 16, 2) }
+    fn fmt() -> SampleFormat {
+        SampleFormat::new(48_000, 16, 2)
+    }
 
     fn chunk(playout_us: i64, sample_count: usize) -> PcmChunk {
         PcmChunk::new(playout_us, vec![0i16; sample_count], fmt())
@@ -206,7 +220,7 @@ mod tests {
     #[test]
     fn push_and_pop_single_chunk() {
         let mut buf = SyncBuffer::new(fmt(), 0);
-        let now     = 1_000_000i64;
+        let now = 1_000_000i64;
         buf.push(chunk(now - 1_000, 960));
         assert!(buf.pop_ready(now).is_some());
         assert!(buf.is_empty());
@@ -215,7 +229,7 @@ mod tests {
     #[test]
     fn future_chunk_not_released() {
         let mut buf = SyncBuffer::new(fmt(), 0);
-        let now     = 1_000_000i64;
+        let now = 1_000_000i64;
         // Chunk scheduled 5 seconds in the future
         buf.push(chunk(now + 5_000_000, 960));
         assert!(buf.pop_ready(now).is_none());
@@ -254,7 +268,10 @@ mod tests {
         // 960 stereo samples = 480 frames = 10ms
         buf.push(chunk(0, 960));
         let depth = buf.buffer_depth_us();
-        assert!((depth - 10_000).abs() < 100, "expected ~10ms, got {depth}µs");
+        assert!(
+            (depth - 10_000).abs() < 100,
+            "expected ~10ms, got {depth}µs"
+        );
     }
 
     #[test]
@@ -270,7 +287,7 @@ mod tests {
     #[test]
     fn target_latency_delays_release() {
         let mut buf = SyncBuffer::new(fmt(), 500); // 500ms target latency
-        let now     = 0i64;
+        let now = 0i64;
         // Chunk at t=0 should not be released because target_latency=500ms means
         // we only release chunks at playout_us <= now + 500_000
         buf.push(chunk(600_000, 960)); // at t=0.6s, beyond now+500ms

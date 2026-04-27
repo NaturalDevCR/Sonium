@@ -21,8 +21,8 @@
 //! i32  latency_usec
 //! ```
 
-use crate::wire::{WireRead, WireWrite};
 use crate::header::Timestamp;
+use crate::wire::{WireRead, WireWrite};
 use sonium_common::error::Result;
 
 /// Clock synchronisation message, used in both directions.
@@ -40,15 +40,19 @@ pub struct TimeMsg {
 impl TimeMsg {
     /// Create a fresh clock-sync request (latency zeroed).
     pub fn zero() -> Self {
-        Self { latency: Timestamp::default() }
+        Self {
+            latency: Timestamp::default(),
+        }
     }
 
     /// Deserialise from a wire payload slice.
     pub fn decode(payload: &[u8]) -> Result<Self> {
         let mut r = WireRead::new(payload);
-        let sec  = r.read_i32()?;
+        let sec = r.read_i32()?;
         let usec = r.read_i32()?;
-        Ok(Self { latency: Timestamp { sec, usec } })
+        Ok(Self {
+            latency: Timestamp { sec, usec },
+        })
     }
 
     /// Serialise to a wire payload.
@@ -68,16 +72,21 @@ mod tests {
 
     #[test]
     fn zero_round_trip() {
-        let msg  = TimeMsg::zero();
+        let msg = TimeMsg::zero();
         let back = TimeMsg::decode(&msg.encode()).unwrap();
         assert_eq!(back, msg);
     }
 
     #[test]
     fn nonzero_latency_round_trip() {
-        let msg  = TimeMsg { latency: Timestamp { sec: 0, usec: 7_500 } };
+        let msg = TimeMsg {
+            latency: Timestamp {
+                sec: 0,
+                usec: 7_500,
+            },
+        };
         let back = TimeMsg::decode(&msg.encode()).unwrap();
-        assert_eq!(back.latency.sec,  0);
+        assert_eq!(back.latency.sec, 0);
         assert_eq!(back.latency.usec, 7_500);
     }
 

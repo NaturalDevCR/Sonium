@@ -9,8 +9,8 @@
 //! u8[] data[data_size]  (Opus / FLAC / PCM bytes)
 //! ```
 
-use crate::wire::{WireRead, WireWrite};
 use crate::header::Timestamp;
+use crate::wire::{WireRead, WireWrite};
 use sonium_common::error::Result;
 
 /// One encoded audio frame delivered by the server to all clients.
@@ -36,10 +36,13 @@ impl WireChunk {
     /// Deserialise from a wire payload slice.
     pub fn decode(payload: &[u8]) -> Result<Self> {
         let mut r = WireRead::new(payload);
-        let sec  = r.read_i32()?;
+        let sec = r.read_i32()?;
         let usec = r.read_i32()?;
         let data = r.read_blob()?;
-        Ok(Self { timestamp: Timestamp { sec, usec }, data })
+        Ok(Self {
+            timestamp: Timestamp { sec, usec },
+            data,
+        })
     }
 
     /// Serialise to a wire payload.
@@ -60,32 +63,41 @@ mod tests {
 
     #[test]
     fn round_trip_small_payload() {
-        let chunk   = WireChunk::new(Timestamp { sec: 1_700_000_000, usec: 500_000 }, vec![0xDE, 0xAD, 0xBE, 0xEF]);
+        let chunk = WireChunk::new(
+            Timestamp {
+                sec: 1_700_000_000,
+                usec: 500_000,
+            },
+            vec![0xDE, 0xAD, 0xBE, 0xEF],
+        );
         let decoded = WireChunk::decode(&chunk.encode()).unwrap();
         assert_eq!(decoded, chunk);
     }
 
     #[test]
     fn round_trip_empty_data() {
-        let chunk   = WireChunk::new(Timestamp::default(), vec![]);
+        let chunk = WireChunk::new(Timestamp::default(), vec![]);
         let decoded = WireChunk::decode(&chunk.encode()).unwrap();
         assert_eq!(decoded.data, Vec::<u8>::new());
     }
 
     #[test]
     fn round_trip_large_payload() {
-        let data    = vec![0xAAu8; 4096];
-        let chunk   = WireChunk::new(Timestamp::now(), data.clone());
+        let data = vec![0xAAu8; 4096];
+        let chunk = WireChunk::new(Timestamp::now(), data.clone());
         let decoded = WireChunk::decode(&chunk.encode()).unwrap();
         assert_eq!(decoded.data, data);
     }
 
     #[test]
     fn timestamp_preserved() {
-        let ts    = Timestamp { sec: 1_234_567_890, usec: 999_999 };
+        let ts = Timestamp {
+            sec: 1_234_567_890,
+            usec: 999_999,
+        };
         let chunk = WireChunk::new(ts, vec![1, 2, 3]);
-        let back  = WireChunk::decode(&chunk.encode()).unwrap();
-        assert_eq!(back.timestamp.sec,  ts.sec);
+        let back = WireChunk::decode(&chunk.encode()).unwrap();
+        assert_eq!(back.timestamp.sec, ts.sec);
         assert_eq!(back.timestamp.usec, ts.usec);
     }
 
@@ -100,7 +112,7 @@ mod tests {
         let mut raw = WireChunk::new(Timestamp::default(), vec![1, 2, 3]).encode();
         // Corrupt the data_size field to claim more data than available
         let size_offset = 8; // after i32+i32
-        let bad_size    = 9999u32.to_le_bytes();
+        let bad_size = 9999u32.to_le_bytes();
         raw[size_offset..size_offset + 4].copy_from_slice(&bad_size);
         assert!(WireChunk::decode(&raw).is_err());
     }

@@ -6,9 +6,9 @@
 //! - [`SoniumError`] / [`error::Result`] — unified error type.
 //! - [`config`] — zero-configuration server and client config structs backed by TOML.
 
-pub mod sample_format;
 pub mod config;
 pub mod error;
+pub mod sample_format;
 
-pub use sample_format::SampleFormat;
 pub use error::SoniumError;
+pub use sample_format::SampleFormat;

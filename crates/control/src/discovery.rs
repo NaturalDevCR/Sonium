@@ -18,31 +18,26 @@
 //! lets the admin specify CIDR ranges to probe.  [`scan_subnet`] connects to
 //! the Sonium stream port on each host and checks for a valid `Hello` response.
 
+use mdns_sd::{ServiceDaemon, ServiceInfo};
 use std::net::{IpAddr, Ipv4Addr, SocketAddr};
 use std::sync::Arc;
 use std::time::Duration;
-use mdns_sd::{ServiceDaemon, ServiceInfo};
 use tokio::net::TcpStream;
 use tokio::time::timeout;
 use tracing::{debug, info, warn};
 
-const SNAPCAST_SVC:  &str = "_snapcast._tcp.local.";
-const SONIUM_SVC:    &str = "_sonium._tcp.local.";
-const SONIUM_HTTP:   &str = "_sonium-http._tcp.local.";
+const SNAPCAST_SVC: &str = "_snapcast._tcp.local.";
+const SONIUM_SVC: &str = "_sonium._tcp.local.";
+const SONIUM_HTTP: &str = "_sonium-http._tcp.local.";
 
 /// Advertise the server on the local network via mDNS.
 ///
 /// This is a long-running task — spawn it with `tokio::spawn`.
 /// Set `snapcast_compat` to also register `_snapcast._tcp` so legacy
 /// Snapcast clients can discover this server.
-pub async fn advertise(
-    hostname:        &str,
-    stream_port:     u16,
-    control_port:    u16,
-    snapcast_compat: bool,
-) {
+pub async fn advertise(hostname: &str, stream_port: u16, control_port: u16, snapcast_compat: bool) {
     let daemon = match ServiceDaemon::new() {
-        Ok(d)  => d,
+        Ok(d) => d,
         Err(e) => {
             warn!("mDNS daemon failed to start: {e} — auto-discovery unavailable");
             return;
@@ -56,27 +51,31 @@ pub async fn advertise(
             svc_type,
             &instance,
             &format!("{hostname}.local."),
-            "",     // IP — let mdns-sd resolve
+            "", // IP — let mdns-sd resolve
             port,
-            None,   // no extra TXT properties
+            None, // no extra TXT properties
         );
         match info {
-            Ok(i)  => { let _ = daemon.register(i); }
+            Ok(i) => {
+                let _ = daemon.register(i);
+            }
             Err(e) => warn!("mDNS register {svc_type}: {e}"),
         }
     };
 
-    register(SONIUM_SVC,  stream_port);
+    register(SONIUM_SVC, stream_port);
     register(SONIUM_HTTP, control_port);
     if snapcast_compat {
         register(SNAPCAST_SVC, stream_port);
-        info!(stream_port, "mDNS: also advertising _snapcast._tcp for Snapcast client compatibility");
+        info!(
+            stream_port,
+            "mDNS: also advertising _snapcast._tcp for Snapcast client compatibility"
+        );
     }
 
     info!(
         stream_port,
-        control_port,
-        "mDNS advertising started — clients will find this server automatically"
+        control_port, "mDNS advertising started — clients will find this server automatically"
     );
 
     // Keep the task alive (daemon runs in background threads)
@@ -87,20 +86,18 @@ pub async fn advertise(
 #[derive(Debug, Clone)]
 pub struct DiscoveredServer {
     pub hostname: String,
-    pub addr:     IpAddr,
-    pub port:     u16,
-    pub service:  String,
+    pub addr: IpAddr,
+    pub port: u16,
+    pub service: String,
 }
 
 /// Browse for Sonium servers on the local network.
 ///
 /// Returns discovered servers as they appear.  Run this in a background task
 /// and send results through a channel.
-pub async fn browse_servers(
-    tx: tokio::sync::mpsc::Sender<DiscoveredServer>,
-) {
+pub async fn browse_servers(tx: tokio::sync::mpsc::Sender<DiscoveredServer>) {
     let daemon = match ServiceDaemon::new() {
-        Ok(d)  => d,
+        Ok(d) => d,
         Err(e) => {
             warn!("mDNS daemon failed: {e}");
             return;
@@ -109,7 +106,7 @@ pub async fn browse_servers(
 
     for svc in [SONIUM_SVC, SNAPCAST_SVC] {
         let rx = match daemon.browse(svc) {
-            Ok(r)  => r,
+            Ok(r) => r,
             Err(e) => {
                 warn!("mDNS browse {svc}: {e}");
                 continue;
@@ -122,12 +119,14 @@ pub async fn browse_servers(
             while let Ok(event) = rx.recv_async().await {
                 if let mdns_sd::ServiceEvent::ServiceResolved(info) = event {
                     for addr in info.get_addresses() {
-                        let _ = tx2.send(DiscoveredServer {
-                            hostname: info.get_hostname().to_string(),
-                            addr:     *addr,
-                            port:     info.get_port(),
-                            service:  svc.clone(),
-                        }).await;
+                        let _ = tx2
+                            .send(DiscoveredServer {
+                                hostname: info.get_hostname().to_string(),
+                                addr: *addr,
+                                port: info.get_port(),
+                                service: svc.clone(),
+                            })
+                            .await;
                     }
                 }
             }
@@ -140,10 +139,10 @@ pub async fn browse_servers(
 /// Probe result from [`scan_subnet`].
 #[derive(Debug, Clone, serde::Serialize)]
 pub struct ScanResult {
-    pub addr:        String,
-    pub port:        u16,
+    pub addr: String,
+    pub port: u16,
     /// `true` if the host responded with a valid Sonium audio stream port.
-    pub is_sonium:   bool,
+    pub is_sonium: bool,
 }
 
 /// Scan a CIDR range for Sonium-compatible servers.
@@ -152,14 +151,10 @@ pub struct ScanResult {
 /// TCP connection to `port` (default `1710`).  Returns all reachable hosts.
 ///
 /// `concurrency` controls how many probes run simultaneously (default: 64).
-pub async fn scan_subnet(
-    cidr:        &str,
-    port:        u16,
-    concurrency: usize,
-) -> Vec<ScanResult> {
+pub async fn scan_subnet(cidr: &str, port: u16, concurrency: usize) -> Vec<ScanResult> {
     let hosts = match parse_cidr_hosts(cidr) {
         Some(h) => h,
-        None    => {
+        None => {
             warn!("Invalid CIDR: {cidr}");
             return vec![];
         }
@@ -174,13 +169,13 @@ pub async fn scan_subnet(
         let sem = sem.clone();
         tasks.push(tokio::spawn(async move {
             let _permit = sem.acquire().await.ok()?;
-            let addr    = SocketAddr::new(IpAddr::V4(host), port);
-            let result  = timeout(Duration::from_millis(300), TcpStream::connect(addr)).await;
+            let addr = SocketAddr::new(IpAddr::V4(host), port);
+            let result = timeout(Duration::from_millis(300), TcpStream::connect(addr)).await;
             match result {
                 Ok(Ok(_)) => {
                     debug!(%addr, "Host responded on audio port");
                     Some(ScanResult {
-                        addr:      host.to_string(),
+                        addr: host.to_string(),
                         port,
                         is_sonium: true,
                     })
@@ -204,23 +199,31 @@ pub async fn scan_subnet(
 /// Returns `None` if the CIDR is malformed.
 fn parse_cidr_hosts(cidr: &str) -> Option<Vec<Ipv4Addr>> {
     let parts: Vec<&str> = cidr.split('/').collect();
-    if parts.len() != 2 { return None; }
+    if parts.len() != 2 {
+        return None;
+    }
 
-    let base: Ipv4Addr  = parts[0].parse().ok()?;
-    let prefix: u8      = parts[1].parse().ok()?;
-    if prefix > 32 { return None; }
+    let base: Ipv4Addr = parts[0].parse().ok()?;
+    let prefix: u8 = parts[1].parse().ok()?;
+    if prefix > 32 {
+        return None;
+    }
 
-    let mask       = if prefix == 0 { 0u32 } else { !((1u32 << (32 - prefix)) - 1) };
-    let network    = u32::from(base) & mask;
-    let broadcast  = network | !mask;
+    let mask = if prefix == 0 {
+        0u32
+    } else {
+        !((1u32 << (32 - prefix)) - 1)
+    };
+    let network = u32::from(base) & mask;
+    let broadcast = network | !mask;
     let host_count = broadcast - network + 1;
 
     // Limit to /16 to avoid accidental huge scans
-    if host_count > 65536 { return None; }
+    if host_count > 65536 {
+        return None;
+    }
 
-    let hosts = (network + 1..broadcast)
-        .map(Ipv4Addr::from)
-        .collect();
+    let hosts = (network + 1..broadcast).map(Ipv4Addr::from).collect();
     Some(hosts)
 }
 
@@ -235,7 +238,7 @@ mod tests {
         let hosts = parse_cidr_hosts("192.168.1.0/24").unwrap();
         // /24 = 254 usable hosts (1-254)
         assert_eq!(hosts.len(), 254);
-        assert_eq!(hosts[0],   "192.168.1.1".parse::<Ipv4Addr>().unwrap());
+        assert_eq!(hosts[0], "192.168.1.1".parse::<Ipv4Addr>().unwrap());
         assert_eq!(hosts[253], "192.168.1.254".parse::<Ipv4Addr>().unwrap());
     }
 

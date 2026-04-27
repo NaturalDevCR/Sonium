@@ -5,9 +5,8 @@
 
 use lazy_static::lazy_static;
 use prometheus::{
-    IntCounter, IntCounterVec, IntGauge, IntGaugeVec,
-    Opts, register_int_counter, register_int_counter_vec,
-    register_int_gauge, register_int_gauge_vec,
+    register_int_counter, register_int_counter_vec, register_int_gauge, register_int_gauge_vec,
+    IntCounter, IntCounterVec, IntGauge, IntGaugeVec, Opts,
 };
 
 lazy_static! {
@@ -59,6 +58,8 @@ pub fn gather() -> String {
     use prometheus::Encoder;
     let encoder = prometheus::TextEncoder::new();
     let mut buf = Vec::new();
-    encoder.encode(&prometheus::gather(), &mut buf).unwrap_or(());
+    encoder
+        .encode(&prometheus::gather(), &mut buf)
+        .unwrap_or(());
     String::from_utf8(buf).unwrap_or_default()
 }

@@ -1,17 +1,17 @@
+use std::net::SocketAddr;
 /// Integration tests for the REST control API.
 ///
 /// Each test builds the axum router in-process using `tower::ServiceExt::oneshot`
 /// — no network or listening socket required, making these fast and hermetic.
 use std::sync::Arc;
-use std::net::SocketAddr;
 
-use axum::body::{Body, to_bytes};
-use axum::http::{Request, StatusCode, Method, header};
+use axum::body::{to_bytes, Body};
+use axum::http::{header, Method, Request, StatusCode};
 use serde_json::{json, Value};
 use tower::ServiceExt;
 
-use sonium_control::{ServerState, EventBus, UserStore, api};
 use sonium_control::auth::Role;
+use sonium_control::{api, EventBus, ServerState, UserStore};
 
 // ── Helpers ───────────────────────────────────────────────────────────────
 
@@ -34,7 +34,11 @@ fn make_app() -> (axum::Router, String) {
 fn make_app_with_state() -> (axum::Router, Arc<ServerState>, String) {
     let state = Arc::new(ServerState::new(Arc::new(EventBus::new()), None, vec![]));
     let (auth, token) = test_auth();
-    (api::router(state.clone()).layer(axum::Extension(auth)), state, token)
+    (
+        api::router(state.clone()).layer(axum::Extension(auth)),
+        state,
+        token,
+    )
 }
 
 async fn json_body(body: Body) -> Value {
@@ -106,8 +110,13 @@ async fn clients_empty_on_start() {
 async fn patch_volume_unknown_client_is_404() {
     let (app, token) = make_app();
     let res = app
-        .oneshot(patch_json("/clients/ghost/volume", json!({"volume": 50, "muted": false}), &token))
-        .await.unwrap();
+        .oneshot(patch_json(
+            "/clients/ghost/volume",
+            json!({"volume": 50, "muted": false}),
+            &token,
+        ))
+        .await
+        .unwrap();
     assert_eq!(res.status(), StatusCode::NOT_FOUND);
 }
 
@@ -115,8 +124,13 @@ async fn patch_volume_unknown_client_is_404() {
 async fn patch_latency_unknown_client_is_404() {
     let (app, token) = make_app();
     let res = app
-        .oneshot(patch_json("/clients/ghost/latency", json!({"latency_ms": 100}), &token))
-        .await.unwrap();
+        .oneshot(patch_json(
+            "/clients/ghost/latency",
+            json!({"latency_ms": 100}),
+            &token,
+        ))
+        .await
+        .unwrap();
     assert_eq!(res.status(), StatusCode::NOT_FOUND);
 }
 
@@ -124,8 +138,13 @@ async fn patch_latency_unknown_client_is_404() {
 async fn patch_group_unknown_client_is_404() {
     let (app, token) = make_app();
     let res = app
-        .oneshot(patch_json("/clients/ghost/group", json!({"group_id": "default"}), &token))
-        .await.unwrap();
+        .oneshot(patch_json(
+            "/clients/ghost/group",
+            json!({"group_id": "default"}),
+            &token,
+        ))
+        .await
+        .unwrap();
     assert_eq!(res.status(), StatusCode::NOT_FOUND);
 }
 
@@ -151,8 +170,13 @@ async fn patch_volume_connected_client_is_204() {
     state.client_connected("vol-test", "host", "Test", "linux", "x86_64", addr, 2);
 
     let res = app
-        .oneshot(patch_json("/clients/vol-test/volume", json!({"volume": 42, "muted": true}), &token))
-        .await.unwrap();
+        .oneshot(patch_json(
+            "/clients/vol-test/volume",
+            json!({"volume": 42, "muted": true}),
+            &token,
+        ))
+        .await
+        .unwrap();
     assert_eq!(res.status(), StatusCode::NO_CONTENT);
     let updated = state.all_clients();
     let c = updated.iter().find(|c| c.id == "vol-test").unwrap();
@@ -172,8 +196,13 @@ async fn patch_eq_connected_client_is_204() {
         {"freq_hz": 10000, "gain_db": 2.0, "q": 0.9}
     ]);
     let res = app
-        .oneshot(patch_json("/clients/eq-test/eq", json!({"bands": bands}), &token))
-        .await.unwrap();
+        .oneshot(patch_json(
+            "/clients/eq-test/eq",
+            json!({"bands": bands}),
+            &token,
+        ))
+        .await
+        .unwrap();
     assert_eq!(res.status(), StatusCode::NO_CONTENT);
 
     let updated = state.all_clients();
@@ -193,24 +222,38 @@ async fn groups_has_default_on_start() {
     let json = json_body(res.into_body()).await;
     let groups = json.as_array().unwrap();
     assert!(!groups.is_empty(), "expected at least one group");
-    assert!(groups.iter().any(|g| g["id"] == "default"), "default group missing");
+    assert!(
+        groups.iter().any(|g| g["id"] == "default"),
+        "default group missing"
+    );
 }
 
 #[tokio::test]
 async fn create_group_returns_201_with_id() {
     let (app, token) = make_app();
     let res = app
-        .oneshot(post_json("/groups", json!({"name": "Kitchen", "stream_id": ""}), &token))
-        .await.unwrap();
+        .oneshot(post_json(
+            "/groups",
+            json!({"name": "Kitchen", "stream_id": ""}),
+            &token,
+        ))
+        .await
+        .unwrap();
     assert_eq!(res.status(), StatusCode::CREATED);
     let json = json_body(res.into_body()).await;
-    assert!(json["id"].is_string(), "id field missing in create response");
+    assert!(
+        json["id"].is_string(),
+        "id field missing in create response"
+    );
 }
 
 #[tokio::test]
 async fn delete_default_group_is_forbidden() {
     let (app, token) = make_app();
-    let res = app.oneshot(delete("/groups/default", &token)).await.unwrap();
+    let res = app
+        .oneshot(delete("/groups/default", &token))
+        .await
+        .unwrap();
     assert_eq!(res.status(), StatusCode::NOT_FOUND);
 }
 
@@ -219,7 +262,10 @@ async fn create_then_delete_group_ok() {
     let (app, state, token) = make_app_with_state();
     let id = state.create_group("Bedroom".to_string(), String::new());
 
-    let res = app.oneshot(delete(&format!("/groups/{id}"), &token)).await.unwrap();
+    let res = app
+        .oneshot(delete(&format!("/groups/{id}"), &token))
+        .await
+        .unwrap();
     assert_eq!(res.status(), StatusCode::NO_CONTENT);
     assert!(!state.all_groups().iter().any(|g| g.id == id));
 }
@@ -228,8 +274,13 @@ async fn create_then_delete_group_ok() {
 async fn patch_group_stream_unknown_group_is_404() {
     let (app, token) = make_app();
     let res = app
-        .oneshot(patch_json("/groups/ghost/stream", json!({"stream_id": "default"}), &token))
-        .await.unwrap();
+        .oneshot(patch_json(
+            "/groups/ghost/stream",
+            json!({"stream_id": "default"}),
+            &token,
+        ))
+        .await
+        .unwrap();
     assert_eq!(res.status(), StatusCode::NOT_FOUND);
 }
 
@@ -243,7 +294,10 @@ async fn streams_has_default_on_start() {
     let json = json_body(res.into_body()).await;
     let streams = json.as_array().unwrap();
     assert!(!streams.is_empty(), "expected default stream");
-    assert!(streams.iter().any(|s| s["id"] == "default"), "default stream missing");
+    assert!(
+        streams.iter().any(|s| s["id"] == "default"),
+        "default stream missing"
+    );
     assert_eq!(streams[0]["status"], "idle");
 }
 
@@ -251,16 +305,16 @@ async fn streams_has_default_on_start() {
 
 #[tokio::test]
 async fn ws_events_endpoint_upgrades() {
+    use futures_util::{SinkExt, StreamExt};
     use tokio::net::TcpListener;
     use tokio_tungstenite::connect_async;
-    use futures_util::{SinkExt, StreamExt};
     use tokio_tungstenite::tungstenite::Message;
 
-    let state    = Arc::new(ServerState::new(Arc::new(EventBus::new()), None, vec![]));
+    let state = Arc::new(ServerState::new(Arc::new(EventBus::new()), None, vec![]));
     let (auth, token) = test_auth();
-    let app      = api::router(state).layer(axum::Extension(auth));
+    let app = api::router(state).layer(axum::Extension(auth));
     let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
-    let port     = listener.local_addr().unwrap().port();
+    let port = listener.local_addr().unwrap().port();
 
     tokio::spawn(async move {
         axum::serve(listener, app).await.unwrap();
@@ -274,9 +328,8 @@ async fn ws_events_endpoint_upgrades() {
     ws.send(Message::Ping(vec![42])).await.unwrap();
 
     // Expect a Pong back
-    let reply = tokio::time::timeout(
-        tokio::time::Duration::from_secs(2),
-        ws.next(),
-    ).await.expect("timeout waiting for WS reply");
+    let reply = tokio::time::timeout(tokio::time::Duration::from_secs(2), ws.next())
+        .await
+        .expect("timeout waiting for WS reply");
     assert!(reply.is_some(), "WS closed unexpectedly");
 }

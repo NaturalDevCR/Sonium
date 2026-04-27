@@ -1,28 +1,32 @@
+use bytes::Bytes;
 use std::sync::Arc;
 use tokio::io::AsyncReadExt;
 use tokio::net::{TcpListener, TcpStream};
 use tokio::process::Command;
 use tokio::time::Duration;
 use tracing::{debug, info, warn};
-use bytes::Bytes;
 
+use sonium_codec::make_encoder;
 use sonium_common::config::StreamSource;
 use sonium_protocol::{
+    messages::{CodecHeader, Message, WireChunk},
     Timestamp,
-    messages::{Message, CodecHeader, WireChunk},
 };
-use sonium_codec::make_encoder;
 
 use crate::broadcaster::{Broadcaster, BroadcasterRegistry};
-use sonium_control::{ServerState, state::StreamStatus, ws::Event};
+use sonium_control::{state::StreamStatus, ws::Event, ServerState};
 use tracing::instrument;
 
 /// Compute RMS level in dBFS for a block of i16 PCM samples.
 fn rms_dbfs(pcm: &[i16]) -> f32 {
-    if pcm.is_empty() { return -90.0; }
+    if pcm.is_empty() {
+        return -90.0;
+    }
     let sum: f64 = pcm.iter().map(|s| (*s as f64 / 32768.0).powi(2)).sum();
     let rms = (sum / pcm.len() as f64).sqrt();
-    if rms < 1e-9 { return -90.0; }
+    if rms < 1e-9 {
+        return -90.0;
+    }
     (20.0 * rms.log10()) as f32
 }
 
@@ -41,9 +45,9 @@ fn rms_dbfs(pcm: &[i16]) -> f32 {
 #[instrument(skip(bc, state, registry),
              fields(stream_id = %stream.id, source = %stream.source, codec = %stream.codec))]
 pub async fn run(
-    bc:       Arc<Broadcaster>,
-    stream:   StreamSource,
-    state:    Arc<ServerState>,
+    bc: Arc<Broadcaster>,
+    stream: StreamSource,
+    state: Arc<ServerState>,
     registry: Arc<BroadcasterRegistry>,
 ) -> anyhow::Result<()> {
     // Meta streams are a special case — no encoder, just routing.
@@ -51,7 +55,7 @@ pub async fn run(
         return run_meta(stream, bc, state, registry).await;
     }
 
-    let fmt   = stream.sample_format;
+    let fmt = stream.sample_format;
     let codec = stream.codec.as_str();
 
     let mut encoder = make_encoder(codec, fmt)
@@ -72,47 +76,83 @@ pub async fn run(
     );
 
     let frame_samples = fmt.frames_for_ms(20.0) * fmt.channels as usize;
-    let frame_bytes   = frame_samples * 2; // i16 = 2 bytes
-    let mut pcm_buf   = vec![0u8; frame_bytes];
+    let frame_bytes = frame_samples * 2; // i16 = 2 bytes
+    let mut pcm_buf = vec![0u8; frame_bytes];
     let mut enc_buf: Vec<u8> = Vec::new();
 
-    let idle_timeout    = stream.idle_timeout_ms.map(|ms| Duration::from_millis(ms as u64));
+    let idle_timeout = stream
+        .idle_timeout_ms
+        .map(|ms| Duration::from_millis(ms as u64));
     let silence_on_idle = stream.silence_on_idle;
 
     if stream.source == "-" {
         run_reader(
-            tokio::io::stdin(), &mut *encoder, bc, &mut pcm_buf, &mut enc_buf,
-            &stream.id, &state, idle_timeout, silence_on_idle,
-        ).await
+            tokio::io::stdin(),
+            &mut *encoder,
+            bc,
+            &mut pcm_buf,
+            &mut enc_buf,
+            &stream.id,
+            &state,
+            idle_timeout,
+            silence_on_idle,
+        )
+        .await
     } else if stream.source.starts_with("pipe://") {
         run_pipe(
-            &stream.source, &mut *encoder, bc, &mut pcm_buf, &mut enc_buf,
-            &stream.id, &state, idle_timeout, silence_on_idle,
-        ).await
+            &stream.source,
+            &mut *encoder,
+            bc,
+            &mut pcm_buf,
+            &mut enc_buf,
+            &stream.id,
+            &state,
+            idle_timeout,
+            silence_on_idle,
+        )
+        .await
     } else if let Some(tcp) = parse_tcp_source(&stream.source)? {
         run_tcp(
-            tcp, &mut *encoder, bc, &mut pcm_buf, &mut enc_buf,
-            &stream.id, &state, idle_timeout, silence_on_idle,
-        ).await
+            tcp,
+            &mut *encoder,
+            bc,
+            &mut pcm_buf,
+            &mut enc_buf,
+            &stream.id,
+            &state,
+            idle_timeout,
+            silence_on_idle,
+        )
+        .await
     } else {
-        let file = tokio::fs::File::open(&stream.source).await
+        let file = tokio::fs::File::open(&stream.source)
+            .await
             .map_err(|e| anyhow::anyhow!("[{}] open {}: {e}", stream.id, stream.source))?;
         run_reader(
-            file, &mut *encoder, bc, &mut pcm_buf, &mut enc_buf,
-            &stream.id, &state, idle_timeout, silence_on_idle,
-        ).await
+            file,
+            &mut *encoder,
+            bc,
+            &mut pcm_buf,
+            &mut enc_buf,
+            &stream.id,
+            &state,
+            idle_timeout,
+            silence_on_idle,
+        )
+        .await
     }
 }
 
 // ── Meta streams ──────────────────────────────────────────────────────────
 
 async fn run_meta(
-    stream:   StreamSource,
-    bc:       Arc<Broadcaster>,
-    state:    Arc<ServerState>,
+    stream: StreamSource,
+    bc: Arc<Broadcaster>,
+    state: Arc<ServerState>,
     registry: Arc<BroadcasterRegistry>,
 ) -> anyhow::Result<()> {
-    let source_ids: Vec<String> = stream.source
+    let source_ids: Vec<String> = stream
+        .source
         .strip_prefix("meta://")
         .unwrap_or("")
         .split('/')
@@ -127,7 +167,10 @@ async fn run_meta(
     info!(id = %stream.id, sources = ?source_ids, "Starting meta stream");
 
     // Each source stream forwards its frames into a shared channel, tagged with its priority index.
-    struct Tagged { idx: usize, frame: crate::broadcaster::AudioFrame }
+    struct Tagged {
+        idx: usize,
+        frame: crate::broadcaster::AudioFrame,
+    }
     let (tx, mut rx) = tokio::sync::mpsc::channel::<Tagged>(1024);
 
     for (idx, source_id) in source_ids.iter().enumerate() {
@@ -164,9 +207,9 @@ async fn run_meta(
             }
         }
 
-        let tx          = tx.clone();
-        let meta_id     = stream.id.clone();
-        let source_id   = source_id.clone();
+        let tx = tx.clone();
+        let meta_id = stream.id.clone();
+        let source_id = source_id.clone();
         tokio::spawn(async move {
             let mut sub = source_bc.subscribe();
             loop {
@@ -188,9 +231,7 @@ async fn run_meta(
 
     // "Active" threshold: a source is considered live if it sent a frame
     // within idle_timeout_ms (default 3 s).
-    let active_threshold = Duration::from_millis(
-        stream.idle_timeout_ms.unwrap_or(3_000) as u64
-    );
+    let active_threshold = Duration::from_millis(stream.idle_timeout_ms.unwrap_or(3_000) as u64);
     let mut last_seen: Vec<tokio::time::Instant> = {
         let long_ago = tokio::time::Instant::now()
             .checked_sub(Duration::from_secs(3600))
@@ -221,10 +262,16 @@ async fn run_meta(
 // ── TCP helpers ───────────────────────────────────────────────────────────
 
 #[derive(Debug, Clone, PartialEq, Eq)]
-enum TcpMode { Connect, Listen }
+enum TcpMode {
+    Connect,
+    Listen,
+}
 
 #[derive(Debug, Clone)]
-struct TcpSource { mode: TcpMode, addr: String }
+struct TcpSource {
+    mode: TcpMode,
+    addr: String,
+}
 
 fn parse_tcp_source(source: &str) -> anyhow::Result<Option<TcpSource>> {
     if let Some(rest) = source.strip_prefix("tcp-listen://") {
@@ -252,7 +299,10 @@ fn parse_tcp_source(source: &str) -> anyhow::Result<Option<TcpSource>> {
         anyhow::bail!("TCP source has empty address: {source}");
     }
 
-    Ok(Some(TcpSource { mode, addr: addr.to_owned() }))
+    Ok(Some(TcpSource {
+        mode,
+        addr: addr.to_owned(),
+    }))
 }
 
 fn strip_query(value: &str) -> &str {
@@ -261,25 +311,38 @@ fn strip_query(value: &str) -> &str {
 
 #[allow(clippy::too_many_arguments)]
 async fn run_tcp(
-    tcp:            TcpSource,
-    encoder:        &mut (dyn sonium_codec::Encoder + Send),
-    bc:             Arc<Broadcaster>,
-    pcm_buf:        &mut [u8],
-    enc_buf:        &mut Vec<u8>,
-    stream_id:      &str,
-    state:          &Arc<ServerState>,
-    idle_timeout:   Option<Duration>,
+    tcp: TcpSource,
+    encoder: &mut (dyn sonium_codec::Encoder + Send),
+    bc: Arc<Broadcaster>,
+    pcm_buf: &mut [u8],
+    enc_buf: &mut Vec<u8>,
+    stream_id: &str,
+    state: &Arc<ServerState>,
+    idle_timeout: Option<Duration>,
     silence_on_idle: bool,
 ) -> anyhow::Result<()> {
     match tcp.mode {
         TcpMode::Connect => {
             info!(stream = stream_id, addr = %tcp.addr, "Connecting to TCP source");
-            let socket = TcpStream::connect(&tcp.addr).await
+            let socket = TcpStream::connect(&tcp.addr)
+                .await
                 .map_err(|e| anyhow::anyhow!("[{stream_id}] connect {}: {e}", tcp.addr))?;
-            run_reader(socket, encoder, bc, pcm_buf, enc_buf, stream_id, state, idle_timeout, silence_on_idle).await
+            run_reader(
+                socket,
+                encoder,
+                bc,
+                pcm_buf,
+                enc_buf,
+                stream_id,
+                state,
+                idle_timeout,
+                silence_on_idle,
+            )
+            .await
         }
         TcpMode::Listen => {
-            let listener = TcpListener::bind(&tcp.addr).await
+            let listener = TcpListener::bind(&tcp.addr)
+                .await
                 .map_err(|e| anyhow::anyhow!("[{stream_id}] bind {}: {e}", tcp.addr))?;
             info!(stream = stream_id, addr = %tcp.addr, "Listening for TCP source");
 
@@ -287,9 +350,18 @@ async fn run_tcp(
                 let (socket, peer) = listener.accept().await?;
                 info!(stream = stream_id, %peer, "TCP source connected");
                 if let Err(e) = run_reader(
-                    socket, encoder, bc.clone(), pcm_buf, enc_buf,
-                    stream_id, state, idle_timeout, silence_on_idle,
-                ).await {
+                    socket,
+                    encoder,
+                    bc.clone(),
+                    pcm_buf,
+                    enc_buf,
+                    stream_id,
+                    state,
+                    idle_timeout,
+                    silence_on_idle,
+                )
+                .await
+                {
                     warn!(stream = stream_id, %peer, "TCP source ended: {e}");
                 }
                 info!(stream = stream_id, %peer, "TCP source disconnected; waiting for next sender");
@@ -303,14 +375,14 @@ async fn run_tcp(
 /// Format: `pipe:///absolute/path/to/command?arg1&arg2&arg3`
 #[allow(clippy::too_many_arguments)]
 async fn run_pipe(
-    uri:            &str,
-    encoder:        &mut (dyn sonium_codec::Encoder + Send),
-    bc:             Arc<Broadcaster>,
-    pcm_buf:        &mut [u8],
-    enc_buf:        &mut Vec<u8>,
-    stream_id:      &str,
-    state:          &Arc<ServerState>,
-    idle_timeout:   Option<Duration>,
+    uri: &str,
+    encoder: &mut (dyn sonium_codec::Encoder + Send),
+    bc: Arc<Broadcaster>,
+    pcm_buf: &mut [u8],
+    enc_buf: &mut Vec<u8>,
+    stream_id: &str,
+    state: &Arc<ServerState>,
+    idle_timeout: Option<Duration>,
     silence_on_idle: bool,
 ) -> anyhow::Result<()> {
     let (cmd, args) = parse_pipe_uri(uri)?;
@@ -325,30 +397,44 @@ async fn run_pipe(
         .spawn()
         .map_err(|e| anyhow::anyhow!("[{stream_id}] spawn `{cmd}`: {e}"))?;
 
-    let stdout = child.stdout.take()
+    let stdout = child
+        .stdout
+        .take()
         .ok_or_else(|| anyhow::anyhow!("[{stream_id}] no stdout from child"))?;
 
     let result = run_reader(
-        stdout, encoder, bc, pcm_buf, enc_buf,
-        stream_id, state, idle_timeout, silence_on_idle,
-    ).await;
+        stdout,
+        encoder,
+        bc,
+        pcm_buf,
+        enc_buf,
+        stream_id,
+        state,
+        idle_timeout,
+        silence_on_idle,
+    )
+    .await;
 
     match child.try_wait() {
         Ok(Some(status)) => info!("[{stream_id}] Process exited: {status}"),
-        Ok(None)         => { info!("[{stream_id}] Killing child process"); let _ = child.kill().await; }
-        Err(e)           => warn!("[{stream_id}] Error checking child: {e}"),
+        Ok(None) => {
+            info!("[{stream_id}] Killing child process");
+            let _ = child.kill().await;
+        }
+        Err(e) => warn!("[{stream_id}] Error checking child: {e}"),
     }
 
     result
 }
 
 fn parse_pipe_uri(uri: &str) -> anyhow::Result<(String, Vec<String>)> {
-    let rest = uri.strip_prefix("pipe://")
+    let rest = uri
+        .strip_prefix("pipe://")
         .ok_or_else(|| anyhow::anyhow!("not a pipe:// URI: {uri}"))?;
 
     let (path, query) = match rest.split_once('?') {
         Some((p, q)) => (p, Some(q)),
-        None         => (rest, None),
+        None => (rest, None),
     };
 
     if path.is_empty() {
@@ -366,20 +452,20 @@ fn parse_pipe_uri(uri: &str) -> anyhow::Result<(String, Vec<String>)> {
 
 #[allow(clippy::too_many_arguments)]
 async fn run_reader<R: AsyncReadExt + Unpin>(
-    mut src:         R,
-    encoder:         &mut (dyn sonium_codec::Encoder + Send),
-    bc:              Arc<Broadcaster>,
-    pcm_buf:         &mut [u8],
-    enc_buf:         &mut Vec<u8>,
-    stream_id:       &str,
-    state:           &Arc<ServerState>,
-    idle_timeout:    Option<Duration>,
+    mut src: R,
+    encoder: &mut (dyn sonium_codec::Encoder + Send),
+    bc: Arc<Broadcaster>,
+    pcm_buf: &mut [u8],
+    enc_buf: &mut Vec<u8>,
+    stream_id: &str,
+    state: &Arc<ServerState>,
+    idle_timeout: Option<Duration>,
     silence_on_idle: bool,
 ) -> anyhow::Result<()> {
     let silence_pcm: Vec<i16> = vec![0i16; pcm_buf.len() / 2];
     let mut is_idle = false;
     let level_interval = tokio::time::Duration::from_millis(100);
-    let mut last_level  = tokio::time::Instant::now()
+    let mut last_level = tokio::time::Instant::now()
         .checked_sub(level_interval)
         .unwrap_or_else(tokio::time::Instant::now);
 
@@ -444,7 +530,7 @@ async fn run_reader<R: AsyncReadExt + Unpin>(
             }
         } else {
             match src.read_exact(pcm_buf).await {
-                Ok(_)  => true,
+                Ok(_) => true,
                 Err(e) if e.kind() == std::io::ErrorKind::UnexpectedEof => {
                     info!("[{stream_id}] Input closed — reader stopping");
                     break 'read;

@@ -1,4 +1,4 @@
-use sonium_common::{SampleFormat, error::Result};
+use sonium_common::{error::Result, SampleFormat};
 
 /// Decode one encoded frame to interleaved i16 PCM samples.
 pub trait Decoder {

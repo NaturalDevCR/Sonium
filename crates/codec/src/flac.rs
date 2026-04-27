@@ -10,10 +10,10 @@
 use std::io::Cursor;
 
 use crate::traits::{Decoder, Encoder};
-use sonium_common::{SampleFormat, SoniumError, error::Result};
-use sonium_protocol::messages::codec_header::{flac_codec_header, parse_flac_codec_header};
-use flacenc::error::Verify;
 use flacenc::component::BitRepr;
+use flacenc::error::Verify;
+use sonium_common::{error::Result, SampleFormat, SoniumError};
+use sonium_protocol::messages::codec_header::{flac_codec_header, parse_flac_codec_header};
 
 // ── Encoder ──────────────────────────────────────────────────────────────────
 
@@ -25,7 +25,7 @@ use flacenc::component::BitRepr;
 /// The encoder builds a minimal FLAC stream for each block and extracts
 /// just the frame bytes for efficient per-chunk transport over the wire.
 pub struct FlacEncoder {
-    fmt:        SampleFormat,
+    fmt: SampleFormat,
     block_size: u32,
     enc_config: flacenc::error::Verified<flacenc::config::Encoder>,
 }
@@ -41,36 +41,35 @@ impl FlacEncoder {
             .into_verified()
             .map_err(|e| SoniumError::Codec(format!("flac config: {e:?}")))?;
 
-        Ok(Self { fmt, block_size, enc_config })
+        Ok(Self {
+            fmt,
+            block_size,
+            enc_config,
+        })
     }
 }
 
 impl Encoder for FlacEncoder {
     fn encode(&mut self, pcm: &[i16], output: &mut Vec<u8>) -> Result<()> {
-        let channels   = self.fmt.channels as usize;
-        let bits       = self.fmt.bits as usize;
-        let rate       = self.fmt.rate;
+        let channels = self.fmt.channels as usize;
+        let bits = self.fmt.bits as usize;
+        let rate = self.fmt.rate;
         let block_size = self.block_size as usize;
 
         // flacenc expects i32 samples in channel-interleaved order.
         let samples_i32: Vec<i32> = pcm.iter().map(|&s| s as i32).collect();
 
-        let source = flacenc::source::MemSource::from_samples(
-            &samples_i32,
-            channels,
-            bits,
-            rate as usize,
-        );
+        let source =
+            flacenc::source::MemSource::from_samples(&samples_i32, channels, bits, rate as usize);
 
-        let flac_stream = flacenc::encode_with_fixed_block_size(
-            &self.enc_config,
-            source,
-            block_size,
-        ).map_err(|e| SoniumError::Codec(format!("flac encode: {e:?}")))?;
+        let flac_stream =
+            flacenc::encode_with_fixed_block_size(&self.enc_config, source, block_size)
+                .map_err(|e| SoniumError::Codec(format!("flac encode: {e:?}")))?;
 
         // Serialize the FLAC stream to bytes.
         let mut sink = flacenc::bitsink::ByteSink::new();
-        flac_stream.write(&mut sink)
+        flac_stream
+            .write(&mut sink)
             .map_err(|_| SoniumError::Codec("flac bitstream write failed".into()))?;
         let full_bytes = sink.as_slice();
 
@@ -90,11 +89,20 @@ impl Encoder for FlacEncoder {
         Ok(())
     }
 
-    fn sample_format(&self) -> SampleFormat { self.fmt }
-    fn codec_name(&self) -> &'static str { "flac" }
+    fn sample_format(&self) -> SampleFormat {
+        self.fmt
+    }
+    fn codec_name(&self) -> &'static str {
+        "flac"
+    }
 
     fn codec_header(&self) -> Vec<u8> {
-        flac_codec_header(self.fmt.rate, self.fmt.bits, self.fmt.channels, self.block_size)
+        flac_codec_header(
+            self.fmt.rate,
+            self.fmt.bits,
+            self.fmt.channels,
+            self.block_size,
+        )
     }
 }
 
@@ -111,13 +119,18 @@ fn find_first_frame_offset(data: &[u8]) -> Option<usize> {
             return None;
         }
         let is_last = (data[pos] & 0x80) != 0;
-        let block_len = u32::from_be_bytes([0, data[pos + 1], data[pos + 2], data[pos + 3]]) as usize;
+        let block_len =
+            u32::from_be_bytes([0, data[pos + 1], data[pos + 2], data[pos + 3]]) as usize;
         pos += 4 + block_len; // skip block header + body
         if is_last {
             break;
         }
     }
-    if pos <= data.len() { Some(pos) } else { None }
+    if pos <= data.len() {
+        Some(pos)
+    } else {
+        None
+    }
 }
 
 // ── Decoder ──────────────────────────────────────────────────────────────────
@@ -129,7 +142,7 @@ fn find_first_frame_offset(data: &[u8]) -> Option<usize> {
 /// in a minimal FLAC stream (magic + STREAMINFO + frame) so that `claxon`
 /// can parse it.
 pub struct FlacDecoder {
-    fmt:        SampleFormat,
+    fmt: SampleFormat,
     block_size: u32,
 }
 
@@ -147,16 +160,14 @@ impl FlacDecoder {
 impl Decoder for FlacDecoder {
     fn decode(&mut self, input: &[u8], output: &mut Vec<i16>) -> Result<()> {
         // Build a minimal FLAC stream: magic + STREAMINFO + frame data.
-        let stream_bytes = build_minimal_flac_stream(
-            &self.fmt, self.block_size, input,
-        );
+        let stream_bytes = build_minimal_flac_stream(&self.fmt, self.block_size, input);
 
         let cursor = Cursor::new(&stream_bytes);
         let mut reader = claxon::FlacReader::new(cursor)
             .map_err(|e| SoniumError::Codec(format!("flac reader init: {e}")))?;
 
         // Decode all samples from the frame.
-        let bps      = reader.streaminfo().bits_per_sample;
+        let bps = reader.streaminfo().bits_per_sample;
 
         // Read all blocks (should be exactly one frame).
         let mut frame_reader = reader.blocks();
@@ -165,7 +176,7 @@ impl Decoder for FlacDecoder {
             .read_next_or_eof(block_buf.into_buffer())
             .map_err(|e| SoniumError::Codec(format!("flac decode: {e}")))?
         {
-            let n_frames  = block.duration() as usize;  // per-channel sample count
+            let n_frames = block.duration() as usize; // per-channel sample count
             let n_channels = block.channels();
             // Interleave channel samples.
             for i in 0..n_frames {
@@ -186,7 +197,9 @@ impl Decoder for FlacDecoder {
         Ok(())
     }
 
-    fn sample_format(&self) -> SampleFormat { self.fmt }
+    fn sample_format(&self) -> SampleFormat {
+        self.fmt
+    }
 }
 
 /// Build a minimal valid FLAC stream (magic + STREAMINFO + raw frame data).
@@ -206,7 +219,7 @@ fn build_minimal_flac_stream(fmt: &SampleFormat, block_size: u32, frame_data: &[
     out.push(0x80); // last block, type 0
     out.push(0x00);
     out.push(0x00);
-    out.push(34);   // STREAMINFO is always 34 bytes
+    out.push(34); // STREAMINFO is always 34 bytes
 
     // STREAMINFO body (34 bytes)
     // Min/max block size (2 + 2 bytes)
@@ -219,18 +232,17 @@ fn build_minimal_flac_stream(fmt: &SampleFormat, block_size: u32, frame_data: &[
 
     // Sample rate (20 bits) + channels-1 (3 bits) + bps-1 (5 bits) + total samples (36 bits)
     // = 8 bytes total
-    let rate     = fmt.rate;
+    let rate = fmt.rate;
     let channels = fmt.channels as u32;
-    let bps      = fmt.bits as u32;
+    let bps = fmt.bits as u32;
 
     // Bits layout (MSB first):
     // [19:0]  sample rate
     // [22:20] channels - 1
     // [27:23] bits per sample - 1
     // [63:28] total samples (0 = unknown for streaming)
-    let packed: u64 = ((rate as u64) << 44)
-        | (((channels - 1) as u64) << 41)
-        | (((bps - 1) as u64) << 36);
+    let packed: u64 =
+        ((rate as u64) << 44) | (((channels - 1) as u64) << 41) | (((bps - 1) as u64) << 36);
     out.extend_from_slice(&packed.to_be_bytes());
 
     // MD5 signature (16 bytes) — all zeros (not computed for streaming)
@@ -331,7 +343,7 @@ mod tests {
         data.push(0);
         data.push(34); // body length
         data.extend_from_slice(&[0u8; 34]); // STREAMINFO body
-        data.extend_from_slice(b"FRAME");   // fake frame data
+        data.extend_from_slice(b"FRAME"); // fake frame data
 
         assert_eq!(find_first_frame_offset(&data), Some(42));
     }

@@ -5,7 +5,7 @@
 //! Useful for testing and for LAN scenarios where bandwidth is not a concern.
 
 use crate::traits::{Decoder, Encoder};
-use sonium_common::{SampleFormat, error::Result};
+use sonium_common::{error::Result, SampleFormat};
 
 /// PCM decoder — converts raw i16 LE bytes to samples.
 pub struct PcmDecoder {
@@ -15,12 +15,16 @@ pub struct PcmDecoder {
 impl PcmDecoder {
     /// Create a decoder with the default 48 kHz / 16-bit / stereo format.
     pub fn new() -> Self {
-        Self { fmt: SampleFormat::default() }
+        Self {
+            fmt: SampleFormat::default(),
+        }
     }
 }
 
 impl Default for PcmDecoder {
-    fn default() -> Self { Self::new() }
+    fn default() -> Self {
+        Self::new()
+    }
 }
 
 impl Decoder for PcmDecoder {
@@ -32,7 +36,9 @@ impl Decoder for PcmDecoder {
         Ok(())
     }
 
-    fn sample_format(&self) -> SampleFormat { self.fmt }
+    fn sample_format(&self) -> SampleFormat {
+        self.fmt
+    }
 }
 
 /// PCM encoder — serialises i16 samples as little-endian bytes.
@@ -56,12 +62,18 @@ impl Encoder for PcmEncoder {
         Ok(())
     }
 
-    fn sample_format(&self) -> SampleFormat { self.fmt }
-    fn codec_name(&self) -> &'static str { "pcm" }
+    fn sample_format(&self) -> SampleFormat {
+        self.fmt
+    }
+    fn codec_name(&self) -> &'static str {
+        "pcm"
+    }
 
     fn codec_header(&self) -> Vec<u8> {
         sonium_protocol::messages::codec_header::opus_codec_header(
-            self.fmt.rate, self.fmt.bits, self.fmt.channels,
+            self.fmt.rate,
+            self.fmt.bits,
+            self.fmt.channels,
         )
     }
 }
@@ -137,7 +149,7 @@ mod tests {
     #[test]
     fn codec_header_parseable() {
         use sonium_protocol::messages::codec_header::parse_opus_codec_header;
-        let enc    = PcmEncoder::new(SampleFormat::new(48_000, 16, 2));
+        let enc = PcmEncoder::new(SampleFormat::new(48_000, 16, 2));
         let header = enc.codec_header();
         let (rate, bits, ch) = parse_opus_codec_header(&header).unwrap();
         assert_eq!((rate, bits, ch), (48_000, 16, 2));

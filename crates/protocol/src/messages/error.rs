@@ -12,26 +12,38 @@ use sonium_common::error::Result;
 #[derive(Debug, Clone, PartialEq)]
 pub struct ErrorMsg {
     /// Numeric error code (HTTP-like conventions).
-    pub code:    u32,
+    pub code: u32,
     /// Short human-readable error description.
     pub message: String,
     /// Optional extended detail (may be empty).
-    pub detail:  String,
+    pub detail: String,
 }
 
 impl ErrorMsg {
     /// Create an error with a code and message, no detail.
     pub fn new(code: u32, message: impl Into<String>) -> Self {
-        Self { code, message: message.into(), detail: String::new() }
+        Self {
+            code,
+            message: message.into(),
+            detail: String::new(),
+        }
     }
 
     /// Deserialise from a wire payload slice.
     pub fn decode(payload: &[u8]) -> Result<Self> {
-        let mut r   = WireRead::new(payload);
-        let code    = r.read_u32()?;
+        let mut r = WireRead::new(payload);
+        let code = r.read_u32()?;
         let message = r.read_str()?;
-        let detail  = if r.remaining() > 0 { r.read_str()? } else { String::new() };
-        Ok(Self { code, message, detail })
+        let detail = if r.remaining() > 0 {
+            r.read_str()?
+        } else {
+            String::new()
+        };
+        Ok(Self {
+            code,
+            message,
+            detail,
+        })
     }
 
     /// Serialise to a wire payload.
@@ -52,18 +64,22 @@ mod tests {
 
     #[test]
     fn round_trip_with_detail() {
-        let orig    = ErrorMsg { code: 401, message: "Unauthorized".into(), detail: "bad token".into() };
+        let orig = ErrorMsg {
+            code: 401,
+            message: "Unauthorized".into(),
+            detail: "bad token".into(),
+        };
         let decoded = ErrorMsg::decode(&orig.encode()).unwrap();
         assert_eq!(decoded, orig);
     }
 
     #[test]
     fn round_trip_no_detail() {
-        let orig    = ErrorMsg::new(403, "Forbidden");
+        let orig = ErrorMsg::new(403, "Forbidden");
         let decoded = ErrorMsg::decode(&orig.encode()).unwrap();
-        assert_eq!(decoded.code,    403);
+        assert_eq!(decoded.code, 403);
         assert_eq!(decoded.message, "Forbidden");
-        assert_eq!(decoded.detail,  "");
+        assert_eq!(decoded.detail, "");
     }
 
     #[test]

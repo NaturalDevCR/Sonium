@@ -1,6 +1,6 @@
 use std::collections::VecDeque;
+use std::sync::mpsc::{self, Receiver, SyncSender};
 use std::sync::{Arc, Mutex};
-use std::sync::mpsc::{self, SyncSender, Receiver};
 use std::thread;
 use std::time::Duration;
 
@@ -23,8 +23,8 @@ use sonium_common::{SampleFormat, SoniumError};
 /// Dropping `Player` closes the keep-alive sender, which unblocks the audio
 /// thread so the stream is stopped and the thread exits cleanly.
 pub struct Player {
-    ring:      Arc<Mutex<VecDeque<i16>>>,
-    fmt:       SampleFormat,
+    ring: Arc<Mutex<VecDeque<i16>>>,
+    fmt: SampleFormat,
     /// Dropping this disconnects the audio thread's park channel, stopping it.
     _keepalive: SyncSender<()>,
 }
@@ -51,8 +51,16 @@ impl Player {
             .map_err(|_| SoniumError::Audio("audio thread died before init".into()))?
             .map_err(SoniumError::Audio)?;
 
-        info!(rate = fmt.rate, channels = fmt.channels, "Audio output opened");
-        Ok(Self { ring, fmt, _keepalive: park_tx })
+        info!(
+            rate = fmt.rate,
+            channels = fmt.channels,
+            "Audio output opened"
+        );
+        Ok(Self {
+            ring,
+            fmt,
+            _keepalive: park_tx,
+        })
     }
 
     /// Push interleaved i16 PCM samples into the ring buffer.
@@ -76,13 +84,15 @@ impl Player {
 }
 
 fn audio_thread(
-    ring:        Arc<Mutex<VecDeque<i16>>>,
-    fmt:         SampleFormat,
+    ring: Arc<Mutex<VecDeque<i16>>>,
+    fmt: SampleFormat,
     device_name: Option<String>,
-    init_tx:     SyncSender<Result<(), String>>,
-    park_rx:     Receiver<()>,
+    init_tx: SyncSender<Result<(), String>>,
+    park_rx: Receiver<()>,
 ) {
-    if let Err(e) = thread_priority::set_current_thread_priority(thread_priority::ThreadPriority::Max) {
+    if let Err(e) =
+        thread_priority::set_current_thread_priority(thread_priority::ThreadPriority::Max)
+    {
         warn!("Failed to set audio thread priority: {e:?}");
     } else {
         info!("Audio thread priority elevated to Max");
@@ -175,17 +185,17 @@ fn select_device(host: &cpal::Host, requested: Option<&str>) -> Result<cpal::Dev
 }
 
 fn try_open_stream(
-    ring:        Arc<Mutex<VecDeque<i16>>>,
-    fmt:         SampleFormat,
+    ring: Arc<Mutex<VecDeque<i16>>>,
+    fmt: SampleFormat,
     device_name: Option<&str>,
 ) -> Result<cpal::Stream, String> {
-    let host   = cpal::default_host();
+    let host = cpal::default_host();
     let device = select_device(&host, device_name)?;
 
     info!(device = %device.name().unwrap_or_default(), "Audio device selected");
 
     let config = cpal::StreamConfig {
-        channels:    fmt.channels as cpal::ChannelCount,
+        channels: fmt.channels as cpal::ChannelCount,
         sample_rate: cpal::SampleRate(fmt.rate),
         buffer_size: cpal::BufferSize::Default,
     };
@@ -231,11 +241,11 @@ fn try_open_stream(
 /// - **FadingIn** — new data arrived after silence; `feed()` ramps from 0
 ///   back to full amplitude over `fade_len` samples.
 struct FadeState {
-    phase:     FadePhase,
-    fade_len:  usize,
-    fade_pos:  usize,
+    phase: FadePhase,
+    fade_len: usize,
+    fade_pos: usize,
     /// Last sample value, used as the starting point for fade-out.
-    last_val:  i16,
+    last_val: i16,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

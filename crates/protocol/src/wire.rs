@@ -7,7 +7,7 @@ pub type Result<T> = sonium_common::error::Result<T>;
 
 pub struct WireRead<'a> {
     data: &'a [u8],
-    pos:  usize,
+    pos: usize,
 }
 
 impl<'a> WireRead<'a> {
@@ -71,7 +71,9 @@ impl WireWrite {
     }
 
     pub fn with_capacity(cap: usize) -> Self {
-        Self { buf: Vec::with_capacity(cap) }
+        Self {
+            buf: Vec::with_capacity(cap),
+        }
     }
 
     pub fn write_u16(&mut self, v: u16) {

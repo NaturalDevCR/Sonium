@@ -13,12 +13,12 @@
 use std::sync::Arc;
 
 use axum::{
-    Router,
     extract::{Path, Request, State},
-    http::{StatusCode, header},
+    http::{header, StatusCode},
     middleware::{self, Next},
     response::{IntoResponse, Json, Response},
     routing::{get, post, put},
+    Router,
 };
 use serde::{Deserialize, Serialize};
 
@@ -32,15 +32,15 @@ pub type AuthState = Arc<UserStore>;
 
 pub fn router(store: AuthState) -> Router {
     let protected = Router::new()
-        .route("/auth/me",      get(get_me))
-        .route("/auth/logout",  post(logout))
-        .route("/users",        get(list_users).post(create_user))
-        .route("/users/:id",    put(update_user).delete(delete_user))
+        .route("/auth/me", get(get_me))
+        .route("/auth/logout", post(logout))
+        .route("/users", get(list_users).post(create_user))
+        .route("/users/:id", put(update_user).delete(delete_user))
         .layer(middleware::from_fn_with_state(store.clone(), require_auth));
 
     Router::new()
-        .route("/auth/login",   post(login))
-        .route("/auth/setup",   post(setup))
+        .route("/auth/login", post(login))
+        .route("/auth/setup", post(setup))
         .merge(protected)
         .with_state(store)
 }
@@ -56,11 +56,7 @@ pub struct AuthUser(pub Claims);
 #[derive(Clone)]
 pub struct RawToken(pub String);
 
-async fn require_auth(
-    State(store): State<AuthState>,
-    mut req: Request,
-    next: Next,
-) -> Response {
+async fn require_auth(State(store): State<AuthState>, mut req: Request, next: Next) -> Response {
     let token = req
         .headers()
         .get(header::AUTHORIZATION)
@@ -101,17 +97,18 @@ struct LoginBody {
 #[derive(Serialize)]
 struct TokenResponse {
     token: String,
-    user:  UserView,
+    user: UserView,
 }
 
-async fn login(
-    State(store): State<AuthState>,
-    Json(body): Json<LoginBody>,
-) -> Response {
+async fn login(State(store): State<AuthState>, Json(body): Json<LoginBody>) -> Response {
     match store.authenticate(&body.username, &body.password) {
         Some(user) => {
             let token = store.create_token(&user, 24);
-            Json(TokenResponse { token, user: UserView::from(&user) }).into_response()
+            Json(TokenResponse {
+                token,
+                user: UserView::from(&user),
+            })
+            .into_response()
         }
         None => (StatusCode::UNAUTHORIZED, "invalid credentials").into_response(),
     }
@@ -123,10 +120,7 @@ struct SetupBody {
     password: String,
 }
 
-async fn setup(
-    State(store): State<AuthState>,
-    Json(body): Json<SetupBody>,
-) -> Response {
+async fn setup(State(store): State<AuthState>, Json(body): Json<SetupBody>) -> Response {
     if !store.is_setup_needed() {
         return (StatusCode::CONFLICT, "already initialized").into_response();
     }
@@ -140,9 +134,7 @@ async fn setup(
     }
 }
 
-async fn get_me(
-    axum::Extension(user): axum::Extension<AuthUser>,
-) -> Json<serde_json::Value> {
+async fn get_me(axum::Extension(user): axum::Extension<AuthUser>) -> Json<serde_json::Value> {
     Json(serde_json::json!({
         "id":       user.0.sub,
         "username": user.0.username,
@@ -162,7 +154,9 @@ async fn list_users(
     axum::Extension(caller): axum::Extension<AuthUser>,
     State(store): State<AuthState>,
 ) -> Response {
-    if let Err(e) = require_admin(&caller) { return e; }
+    if let Err(e) = require_admin(&caller) {
+        return e;
+    }
     Json(store.all_users()).into_response()
 }
 
@@ -170,7 +164,7 @@ async fn list_users(
 struct CreateUserBody {
     username: String,
     password: String,
-    role:     Role,
+    role: Role,
 }
 
 async fn create_user(
@@ -178,16 +172,18 @@ async fn create_user(
     State(store): State<AuthState>,
     Json(body): Json<CreateUserBody>,
 ) -> Response {
-    if let Err(e) = require_admin(&caller) { return e; }
+    if let Err(e) = require_admin(&caller) {
+        return e;
+    }
     match store.create_user(&body.username, &body.password, body.role) {
         Some(u) => (StatusCode::CREATED, Json(u)).into_response(),
-        None    => (StatusCode::CONFLICT, "username already taken").into_response(),
+        None => (StatusCode::CONFLICT, "username already taken").into_response(),
     }
 }
 
 #[derive(Deserialize)]
 struct UpdateUserBody {
-    role:     Option<Role>,
+    role: Option<Role>,
     password: Option<String>,
 }
 
@@ -199,7 +195,7 @@ async fn update_user(
 ) -> Response {
     // Admin can update anyone; non-admin can only update their own password.
     let is_admin = caller.0.role == "admin";
-    let is_self  = caller.0.sub == id;
+    let is_self = caller.0.sub == id;
 
     if !is_admin && !is_self {
         return (StatusCode::FORBIDDEN, "cannot update other users").into_response();
@@ -221,7 +217,9 @@ async fn delete_user(
     State(store): State<AuthState>,
     Path(id): Path<String>,
 ) -> Response {
-    if let Err(e) = require_admin(&caller) { return e; }
+    if let Err(e) = require_admin(&caller) {
+        return e;
+    }
     if caller.0.sub == id {
         return (StatusCode::BAD_REQUEST, "cannot delete your own account").into_response();
     }

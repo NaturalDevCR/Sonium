@@ -49,9 +49,9 @@
 //! [Snapcast protocol spec]: https://github.com/badaix/snapcast/blob/master/doc/binary_protocol.md
 
 pub mod header;
-pub mod wire;
 pub mod messages;
+pub mod wire;
 
 pub use header::{MessageHeader, MessageType, Timestamp};
-pub use wire::{WireRead, WireWrite};
 pub use messages::Message;
+pub use wire::{WireRead, WireWrite};

@@ -12,17 +12,17 @@
 //! - **[`discovery`]** — mDNS advertisement + subnet scanner for finding
 //!   Sonium clients and servers on the network.
 
-pub mod state;
 pub mod api;
-pub mod ws;
-pub mod discovery;
 pub mod auth;
 pub mod auth_api;
 pub mod config_api;
-pub mod system_api;
+pub mod discovery;
 pub mod persistence;
+pub mod state;
+pub mod system_api;
+pub mod ws;
 
-pub use state::ServerState;
-pub use ws::EventBus;
 pub use auth::UserStore;
 pub use persistence::PersistenceStore;
+pub use state::ServerState;
+pub use ws::EventBus;

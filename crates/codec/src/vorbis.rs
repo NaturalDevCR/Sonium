@@ -18,10 +18,12 @@
 //! The decoder exists so that a Sonium client can connect to a Snapcast server
 //! that is streaming Vorbis audio.
 
-use lewton::header::{read_header_comment, read_header_ident, read_header_setup, IdentHeader, SetupHeader};
 use lewton::audio::{read_audio_packet, PreviousWindowRight};
+use lewton::header::{
+    read_header_comment, read_header_ident, read_header_setup, IdentHeader, SetupHeader,
+};
 
-use sonium_common::{SampleFormat, SoniumError, error::Result};
+use sonium_common::{error::Result, SampleFormat, SoniumError};
 use sonium_protocol::wire::{WireRead, WireWrite};
 
 use crate::traits::Decoder;
@@ -29,26 +31,30 @@ use crate::traits::Decoder;
 // ── Decoder ───────────────────────────────────────────────────────────────────
 
 pub struct VorbisDecoder {
-    ident:       IdentHeader,
-    setup:       SetupHeader,
+    ident: IdentHeader,
+    setup: SetupHeader,
     prev_window: PreviousWindowRight,
-    fmt:         SampleFormat,
+    fmt: SampleFormat,
 }
 
 impl VorbisDecoder {
     /// Construct from the `header_data` blob received in a `CodecHeader` message.
     pub fn from_header(data: &[u8]) -> Result<Self> {
         let mut r = WireRead::new(data);
-        let ident_pkt   = r.read_blob()?;
+        let ident_pkt = r.read_blob()?;
         let comment_pkt = r.read_blob()?;
-        let setup_pkt   = r.read_blob()?;
+        let setup_pkt = r.read_blob()?;
 
         let ident = read_header_ident(&ident_pkt)
             .map_err(|e| SoniumError::Codec(format!("vorbis ident header: {e}")))?;
         let _comment = read_header_comment(&comment_pkt)
             .map_err(|e| SoniumError::Codec(format!("vorbis comment header: {e}")))?;
-        let setup = read_header_setup(&setup_pkt, ident.audio_channels, (ident.blocksize_0, ident.blocksize_1))
-            .map_err(|e| SoniumError::Codec(format!("vorbis setup header: {e}")))?;
+        let setup = read_header_setup(
+            &setup_pkt,
+            ident.audio_channels,
+            (ident.blocksize_0, ident.blocksize_1),
+        )
+        .map_err(|e| SoniumError::Codec(format!("vorbis setup header: {e}")))?;
 
         let fmt = SampleFormat::new(ident.audio_sample_rate, 16, ident.audio_channels as u16);
 
@@ -67,7 +73,7 @@ impl Decoder for VorbisDecoder {
         let decoded = read_audio_packet(&self.ident, &self.setup, input, &mut self.prev_window)
             .map_err(|e| SoniumError::Codec(format!("vorbis decode: {e}")))?;
 
-        let n_ch      = decoded.len();
+        let n_ch = decoded.len();
         let n_samples = decoded.first().map(|c| c.len()).unwrap_or(0);
 
         // Interleave channels: [L0, R0, L1, R1, ...]
@@ -80,7 +86,9 @@ impl Decoder for VorbisDecoder {
         Ok(())
     }
 
-    fn sample_format(&self) -> SampleFormat { self.fmt }
+    fn sample_format(&self) -> SampleFormat {
+        self.fmt
+    }
 }
 
 // ── Header builder (server side, for round-trip) ──────────────────────────────

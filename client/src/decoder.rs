@@ -1,5 +1,5 @@
-use sonium_common::{SoniumError, SampleFormat};
 use sonium_codec::{make_decoder, traits::Decoder};
+use sonium_common::{SampleFormat, SoniumError};
 
 pub struct ActiveDecoder {
     inner: Box<dyn Decoder + Send>,
@@ -7,7 +7,9 @@ pub struct ActiveDecoder {
 
 impl ActiveDecoder {
     pub fn from_codec(codec: &str, header_data: &[u8]) -> Result<Self, SoniumError> {
-        Ok(Self { inner: make_decoder(codec, header_data)? })
+        Ok(Self {
+            inner: make_decoder(codec, header_data)?,
+        })
     }
 
     pub fn decode(&mut self, input: &[u8], output: &mut Vec<i16>) -> Result<(), SoniumError> {

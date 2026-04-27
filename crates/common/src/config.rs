@@ -6,10 +6,10 @@ use crate::SampleFormat;
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(default)]
 pub struct ServerConfig {
-    pub server:  ServerNet,
+    pub server: ServerNet,
     /// One entry per audio stream source.  The first entry is the "default" stream.
     pub streams: Vec<StreamSource>,
-    pub log:     LogConfig,
+    pub log: LogConfig,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -57,7 +57,7 @@ pub struct StreamSource {
     /// - `tcp-listen://0.0.0.0:4953` — listen for TCP senders
     /// - `tcp://0.0.0.0:4953?mode=server` — Snapcast-style TCP listener
     pub source: String,
-    pub codec:  String,
+    pub codec: String,
     pub sample_format: SampleFormat,
     /// Milliseconds of jitter buffer suggested to connected clients.
     pub buffer_ms: u32,
@@ -78,9 +78,9 @@ pub struct LogConfig {
 impl Default for ServerConfig {
     fn default() -> Self {
         Self {
-            server:  ServerNet::default(),
+            server: ServerNet::default(),
             streams: vec![StreamSource::default()],
-            log:     LogConfig::default(),
+            log: LogConfig::default(),
         }
     }
 }
@@ -88,10 +88,10 @@ impl Default for ServerConfig {
 impl Default for ServerNet {
     fn default() -> Self {
         Self {
-            bind:           "0.0.0.0".into(),
-            stream_port:    1710,
-            control_port:   1711,
-            mdns:           true,
+            bind: "0.0.0.0".into(),
+            stream_port: 1710,
+            control_port: 1711,
+            mdns: true,
             snapcast_compat: false,
         }
     }
@@ -100,12 +100,12 @@ impl Default for ServerNet {
 impl Default for StreamSource {
     fn default() -> Self {
         Self {
-            id:            "default".into(),
-            display_name:  None,
-            source:          "-".into(),
-            codec:           "opus".into(),
-            sample_format:   SampleFormat::default(),
-            buffer_ms:       1000,
+            id: "default".into(),
+            display_name: None,
+            source: "-".into(),
+            codec: "opus".into(),
+            sample_format: SampleFormat::default(),
+            buffer_ms: 1000,
             idle_timeout_ms: None,
             silence_on_idle: false,
         }
@@ -114,7 +114,9 @@ impl Default for StreamSource {
 
 impl Default for LogConfig {
     fn default() -> Self {
-        Self { level: "info".into() }
+        Self {
+            level: "info".into(),
+        }
     }
 }
 
@@ -158,9 +160,9 @@ impl Default for ClientConfig {
         Self {
             server_host: "127.0.0.1".into(),
             server_port: 1710,
-            latency_ms:  0,
+            latency_ms: 0,
             client_name: None,
-            device:      None,
+            device: None,
             log: LogConfig::default(),
         }
     }

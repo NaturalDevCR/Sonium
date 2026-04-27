@@ -4,33 +4,73 @@
 //! The server emits events from the [`crate::state::ServerState`] mutation
 //! methods; connected WebSocket handlers subscribe and forward them as JSON.
 
-use serde::Serialize;
-use tokio::sync::broadcast;
 use crate::state::{ClientInfo, Group, StreamStatus};
+use serde::Serialize;
 use sonium_protocol::messages::EqBand;
+use tokio::sync::broadcast;
 
 /// All events that can be pushed to connected web UI clients.
 #[derive(Debug, Clone, Serialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum Event {
-    ClientConnected    { client: ClientInfo },
-    ClientDisconnected { client_id: String },
-    ClientDeleted      { client_id: String },
-    ClientRenamed      { client_id: String, display_name: String },
-    VolumeChanged      { client_id: String, volume: u8, muted: bool },
-    LatencyChanged     { client_id: String, latency_ms: i32 },
-    ClientGroupChanged { client_id: String, group_id: String },
-    GroupCreated       { group: Group },
-    GroupDeleted       { group_id: String },
-    GroupRenamed       { group_id: String, name: String },
-    GroupStreamChanged { group_id: String, stream_id: String },
-    StreamStatus       { stream_id: String, status: StreamStatus },
+    ClientConnected {
+        client: ClientInfo,
+    },
+    ClientDisconnected {
+        client_id: String,
+    },
+    ClientDeleted {
+        client_id: String,
+    },
+    ClientRenamed {
+        client_id: String,
+        display_name: String,
+    },
+    VolumeChanged {
+        client_id: String,
+        volume: u8,
+        muted: bool,
+    },
+    LatencyChanged {
+        client_id: String,
+        latency_ms: i32,
+    },
+    ClientGroupChanged {
+        client_id: String,
+        group_id: String,
+    },
+    GroupCreated {
+        group: Group,
+    },
+    GroupDeleted {
+        group_id: String,
+    },
+    GroupRenamed {
+        group_id: String,
+        name: String,
+    },
+    GroupStreamChanged {
+        group_id: String,
+        stream_id: String,
+    },
+    StreamStatus {
+        stream_id: String,
+        status: StreamStatus,
+    },
     /// Emitted periodically so the UI can show server uptime / clock.
-    Heartbeat          { uptime_s: i64 },
+    Heartbeat {
+        uptime_s: i64,
+    },
     /// Emitted ~10 times/s so the UI can show a per-stream VU meter.
-    StreamLevel        { stream_id: String, rms_db: f32 },
+    StreamLevel {
+        stream_id: String,
+        rms_db: f32,
+    },
     /// Emitted when the operator changes a client's EQ bands.
-    EqChanged          { client_id: String, eq_bands: Vec<EqBand> },
+    EqChanged {
+        client_id: String,
+        eq_bands: Vec<EqBand>,
+    },
 }
 
 /// Broadcast channel wrapper for [`Event`]s.
@@ -63,5 +103,7 @@ impl EventBus {
 }
 
 impl Default for EventBus {
-    fn default() -> Self { Self::new() }
+    fn default() -> Self {
+        Self::new()
+    }
 }

@@ -33,7 +33,11 @@ pub struct SampleFormat {
 impl SampleFormat {
     /// Create a new sample format.
     pub fn new(rate: u32, bits: u16, channels: u16) -> Self {
-        Self { rate, bits, channels }
+        Self {
+            rate,
+            bits,
+            channels,
+        }
     }
 
     /// Bytes per sample per channel (`bits / 8`).
@@ -51,7 +55,11 @@ impl SampleFormat {
 
     /// Number of frames that fit in `byte_len` bytes.
     pub fn frame_count(&self, byte_len: usize) -> usize {
-        if self.frame_size() == 0 { 0 } else { byte_len / self.frame_size() }
+        if self.frame_size() == 0 {
+            0
+        } else {
+            byte_len / self.frame_size()
+        }
     }
 
     /// Wall-clock duration in milliseconds for `frames` PCM frames.
@@ -76,7 +84,11 @@ impl std::fmt::Display for SampleFormat {
 impl Default for SampleFormat {
     /// 48 kHz / 16-bit / stereo — the Opus default and most common configuration.
     fn default() -> Self {
-        Self { rate: 48_000, bits: 16, channels: 2 }
+        Self {
+            rate: 48_000,
+            bits: 16,
+            channels: 2,
+        }
     }
 }
 
@@ -131,7 +143,11 @@ mod tests {
 
     #[test]
     fn zero_frame_size_does_not_panic() {
-        let fmt = SampleFormat { rate: 48_000, bits: 0, channels: 0 };
+        let fmt = SampleFormat {
+            rate: 48_000,
+            bits: 0,
+            channels: 0,
+        };
         assert_eq!(fmt.frame_count(1024), 0);
     }
 }

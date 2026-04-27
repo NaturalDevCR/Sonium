@@ -9,8 +9,8 @@
 //! u8[] json_bytes[json_length]
 //! ```
 
-use serde::{Deserialize, Serialize};
 use crate::wire::{WireRead, WireWrite};
+use serde::{Deserialize, Serialize};
 use sonium_common::error::Result;
 
 /// Client hello sent as the first message after establishing a TCP connection.
@@ -52,14 +52,14 @@ impl Hello {
     /// Create a `Hello` populated with the current host's metadata.
     pub fn new(hostname: impl Into<String>, id: impl Into<String>) -> Self {
         Self {
-            mac:              "00:00:00:00:00:00".into(),
-            hostname:         hostname.into(),
-            version:          env!("CARGO_PKG_VERSION").into(),
-            client_name:      "Sonium".into(),
-            os:               std::env::consts::OS.into(),
-            arch:             std::env::consts::ARCH.into(),
-            instance:         1,
-            id:               id.into(),
+            mac: "00:00:00:00:00:00".into(),
+            hostname: hostname.into(),
+            version: env!("CARGO_PKG_VERSION").into(),
+            client_name: "Sonium".into(),
+            os: std::env::consts::OS.into(),
+            arch: std::env::consts::ARCH.into(),
+            instance: 1,
+            id: id.into(),
             protocol_version: 2,
         }
     }
@@ -89,21 +89,21 @@ mod tests {
 
     fn sample() -> Hello {
         Hello {
-            mac:              "aa:bb:cc:dd:ee:ff".into(),
-            hostname:         "test-host".into(),
-            version:          "0.1.0".into(),
-            client_name:      "Sonium".into(),
-            os:               "linux".into(),
-            arch:             "x86_64".into(),
-            instance:         1,
-            id:               "unique-id-123".into(),
+            mac: "aa:bb:cc:dd:ee:ff".into(),
+            hostname: "test-host".into(),
+            version: "0.1.0".into(),
+            client_name: "Sonium".into(),
+            os: "linux".into(),
+            arch: "x86_64".into(),
+            instance: 1,
+            id: "unique-id-123".into(),
             protocol_version: 2,
         }
     }
 
     #[test]
     fn round_trip() {
-        let orig    = sample();
+        let orig = sample();
         let encoded = orig.encode();
         let decoded = Hello::decode(&encoded).unwrap();
         assert_eq!(decoded, orig);

@@ -8,12 +8,12 @@
 //! sessions stay in sync in real time, and (when a `PersistenceStore` is
 //! provided) also saves to `sonium-state.json` so the state survives restarts.
 
+use chrono::{DateTime, Utc};
+use parking_lot::RwLock;
+use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::net::SocketAddr;
 use std::sync::Arc;
-use parking_lot::RwLock;
-use serde::{Deserialize, Serialize};
-use chrono::{DateTime, Utc};
 
 use crate::persistence::{PersistedClient, PersistedGroup, PersistenceStore};
 use crate::ws::EventBus;
@@ -35,27 +35,27 @@ pub enum ClientStatus {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ClientInfo {
     /// Stable unique ID sent in the `Hello` message.
-    pub id:           String,
+    pub id: String,
     /// Human-readable hostname.
-    pub hostname:     String,
+    pub hostname: String,
     /// Client application name (e.g. `"Sonium"`, `"Snapclient"`).
-    pub client_name:  String,
+    pub client_name: String,
     /// Operating system string.
-    pub os:           String,
+    pub os: String,
     /// CPU architecture.
-    pub arch:         String,
+    pub arch: String,
     /// Remote socket address (IP:port of the TCP connection).
-    pub remote_addr:  String,
+    pub remote_addr: String,
     /// Volume (0–100).
-    pub volume:       u8,
+    pub volume: u8,
     /// Whether the client is muted.
-    pub muted:        bool,
+    pub muted: bool,
     /// Extra latency offset in ms (for Bluetooth / HDMI compensation).
-    pub latency_ms:   i32,
+    pub latency_ms: i32,
     /// Group this client belongs to (empty string = default group).
-    pub group_id:     String,
+    pub group_id: String,
     /// Connection status.
-    pub status:       ClientStatus,
+    pub status: ClientStatus,
     /// When the client last connected.
     pub connected_at: DateTime<Utc>,
     /// Protocol version reported in `Hello`.
@@ -85,11 +85,11 @@ impl ClientInfo {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Group {
     /// Unique identifier (auto-generated UUID).
-    pub id:         String,
+    pub id: String,
     /// Display name shown in the web UI.
-    pub name:       String,
+    pub name: String,
     /// The stream this group is playing.
-    pub stream_id:  String,
+    pub stream_id: String,
     /// Ordered list of client IDs in this group.
     pub client_ids: Vec<String>,
 }
@@ -99,11 +99,11 @@ pub struct Group {
 /// An active audio stream.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct StreamInfo {
-    pub id:           String,
+    pub id: String,
     pub display_name: Option<String>,
-    pub codec:        String,
-    pub format:       String,
-    pub status:       StreamStatus,
+    pub codec: String,
+    pub format: String,
+    pub status: StreamStatus,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -119,46 +119,49 @@ pub enum StreamStatus {
 /// Thread-safe in-memory state shared between the audio server and the
 /// control API.
 pub struct ServerState {
-    clients:           RwLock<HashMap<String, ClientInfo>>,
-    groups:            RwLock<HashMap<String, Group>>,
-    streams:           RwLock<HashMap<String, StreamInfo>>,
-    events:            Arc<EventBus>,
-    start_time:        DateTime<Utc>,
-    persistence:       Option<Arc<PersistenceStore>>,
+    clients: RwLock<HashMap<String, ClientInfo>>,
+    groups: RwLock<HashMap<String, Group>>,
+    streams: RwLock<HashMap<String, StreamInfo>>,
+    events: Arc<EventBus>,
+    start_time: DateTime<Utc>,
+    persistence: Option<Arc<PersistenceStore>>,
     /// Snapshot loaded at startup; used to restore per-client settings on reconnect.
-    saved_clients:     Vec<PersistedClient>,
+    saved_clients: Vec<PersistedClient>,
 }
 
 impl ServerState {
     pub fn new(
-        events:        Arc<EventBus>,
-        persistence:   Option<Arc<PersistenceStore>>,
+        events: Arc<EventBus>,
+        persistence: Option<Arc<PersistenceStore>>,
         saved_clients: Vec<PersistedClient>,
     ) -> Self {
-        let mut groups  = HashMap::new();
+        let mut groups = HashMap::new();
         let default_grp = Group {
-            id:         "default".into(),
-            name:       "Default".into(),
-            stream_id:  "default".into(),
+            id: "default".into(),
+            name: "Default".into(),
+            stream_id: "default".into(),
             client_ids: vec![],
         };
         groups.insert("default".into(), default_grp);
 
         let mut streams = HashMap::new();
-        streams.insert("default".into(), StreamInfo {
-            id:           "default".into(),
-            display_name: None,
-            codec:        "opus".into(),
-            format:       "48000Hz/16bit/2ch".into(),
-            status:       StreamStatus::Idle,
-        });
+        streams.insert(
+            "default".into(),
+            StreamInfo {
+                id: "default".into(),
+                display_name: None,
+                codec: "opus".into(),
+                format: "48000Hz/16bit/2ch".into(),
+                status: StreamStatus::Idle,
+            },
+        );
 
         Self {
-            clients:       RwLock::new(HashMap::new()),
-            groups:        RwLock::new(groups),
-            streams:       RwLock::new(streams),
+            clients: RwLock::new(HashMap::new()),
+            groups: RwLock::new(groups),
+            streams: RwLock::new(streams),
             events,
-            start_time:    Utc::now(),
+            start_time: Utc::now(),
             persistence,
             saved_clients,
         }
@@ -169,9 +172,9 @@ impl ServerState {
         let mut groups = self.groups.write();
         for pg in persisted {
             groups.entry(pg.id.clone()).or_insert_with(|| Group {
-                id:         pg.id,
-                name:       pg.name,
-                stream_id:  pg.stream_id,
+                id: pg.id,
+                name: pg.name,
+                stream_id: pg.stream_id,
                 client_ids: vec![],
             });
         }
@@ -180,23 +183,35 @@ impl ServerState {
     // ── Internal helpers ──────────────────────────────────────────────────
 
     fn persist(&self) {
-        let Some(store) = &self.persistence else { return };
-        let groups: Vec<PersistedGroup> = self.groups.read().values().map(|g| PersistedGroup {
-            id:        g.id.clone(),
-            name:      g.name.clone(),
-            stream_id: g.stream_id.clone(),
-        }).collect();
-        let clients: Vec<PersistedClient> = self.clients.read().values().map(|c| PersistedClient {
-            id:           c.id.clone(),
-            hostname:     c.hostname.clone(),
-            display_name: c.display_name.clone(),
-            volume:       c.volume,
-            muted:        c.muted,
-            latency_ms:   c.latency_ms,
-            group_id:     c.group_id.clone(),
-            eq_bands:     c.eq_bands.clone(),
-            last_seen:    Utc::now(),
-        }).collect();
+        let Some(store) = &self.persistence else {
+            return;
+        };
+        let groups: Vec<PersistedGroup> = self
+            .groups
+            .read()
+            .values()
+            .map(|g| PersistedGroup {
+                id: g.id.clone(),
+                name: g.name.clone(),
+                stream_id: g.stream_id.clone(),
+            })
+            .collect();
+        let clients: Vec<PersistedClient> = self
+            .clients
+            .read()
+            .values()
+            .map(|c| PersistedClient {
+                id: c.id.clone(),
+                hostname: c.hostname.clone(),
+                display_name: c.display_name.clone(),
+                volume: c.volume,
+                muted: c.muted,
+                latency_ms: c.latency_ms,
+                group_id: c.group_id.clone(),
+                eq_bands: c.eq_bands.clone(),
+                last_seen: Utc::now(),
+            })
+            .collect();
         store.save(&groups, &clients);
     }
 
@@ -206,38 +221,52 @@ impl ServerState {
     #[allow(clippy::too_many_arguments)]
     pub fn client_connected(
         &self,
-        id:          impl Into<String>,
-        hostname:    impl Into<String>,
+        id: impl Into<String>,
+        hostname: impl Into<String>,
         client_name: impl Into<String>,
-        os:          impl Into<String>,
-        arch:        impl Into<String>,
-        addr:        SocketAddr,
+        os: impl Into<String>,
+        arch: impl Into<String>,
+        addr: SocketAddr,
         protocol_version: u32,
     ) {
-        let id       = id.into();
+        let id = id.into();
         let hostname = hostname.into();
 
         // Restore settings from the last persisted snapshot for this client ID.
         let saved = self.saved_clients.iter().find(|c| c.id == id);
 
-        let (volume, muted, latency_ms, group_id, display_name, eq_bands): (u8, bool, i32, String, Option<String>, Vec<EqBand>) = if let Some(s) = saved {
-            (s.volume, s.muted, s.latency_ms, s.group_id.clone(), s.display_name.clone(), s.eq_bands.clone())
+        let (volume, muted, latency_ms, group_id, display_name, eq_bands): (
+            u8,
+            bool,
+            i32,
+            String,
+            Option<String>,
+            Vec<EqBand>,
+        ) = if let Some(s) = saved {
+            (
+                s.volume,
+                s.muted,
+                s.latency_ms,
+                s.group_id.clone(),
+                s.display_name.clone(),
+                s.eq_bands.clone(),
+            )
         } else {
             (100, false, 0, "default".into(), None, vec![])
         };
 
         let info = ClientInfo {
-            id:           id.clone(),
-            hostname:     hostname.clone(),
-            client_name:  client_name.into(),
-            os:           os.into(),
-            arch:         arch.into(),
-            remote_addr:  addr.to_string(),
+            id: id.clone(),
+            hostname: hostname.clone(),
+            client_name: client_name.into(),
+            os: os.into(),
+            arch: arch.into(),
+            remote_addr: addr.to_string(),
             volume,
             muted,
             latency_ms,
-            group_id:     group_id.clone(),
-            status:       ClientStatus::Connected,
+            group_id: group_id.clone(),
+            status: ClientStatus::Connected,
             connected_at: Utc::now(),
             protocol_version,
             display_name,
@@ -251,14 +280,19 @@ impl ServerState {
             for g in groups.values_mut() {
                 g.client_ids.retain(|cid| cid != &id);
             }
-            let target = if groups.contains_key(&group_id) { group_id.clone() } else { "default".into() };
+            let target = if groups.contains_key(&group_id) {
+                group_id.clone()
+            } else {
+                "default".into()
+            };
             if let Some(grp) = groups.get_mut(&target) {
                 grp.client_ids.push(id.clone());
             }
         }
 
         self.clients.write().insert(id.clone(), info.clone());
-        self.events.emit(crate::ws::Event::ClientConnected { client: info });
+        self.events
+            .emit(crate::ws::Event::ClientConnected { client: info });
     }
 
     /// Mark a client as disconnected (keeps history in the registry).
@@ -266,7 +300,9 @@ impl ServerState {
         let mut clients = self.clients.write();
         if let Some(c) = clients.get_mut(id) {
             c.status = ClientStatus::Disconnected;
-            self.events.emit(crate::ws::Event::ClientDisconnected { client_id: id.into() });
+            self.events.emit(crate::ws::Event::ClientDisconnected {
+                client_id: id.into(),
+            });
         }
     }
 
@@ -284,19 +320,19 @@ impl ServerState {
         if let Some(g) = self.groups.write().get_mut(&info.group_id) {
             g.client_ids.retain(|id| id != client_id);
         }
-        self.events.emit(crate::ws::Event::ClientDeleted { client_id: client_id.into() });
+        self.events.emit(crate::ws::Event::ClientDeleted {
+            client_id: client_id.into(),
+        });
         self.persist();
         true
     }
 
     /// Update volume and/or mute for a client, push event, return the new state.
-    pub fn set_volume(&self, client_id: &str, volume: u8, muted: bool)
-        -> Option<(u8, bool)>
-    {
+    pub fn set_volume(&self, client_id: &str, volume: u8, muted: bool) -> Option<(u8, bool)> {
         let mut clients = self.clients.write();
         let c = clients.get_mut(client_id)?;
         c.volume = volume;
-        c.muted  = muted;
+        c.muted = muted;
         self.events.emit(crate::ws::Event::VolumeChanged {
             client_id: client_id.into(),
             volume,
@@ -343,7 +379,10 @@ impl ServerState {
 
     /// Read the EQ bands for a client.
     pub fn get_eq(&self, client_id: &str) -> Option<Vec<EqBand>> {
-        self.clients.read().get(client_id).map(|c| c.eq_bands.clone())
+        self.clients
+            .read()
+            .get(client_id)
+            .map(|c| c.eq_bands.clone())
     }
 
     /// Set an operator-assigned display name for a client.
@@ -352,7 +391,7 @@ impl ServerState {
         if let Some(c) = clients.get_mut(client_id) {
             c.display_name = display_name.clone();
             self.events.emit(crate::ws::Event::ClientRenamed {
-                client_id:    client_id.into(),
+                client_id: client_id.into(),
                 display_name: display_name.unwrap_or_default(),
             });
             drop(clients);
@@ -366,13 +405,15 @@ impl ServerState {
     /// Move a client to a different group.
     pub fn set_client_group(&self, client_id: &str, group_id: &str) -> bool {
         let mut clients = self.clients.write();
-        let mut groups  = self.groups.write();
+        let mut groups = self.groups.write();
 
         let client = match clients.get_mut(client_id) {
             Some(c) => c,
-            None    => return false,
+            None => return false,
         };
-        if !groups.contains_key(group_id) { return false; }
+        if !groups.contains_key(group_id) {
+            return false;
+        }
 
         // Remove from old group
         if let Some(old_grp) = groups.get_mut(&client.group_id) {
@@ -387,7 +428,7 @@ impl ServerState {
         client.group_id = group_id.into();
         self.events.emit(crate::ws::Event::ClientGroupChanged {
             client_id: client_id.into(),
-            group_id:  group_id.into(),
+            group_id: group_id.into(),
         });
         drop(clients);
         drop(groups);
@@ -399,23 +440,26 @@ impl ServerState {
 
     /// Create a new group and return its generated ID.
     pub fn create_group(&self, name: impl Into<String>, stream_id: impl Into<String>) -> String {
-        let id  = uuid::Uuid::new_v4().to_string();
+        let id = uuid::Uuid::new_v4().to_string();
         let grp = Group {
-            id:         id.clone(),
-            name:       name.into(),
-            stream_id:  stream_id.into(),
+            id: id.clone(),
+            name: name.into(),
+            stream_id: stream_id.into(),
             client_ids: vec![],
         };
         self.groups.write().insert(id.clone(), grp.clone());
-        self.events.emit(crate::ws::Event::GroupCreated { group: grp });
+        self.events
+            .emit(crate::ws::Event::GroupCreated { group: grp });
         self.persist();
         id
     }
 
     /// Delete a group; clients in the group are moved to "default".
     pub fn delete_group(&self, group_id: &str) -> bool {
-        if group_id == "default" { return false; }
-        let mut groups  = self.groups.write();
+        if group_id == "default" {
+            return false;
+        }
+        let mut groups = self.groups.write();
         let mut clients = self.clients.write();
 
         if let Some(grp) = groups.remove(group_id) {
@@ -427,7 +471,9 @@ impl ServerState {
                     }
                 }
             }
-            self.events.emit(crate::ws::Event::GroupDeleted { group_id: group_id.into() });
+            self.events.emit(crate::ws::Event::GroupDeleted {
+                group_id: group_id.into(),
+            });
             drop(groups);
             drop(clients);
             self.persist();
@@ -458,11 +504,13 @@ impl ServerState {
     /// Change which stream a group is playing.
     pub fn set_group_stream(&self, group_id: &str, stream_id: &str) -> bool {
         let mut groups = self.groups.write();
-        if !self.streams.read().contains_key(stream_id) { return false; }
+        if !self.streams.read().contains_key(stream_id) {
+            return false;
+        }
         if let Some(g) = groups.get_mut(group_id) {
             g.stream_id = stream_id.into();
             self.events.emit(crate::ws::Event::GroupStreamChanged {
-                group_id:  group_id.into(),
+                group_id: group_id.into(),
                 stream_id: stream_id.into(),
             });
             drop(groups);
@@ -493,7 +541,9 @@ impl ServerState {
     }
 
     pub fn connected_clients(&self) -> Vec<ClientInfo> {
-        self.clients.read().values()
+        self.clients
+            .read()
+            .values()
             .filter(|c| c.is_connected())
             .cloned()
             .collect()
@@ -519,7 +569,7 @@ impl ServerState {
 
     /// Returns the stream_id currently assigned to a client's group.
     pub fn client_stream_id(&self, client_id: &str) -> Option<String> {
-        let group_id  = self.clients.read().get(client_id)?.group_id.clone();
+        let group_id = self.clients.read().get(client_id)?.group_id.clone();
         let stream_id = self.groups.read().get(&group_id)?.stream_id.clone();
         Some(stream_id)
     }
@@ -527,10 +577,10 @@ impl ServerState {
     /// Register a new stream in the state (idempotent — updates status if already exists).
     pub fn register_stream(
         &self,
-        id:           impl Into<String>,
+        id: impl Into<String>,
         display_name: Option<String>,
-        codec:        impl Into<String>,
-        format:       impl Into<String>,
+        codec: impl Into<String>,
+        format: impl Into<String>,
     ) {
         let id = id.into();
         let codec = codec.into();
@@ -579,7 +629,9 @@ mod tests {
         Arc::new(ServerState::new(Arc::new(EventBus::new()), None, vec![]))
     }
 
-    fn addr() -> SocketAddr { "127.0.0.1:50000".parse().unwrap() }
+    fn addr() -> SocketAddr {
+        "127.0.0.1:50000".parse().unwrap()
+    }
 
     fn connect(s: &ServerState, id: &str) {
         s.client_connected(id, "pi", "Sonium", "linux", "aarch64", addr(), 2);
@@ -629,7 +681,7 @@ mod tests {
 
     #[test]
     fn create_and_delete_group() {
-        let s  = state();
+        let s = state();
         let id = s.create_group("Kitchen", "default");
         assert!(s.get_group(&id).is_some());
         assert!(s.delete_group(&id));
@@ -644,13 +696,17 @@ mod tests {
 
     #[test]
     fn move_client_between_groups() {
-        let s   = state();
+        let s = state();
         let gid = s.create_group("Bedroom", "default");
         connect(&s, "pi-1");
         assert!(s.set_client_group("pi-1", &gid));
         assert_eq!(s.get_client("pi-1").unwrap().group_id, gid);
         // removed from default
-        assert!(!s.get_group("default").unwrap().client_ids.contains(&"pi-1".to_string()));
+        assert!(!s
+            .get_group("default")
+            .unwrap()
+            .client_ids
+            .contains(&"pi-1".to_string()));
     }
 
     #[test]
@@ -679,7 +735,11 @@ mod tests {
         s.client_disconnected("pi-1");
         assert!(s.delete_client("pi-1"));
         assert!(s.get_client("pi-1").is_none());
-        assert!(!s.get_group("default").unwrap().client_ids.contains(&"pi-1".to_string()));
+        assert!(!s
+            .get_group("default")
+            .unwrap()
+            .client_ids
+            .contains(&"pi-1".to_string()));
     }
 
     #[test]
@@ -694,23 +754,30 @@ mod tests {
         let s = state();
         connect(&s, "pi-1");
         assert!(s.set_client_name("pi-1", Some("Living Room Speaker".into())));
-        assert_eq!(s.get_client("pi-1").unwrap().display_name.as_deref(), Some("Living Room Speaker"));
+        assert_eq!(
+            s.get_client("pi-1").unwrap().display_name.as_deref(),
+            Some("Living Room Speaker")
+        );
     }
 
     #[test]
     fn client_restored_from_persisted_state() {
         let saved_clients = vec![PersistedClient {
-            id:           "pi-1".into(),
-            hostname:     "pi".into(),
+            id: "pi-1".into(),
+            hostname: "pi".into(),
             display_name: Some("Kitchen".into()),
-            volume:       60,
-            muted:        true,
-            latency_ms:   50,
-            group_id:     "default".into(),
-            eq_bands:     vec![],
-            last_seen:    Utc::now(),
+            volume: 60,
+            muted: true,
+            latency_ms: 50,
+            group_id: "default".into(),
+            eq_bands: vec![],
+            last_seen: Utc::now(),
         }];
-        let s = Arc::new(ServerState::new(Arc::new(EventBus::new()), None, saved_clients));
+        let s = Arc::new(ServerState::new(
+            Arc::new(EventBus::new()),
+            None,
+            saved_clients,
+        ));
         s.client_connected("pi-1", "pi", "Sonium", "linux", "aarch64", addr(), 2);
         let c = s.get_client("pi-1").unwrap();
         assert_eq!(c.volume, 60);
