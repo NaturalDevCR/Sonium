@@ -244,6 +244,14 @@ if [[ "${INSTALL_SERVER}" == "true" ]]; then
 
   install -d -m 0755 -o "${SONIUM_USER}" "${CONF_DIR}"
 
+  # Pre-initialize admin account if users.json doesn't exist
+  if [[ ! -f "${CONF_DIR}/users.json" ]]; then
+    GEN_PASS=$(tr -dc 'A-Za-z0-9' < /dev/urandom | head -c 16)
+    info "Initializing admin account..."
+    # We need to ensure the config file exists first if we are going to use it for --init-admin
+    # but the config is written below. Let's move this block or write the config earlier.
+  fi
+
   if [[ ! -p "${FIFO_PATH}" ]]; then
     rm -f "${FIFO_PATH}"
     mkfifo "${FIFO_PATH}"
@@ -274,6 +282,10 @@ EOF
     ok "Wrote ${CONF_DIR}/sonium.toml"
   else
     info "${CONF_DIR}/sonium.toml already exists; leaving it untouched"
+  fi
+
+  if [[ -n "${GEN_PASS:-}" ]]; then
+    sudo -u "${SONIUM_USER}" "${BIN_DIR}/sonium-server" --config "${CONF_DIR}/sonium.toml" --init-admin "${GEN_PASS}" >/dev/null 2>&1 || true
   fi
 
   if [[ "${INSTALL_SERVICE}" == "true" && -d /run/systemd/system && -x "$(command -v systemctl)" ]]; then
@@ -319,6 +331,19 @@ if [[ "${INSTALL_SERVER}" == "true" ]]; then
 
 Server UI:
   http://${HOST_IP}:${CONTROL_PORT}
+EOF
+
+  if [[ -n "${GEN_PASS:-}" ]]; then
+    cat <<EOF
+
+Admin credentials:
+  Username: admin
+  Password: ${GEN_PASS}
+(You will be asked to change this on your first login)
+EOF
+  fi
+
+  cat <<EOF
 
 Feed audio into the server:
   ffmpeg -re -i song.flac -f s16le -ar 48000 -ac 2 - > ${FIFO_PATH}

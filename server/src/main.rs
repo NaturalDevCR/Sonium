@@ -59,6 +59,10 @@ struct Cli {
     /// Disable mDNS advertisement.
     #[arg(long, env = "SONIUM_NO_MDNS")]
     no_mdns: bool,
+
+    /// Initialize admin password and exit (only if no users exist).
+    #[arg(long)]
+    init_admin: Option<String>,
 }
 
 #[tokio::main]
@@ -111,8 +115,15 @@ async fn main() -> anyhow::Result<()> {
         .map(|p| p.to_path_buf())
         .unwrap_or_else(|| std::path::PathBuf::from("."));
 
+    // One-time initialization if requested.
+    if let Some(password) = cli.init_admin {
+        let _ = UserStore::load_or_init(&config_dir, Some(password));
+        info!("Admin account initialized (if it didn't exist).");
+        return Ok(());
+    }
+
     // Auth: load users from config directory.
-    let auth = UserStore::load_or_init(&config_dir);
+    let auth = UserStore::load_or_init(&config_dir, None);
 
     // State persistence: load from sonium-state.json.
     let persistence = Arc::new(PersistenceStore::new(&config_dir));

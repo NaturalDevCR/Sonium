@@ -11,6 +11,12 @@ const router = createRouter({
       meta: { public: true },
     },
     {
+      path: '/change-password',
+      name: 'change-password',
+      component: () => import('@/views/PasswordChangeView.vue'),
+      meta: { requiresAuth: true },
+    },
+    {
       path: '/',
       name: 'control',
       component: () => import('@/views/ControlView.vue'),
@@ -41,6 +47,14 @@ router.beforeEach(async (to) => {
   if (to.meta.public) return true;
   if (!auth.isAuthenticated) return { name: 'login', query: { redirect: to.fullPath } };
   if (!(await auth.validateSession())) return { name: 'login', query: { redirect: to.fullPath } };
+  
+  if (auth.user?.must_change_password && to.name !== 'change-password') {
+    return { name: 'change-password' };
+  }
+  if (!auth.user?.must_change_password && to.name === 'change-password') {
+    return { name: 'control' };
+  }
+
   if (to.meta.requiresAdmin && auth.user?.role !== 'admin') return { name: 'control' };
   return true;
 });

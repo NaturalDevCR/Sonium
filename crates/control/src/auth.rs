@@ -51,6 +51,7 @@ pub struct User {
     #[serde(skip_serializing)]
     pub password_hash: String,
     pub role: Role,
+    pub must_change_password: bool,
 }
 
 /// Public view of a user (no password hash).
@@ -59,6 +60,7 @@ pub struct UserView {
     pub id: String,
     pub username: String,
     pub role: Role,
+    pub must_change_password: bool,
 }
 
 impl From<&User> for UserView {
@@ -67,6 +69,7 @@ impl From<&User> for UserView {
             id: u.id.clone(),
             username: u.username.clone(),
             role: u.role.clone(),
+            must_change_password: u.must_change_password,
         }
     }
 }
@@ -77,6 +80,7 @@ pub struct Claims {
     pub sub: String, // user id
     pub username: String,
     pub role: String,
+    pub must_change_password: bool,
     pub exp: usize,
 }
 
@@ -95,6 +99,8 @@ struct UserRecord {
     username: String,
     password_hash: String,
     role: Role,
+    #[serde(default)]
+    must_change_password: bool,
 }
 
 // ── UserStore ─────────────────────────────────────────────────────────────
@@ -109,7 +115,7 @@ pub struct UserStore {
 impl UserStore {
     /// Load from `<config_dir>/users.json`, or create it with a default admin
     /// if the file does not exist.
-    pub fn load_or_init(config_dir: &Path) -> Arc<Self> {
+    pub fn load_or_init(config_dir: &Path, initial_password: Option<String>) -> Arc<Self> {
         let file_path = config_dir.join("users.json");
         let store = Arc::new(Self {
             users: RwLock::new(HashMap::new()),
@@ -127,8 +133,8 @@ impl UserStore {
         }
 
         if store.users.read().is_empty() {
-            let password = Alphanumeric.sample_string(&mut rand::thread_rng(), 16);
-            store.create_user_internal("admin", &password, Role::Admin);
+            let password = initial_password.unwrap_or_else(|| Alphanumeric.sample_string(&mut rand::thread_rng(), 16));
+            store.create_user_internal("admin", &password, Role::Admin, true);
             let _ = store.persist();
             warn!("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━");
             warn!(" No users found — created default admin account.");
@@ -162,6 +168,7 @@ impl UserStore {
                     username: r.username,
                     password_hash: r.password_hash,
                     role: r.role,
+                    must_change_password: r.must_change_password,
                 },
             );
         }
@@ -178,6 +185,7 @@ impl UserStore {
                 username: u.username.clone(),
                 password_hash: u.password_hash.clone(),
                 role: u.role.clone(),
+                must_change_password: u.must_change_password,
             })
             .collect();
         let file = UsersFile {
@@ -207,13 +215,14 @@ impl UserStore {
             .is_ok()
     }
 
-    fn create_user_internal(&self, username: &str, password: &str, role: Role) -> User {
+    fn create_user_internal(&self, username: &str, password: &str, role: Role, must_change: bool) -> User {
         let hash = Self::hash_password(password).expect("argon2 hash failed");
         let user = User {
             id: Uuid::new_v4().to_string(),
             username: username.to_owned(),
             password_hash: hash,
             role,
+            must_change_password: must_change,
         };
         self.users.write().insert(user.id.clone(), user.clone());
         user
@@ -245,6 +254,7 @@ impl UserStore {
             sub: user.id.clone(),
             username: user.username.clone(),
             role: user.role.to_string(),
+            must_change_password: user.must_change_password,
             exp,
         };
         encode(
@@ -292,7 +302,7 @@ impl UserStore {
         if self.users.read().values().any(|u| u.username == username) {
             return None;
         }
-        let user = self.create_user_internal(username, password, role);
+        let user = self.create_user_internal(username, password, role, false);
         let _ = self.persist();
         info!(username, id = %user.id, "User created");
         Some(UserView::from(&user))
@@ -307,6 +317,7 @@ impl UserStore {
             }
             if let Some(p) = new_password {
                 u.password_hash = Self::hash_password(p).expect("hash failed");
+                u.must_change_password = false;
             }
             drop(users);
             let _ = self.persist();

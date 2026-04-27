@@ -6,6 +6,7 @@ export interface AuthUser {
   id:       string;
   username: string;
   role:     'admin' | 'operator' | 'viewer';
+  must_change_password: boolean;
 }
 
 export const useAuthStore = defineStore('auth', () => {
