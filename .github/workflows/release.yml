@@ -1,0 +1,118 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - 'v*'
+
+permissions:
+  contents: write
+
+jobs:
+  build-web:
+    name: Build Web UI
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: pnpm/action-setup@v3
+        with:
+          version: 8
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: 'pnpm'
+          cache-dependency-path: web/pnpm-lock.yaml
+      - name: Install dependencies
+        run: pnpm install
+        working-directory: web
+      - name: Build web
+        run: pnpm build
+        working-directory: web
+      - name: Upload dist
+        uses: actions/upload-artifact@v4
+        with:
+          name: web-dist
+          path: web/dist/
+
+  build-rust:
+    name: Build Rust (${{ matrix.target }})
+    needs: build-web
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-latest
+            target: x86_64-unknown-linux-musl
+            arch: x86_64
+          - os: ubuntu-latest
+            target: aarch64-unknown-linux-musl
+            arch: aarch64
+          - os: windows-latest
+            target: x86_64-pc-windows-msvc
+            arch: x86_64
+          - os: macos-latest
+            target: x86_64-apple-darwin
+            arch: x86_64
+          - os: macos-latest
+            target: aarch64-apple-darwin
+            arch: aarch64
+
+    steps:
+      - uses: actions/checkout@v4
+      
+      - name: Download web-dist
+        uses: actions/download-artifact@v4
+        with:
+          name: web-dist
+          path: web/dist/
+      
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+
+      - name: Install system dependencies (Linux)
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libopus-dev libasound2-dev musl-tools
+
+      - name: Build
+        shell: bash
+        run: |
+          # Use cross for Linux musl if available, otherwise standard cargo
+          if [[ "${{ runner.os }}" == "Linux" ]]; then
+            # Attempt to build with standard cargo + musl-tools
+            cargo build --release --target ${{ matrix.target }} --workspace
+          else
+            cargo build --release --target ${{ matrix.target }} --workspace
+          fi
+
+      - name: Package artifacts
+        shell: bash
+        run: |
+          mkdir -p dist
+          BIN_SUFFIX=""
+          if [[ "${{ runner.os }}" == "Windows" ]]; then
+            BIN_SUFFIX=".exe"
+          fi
+          
+          # Rename binaries to match install.sh expectations
+          cp target/${{ matrix.target }}/release/sonium-server${BIN_SUFFIX} dist/sonium-server-${{ matrix.arch || matrix.target }}${BIN_SUFFIX}
+          cp target/${{ matrix.target }}/release/sonium-client${BIN_SUFFIX} dist/sonium-client-${{ matrix.arch || matrix.target }}${BIN_SUFFIX}
+          
+          # Also create a generic version for manual downloads
+          cp target/${{ matrix.target }}/release/sonium-server${BIN_SUFFIX} dist/sonium-server-${{ matrix.target }}${BIN_SUFFIX}
+          cp target/${{ matrix.target }}/release/sonium-client${BIN_SUFFIX} dist/sonium-client-${{ matrix.target }}${BIN_SUFFIX}
+
+      - name: Create Release and Upload Assets
+        uses: softprops/action-gh-release@v2
+        with:
+          files: dist/*
+          draft: false
+          prerelease: false
+          generate_release_notes: true
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

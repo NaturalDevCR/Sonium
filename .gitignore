@@ -1,5 +1,35 @@
-/target
-/docs/book
+# Rust
+/target/
 **/*.rs.bk
+
+# Node.js
+node_modules/
+dist/
+dist-ssr/
+*.local
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+pnpm-debug.log*
+
+# mdBook
+/docs/book/
+
+# IDEs
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# OS specific
+.DS_Store
+Thumbs.db
+
+# Environment
 .env
+.env.*
+! .env.example
+
+# Credentials
 *.pem
+*.key

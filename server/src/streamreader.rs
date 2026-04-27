@@ -456,7 +456,9 @@ async fn run_reader<R: AsyncReadExt + Unpin>(
             }
         };
 
-        if !read_ok { continue; }
+        if !read_ok {
+            continue;
+        }
 
         // ── Transition idle → playing ─────────────────────────────────────
         if is_idle {
@@ -478,7 +480,11 @@ async fn run_reader<R: AsyncReadExt + Unpin>(
         }
 
         let chunk = WireChunk::new(Timestamp::now(), enc_buf.clone());
-        debug!(stream = stream_id, bytes = enc_buf.len(), "Broadcasting frame");
+        debug!(
+            stream = stream_id,
+            bytes = enc_buf.len(),
+            "Broadcasting frame"
+        );
         bc.publish(Bytes::from(Message::WireChunk(chunk).encode()));
 
         // ── VU meter: emit StreamLevel ~10×/s ────────────────────────────
