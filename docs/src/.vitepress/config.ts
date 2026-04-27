@@ -3,14 +3,14 @@ import { defineConfig } from 'vitepress';
 export default defineConfig({
   title: 'Sonium',
   description: 'Open-source multiroom audio for local networks',
-  base: '/sonium/',
+  base: '/Sonium/',
   outDir: '../dist',
   cleanUrls: true,
   lastUpdated: true,
   appearance: 'dark',
   head: [
     ['meta', { name: 'theme-color', content: '#0f172a' }],
-    ['link', { rel: 'icon', href: '/sonium/favicon.svg' }],
+    ['link', { rel: 'icon', href: '/Sonium/favicon.svg' }],
   ],
   themeConfig: {
     logo: '/favicon.svg',
@@ -19,7 +19,7 @@ export default defineConfig({
       { text: 'Guide', link: '/getting-started/quick-start' },
       { text: 'Reference', link: '/reference/config' },
       { text: 'Architecture', link: '/architecture/overview' },
-      { text: 'GitHub', link: 'https://github.com/jdavidoa91/sonium' },
+      { text: 'GitHub', link: 'https://github.com/NaturalDevCR/Sonium' },
     ],
     sidebar: [
       {
@@ -58,7 +58,7 @@ export default defineConfig({
       },
     ],
     socialLinks: [
-      { icon: 'github', link: 'https://github.com/jdavidoa91/sonium' },
+      { icon: 'github', link: 'https://github.com/NaturalDevCR/Sonium' },
     ],
     search: {
       provider: 'local',

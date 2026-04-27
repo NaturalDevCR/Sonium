@@ -14,7 +14,7 @@ The Linux installer downloads the right release package, writes
 systemd service.
 
 ```bash
-curl -fsSL https://github.com/jdavidoa91/sonium/releases/latest/download/install.sh | sudo bash
+curl -fsSL https://github.com/NaturalDevCR/Sonium/releases/latest/download/install.sh | sudo bash
 ```
 
 Useful options:
@@ -48,7 +48,7 @@ sonium-client --discover
 ## GitHub Release Packages
 
 Download a package from the
-[GitHub Releases](https://github.com/jdavidoa91/sonium/releases) page.
+[GitHub Releases](https://github.com/NaturalDevCR/Sonium/releases) page.
 
 | Platform | Package |
 | --- | --- |
@@ -95,7 +95,7 @@ Install Rust and Node.js, then build the embedded web UI before building the
 server:
 
 ```bash
-git clone https://github.com/jdavidoa91/sonium
+git clone https://github.com/NaturalDevCR/Sonium
 cd sonium
 
 pnpm --dir web install

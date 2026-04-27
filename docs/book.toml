@@ -6,10 +6,10 @@ language    = "en"
 src         = "src"
 
 [output.html]
-site-url            = "/sonium/"
-git-repository-url  = "https://github.com/jdavidoa91/sonium"
+site-url            = "/Sonium/"
+git-repository-url  = "https://github.com/NaturalDevCR/Sonium"
 git-repository-icon = "fa-github"
-edit-url-template   = "https://github.com/jdavidoa91/sonium/edit/main/docs/src/{path}"
+edit-url-template   = "https://github.com/NaturalDevCR/Sonium/edit/main/docs/src/{path}"
 theme               = "coal"
 preferred-dark-theme = "coal"
 no-section-label    = false

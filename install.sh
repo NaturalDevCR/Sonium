@@ -2,7 +2,7 @@
 # Sonium installer for Linux hosts.
 set -euo pipefail
 
-REPO="${SONIUM_REPO:-jdavidoa91/sonium}"
+REPO="${SONIUM_REPO:-NaturalDevCR/Sonium}"
 VERSION="${SONIUM_VERSION:-latest}"
 PREFIX="${PREFIX:-/usr/local}"
 INSTALL_SERVICE=true

@@ -12,7 +12,7 @@
 ## Clone and build
 
 ```bash
-git clone https://github.com/jdavidoa91/sonium
+git clone https://github.com/NaturalDevCR/Sonium
 cd sonium
 cargo build
 ```

@@ -3,8 +3,8 @@
 Open-source multiroom audio for local networks. Sonium runs one server that
 receives audio and a lightweight client on every playback device.
 
-[![CI](https://github.com/jdavidoa91/sonium/actions/workflows/ci.yml/badge.svg)](https://github.com/jdavidoa91/sonium/actions/workflows/ci.yml)
-[![Docs](https://github.com/jdavidoa91/sonium/actions/workflows/docs.yml/badge.svg)](https://jdavidoa91.github.io/sonium/)
+[![CI](https://github.com/NaturalDevCR/Sonium/actions/workflows/ci.yml/badge.svg)](https://github.com/NaturalDevCR/Sonium/actions/workflows/ci.yml)
+[![Docs](https://github.com/NaturalDevCR/Sonium/actions/workflows/docs.yml/badge.svg)](https://naturaldevcr.github.io/Sonium/)
 [![License: GPL-3.0](https://img.shields.io/badge/License-GPL--3.0-blue.svg)](https://www.gnu.org/licenses/gpl-3.0.html)
 
 ## How It Works
@@ -25,11 +25,11 @@ music source -> sonium-server -> LAN -> sonium-client -> speaker
 Linux:
 
 ```bash
-curl -fsSL https://github.com/jdavidoa91/sonium/releases/latest/download/install.sh | sudo bash
+curl -fsSL https://github.com/NaturalDevCR/Sonium/releases/latest/download/install.sh | sudo bash
 ```
 
 macOS and Windows users can download release packages from
-[GitHub Releases](https://github.com/jdavidoa91/sonium/releases).
+[GitHub Releases](https://github.com/NaturalDevCR/Sonium/releases).
 
 Docker can run the server:
 
@@ -43,7 +43,7 @@ access to local audio hardware.
 ## Quick Start from Source
 
 ```bash
-git clone https://github.com/jdavidoa91/sonium
+git clone https://github.com/NaturalDevCR/Sonium
 cd sonium
 
 pnpm --dir web install
@@ -96,12 +96,12 @@ Open the web UI at <http://127.0.0.1:1711>.
 
 ## Documentation
 
-Full docs: [jdavidoa91.github.io/sonium](https://jdavidoa91.github.io/sonium/)
+Full docs: [naturaldevcr.github.io/Sonium](https://naturaldevcr.github.io/Sonium/)
 
-- [Quick Start](https://jdavidoa91.github.io/sonium/getting-started/quick-start)
-- [Installation](https://jdavidoa91.github.io/sonium/getting-started/installation)
-- [Configuration](https://jdavidoa91.github.io/sonium/getting-started/configuration)
-- [Architecture](https://jdavidoa91.github.io/sonium/architecture/overview)
+- [Quick Start](https://naturaldevcr.github.io/Sonium/getting-started/quick-start)
+- [Installation](https://naturaldevcr.github.io/Sonium/getting-started/installation)
+- [Configuration](https://naturaldevcr.github.io/Sonium/getting-started/configuration)
+- [Architecture](https://naturaldevcr.github.io/Sonium/architecture/overview)
 
 ## Current Status
 

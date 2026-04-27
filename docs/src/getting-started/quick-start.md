@@ -9,13 +9,13 @@ real music source.
 Use a release package when possible:
 
 ```bash
-curl -fsSL https://github.com/jdavidoa91/sonium/releases/latest/download/install.sh | sudo bash
+curl -fsSL https://github.com/NaturalDevCR/Sonium/releases/latest/download/install.sh | sudo bash
 ```
 
 Or build locally:
 
 ```bash
-git clone https://github.com/jdavidoa91/sonium
+git clone https://github.com/NaturalDevCR/Sonium
 cd sonium
 pnpm --dir web install
 pnpm --dir web build
