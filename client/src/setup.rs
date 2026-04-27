@@ -7,7 +7,7 @@ use std::time::Duration;
 use anyhow::Context;
 use console::{style, Term};
 use cpal::traits::{DeviceTrait, HostTrait};
-use dialoguer::{Confirm, Input, Select, theme::ColorfulTheme};
+use dialoguer::{theme::ColorfulTheme, Confirm, Input, Select};
 
 use sonium_common::config::ClientConfig;
 use sonium_control::discovery::{self, DiscoveredServer};
@@ -18,16 +18,38 @@ pub async fn run() -> anyhow::Result<()> {
     let term = Term::stdout();
     term.clear_screen()?;
 
-    println!("{}", style("=========================================").cyan().bold());
-    println!("{}", style("        Sonium Client Installer          ").cyan().bold());
-    println!("{}", style("=========================================").cyan().bold());
+    println!(
+        "{}",
+        style("=========================================")
+            .cyan()
+            .bold()
+    );
+    println!(
+        "{}",
+        style("        Sonium Client Installer          ")
+            .cyan()
+            .bold()
+    );
+    println!(
+        "{}",
+        style("=========================================")
+            .cyan()
+            .bold()
+    );
     println!();
 
     #[cfg(target_os = "linux")]
     {
         // Elevate privileges on Linux
         if let Err(e) = sudo::escalate_if_needed() {
-            eprintln!("{}", style(format!("Warning: Could not escalate privileges automatically: {}", e)).yellow());
+            eprintln!(
+                "{}",
+                style(format!(
+                    "Warning: Could not escalate privileges automatically: {}",
+                    e
+                ))
+                .yellow()
+            );
             eprintln!("You may need to run this command with sudo.");
         }
     }
@@ -52,7 +74,10 @@ pub async fn run() -> anyhow::Result<()> {
     let install_dir = PathBuf::from(install_dir_str);
     if !install_dir.exists() {
         if Confirm::with_theme(&ColorfulTheme::default())
-            .with_prompt(format!("Directory {} does not exist. Create it?", install_dir.display()))
+            .with_prompt(format!(
+                "Directory {} does not exist. Create it?",
+                install_dir.display()
+            ))
             .default(true)
             .interact()?
         {
@@ -65,26 +90,39 @@ pub async fn run() -> anyhow::Result<()> {
 
     // Attempt to discover server
     println!();
-    println!("{}", style("Looking for Sonium servers on the network...").dim());
+    println!(
+        "{}",
+        style("Looking for Sonium servers on the network...").dim()
+    );
     let (server_host, server_port) = discover_or_manual().await?;
 
     println!();
-    println!("{}", style(format!("Using Server: {}:{}", server_host, server_port)).green().bold());
+    println!(
+        "{}",
+        style(format!("Using Server: {}:{}", server_host, server_port))
+            .green()
+            .bold()
+    );
     println!();
 
     let mut instance_id = 1;
 
     // Main installation loop for multiple instances
     loop {
-        println!("{}", style(format!("--- Configuring Instance {} ---", instance_id)).cyan());
+        println!(
+            "{}",
+            style(format!("--- Configuring Instance {} ---", instance_id)).cyan()
+        );
 
         // Find used devices
         let used_devices = get_used_devices(&install_dir);
 
         // Select Device
         let host = cpal::default_host();
-        let devices = host.output_devices().context("Failed to get output devices")?;
-        
+        let devices = host
+            .output_devices()
+            .context("Failed to get output devices")?;
+
         let mut device_names = Vec::new();
         for device in devices {
             if let Ok(name) = device.name() {
@@ -116,7 +154,8 @@ pub async fn run() -> anyhow::Result<()> {
         // Copy binary
         let current_exe = env::current_exe()?;
         let target_exe = install_dir.join("sonium-client");
-        fs::copy(&current_exe, &target_exe).context("Failed to copy executable to installation directory")?;
+        fs::copy(&current_exe, &target_exe)
+            .context("Failed to copy executable to installation directory")?;
 
         // Create Config
         let config_path = install_dir.join(format!("client-{}.toml", instance_id));
@@ -128,13 +167,22 @@ pub async fn run() -> anyhow::Result<()> {
 
         let toml_string = toml::to_string_pretty(&cfg)?;
         fs::write(&config_path, toml_string).context("Failed to write config file")?;
-        println!("{} Config written to {}", style("✓").green(), config_path.display());
+        println!(
+            "{} Config written to {}",
+            style("✓").green(),
+            config_path.display()
+        );
 
         // Install Service
         install_service(&target_exe, &config_path, instance_id)?;
 
         println!();
-        println!("{}", style(format!("Instance {} installed successfully!", instance_id)).green().bold());
+        println!(
+            "{}",
+            style(format!("Instance {} installed successfully!", instance_id))
+                .green()
+                .bold()
+        );
         println!();
 
         if !Confirm::with_theme(&ColorfulTheme::default())
@@ -148,7 +196,10 @@ pub async fn run() -> anyhow::Result<()> {
         instance_id += 1;
     }
 
-    println!("{}", style("Sonium Client installation complete!").cyan().bold());
+    println!(
+        "{}",
+        style("Sonium Client installation complete!").cyan().bold()
+    );
     Ok(())
 }
 
@@ -225,7 +276,7 @@ fn ask_manual_server() -> anyhow::Result<(String, u16)> {
     let host: String = Input::with_theme(&ColorfulTheme::default())
         .with_prompt("Server IP or Hostname")
         .interact_text()?;
-    
+
     let port: u16 = Input::with_theme(&ColorfulTheme::default())
         .with_prompt("Server Port")
         .default(1710)
@@ -238,7 +289,7 @@ fn ask_manual_server() -> anyhow::Result<(String, u16)> {
 fn install_service(exe_path: &Path, config_path: &Path, instance: u32) -> anyhow::Result<()> {
     let service_name = format!("sonium-client@{}.service", instance);
     let service_path = PathBuf::from("/etc/systemd/system").join(&service_name);
-    
+
     let service_content = format!(
         r#"[Unit]
 Description=Sonium Client (Instance {})
@@ -260,11 +311,15 @@ WantedBy=multi-user.target
     );
 
     fs::write(&service_path, service_content).context("Failed to write systemd service file")?;
-    println!("{} Created systemd service at {}", style("✓").green(), service_path.display());
+    println!(
+        "{} Created systemd service at {}",
+        style("✓").green(),
+        service_path.display()
+    );
 
     // Daemon reload
     let _ = Command::new("systemctl").arg("daemon-reload").output();
-    
+
     // Enable and start
     let output = Command::new("systemctl")
         .arg("enable")
@@ -274,9 +329,20 @@ WantedBy=multi-user.target
         .context("Failed to execute systemctl")?;
 
     if output.status.success() {
-        println!("{} Started and enabled service {}", style("✓").green(), service_name);
+        println!(
+            "{} Started and enabled service {}",
+            style("✓").green(),
+            service_name
+        );
     } else {
-        eprintln!("{}", style(format!("Failed to start service: {}", String::from_utf8_lossy(&output.stderr))).red());
+        eprintln!(
+            "{}",
+            style(format!(
+                "Failed to start service: {}",
+                String::from_utf8_lossy(&output.stderr)
+            ))
+            .red()
+        );
     }
 
     Ok(())
@@ -323,7 +389,11 @@ fn install_service(exe_path: &Path, config_path: &Path, instance: u32) -> anyhow
     );
 
     fs::write(&plist_path, plist_content).context("Failed to write plist file")?;
-    println!("{} Created LaunchAgent at {}", style("✓").green(), plist_path.display());
+    println!(
+        "{} Created LaunchAgent at {}",
+        style("✓").green(),
+        plist_path.display()
+    );
 
     // Unload first if it was already running to ensure clean state
     let _ = Command::new("launchctl")
@@ -339,9 +409,20 @@ fn install_service(exe_path: &Path, config_path: &Path, instance: u32) -> anyhow
         .context("Failed to execute launchctl")?;
 
     if output.status.success() {
-        println!("{} Loaded and started LaunchAgent {}", style("✓").green(), plist_name);
+        println!(
+            "{} Loaded and started LaunchAgent {}",
+            style("✓").green(),
+            plist_name
+        );
     } else {
-        eprintln!("{}", style(format!("Failed to load LaunchAgent: {}", String::from_utf8_lossy(&output.stderr))).red());
+        eprintln!(
+            "{}",
+            style(format!(
+                "Failed to load LaunchAgent: {}",
+                String::from_utf8_lossy(&output.stderr)
+            ))
+            .red()
+        );
     }
 
     Ok(())
@@ -349,25 +430,48 @@ fn install_service(exe_path: &Path, config_path: &Path, instance: u32) -> anyhow
 
 #[cfg(not(any(target_os = "linux", target_os = "macos")))]
 fn install_service(_exe_path: &Path, _config_path: &Path, _instance: u32) -> anyhow::Result<()> {
-    println!("{}", style("Automatic service installation is currently only supported on Linux and macOS.").yellow());
+    println!(
+        "{}",
+        style("Automatic service installation is currently only supported on Linux and macOS.")
+            .yellow()
+    );
     Ok(())
 }
 
 pub async fn uninstall() -> anyhow::Result<()> {
-    println!("{}", style("=========================================").cyan().bold());
-    println!("{}", style("         Sonium Client Uninstaller       ").cyan().bold());
-    println!("{}", style("=========================================").cyan().bold());
+    println!(
+        "{}",
+        style("=========================================")
+            .cyan()
+            .bold()
+    );
+    println!(
+        "{}",
+        style("         Sonium Client Uninstaller       ")
+            .cyan()
+            .bold()
+    );
+    println!(
+        "{}",
+        style("=========================================")
+            .cyan()
+            .bold()
+    );
     println!();
 
-    if cfg!(target_os = "linux") {
+    #[cfg(target_os = "linux")]
+    {
         if sudo::check() != sudo::RunningAs::Root {
-            println!("{}", style("Uninstalling services on Linux requires root privileges.").yellow());
+            println!(
+                "{}",
+                style("Uninstalling services on Linux requires root privileges.").yellow()
+            );
             let exe = std::env::current_exe()?;
             let status = std::process::Command::new("sudo")
                 .arg(exe)
                 .arg("--uninstall")
                 .status()?;
-            
+
             if !status.success() {
                 anyhow::bail!("Failed to acquire root privileges.");
             }
@@ -375,7 +479,10 @@ pub async fn uninstall() -> anyhow::Result<()> {
         }
 
         // Stop and disable any sonium-client systemd services
-        println!("{} Stopping and disabling systemd services...", style("✔").green());
+        println!(
+            "{} Stopping and disabling systemd services...",
+            style("✔").green()
+        );
         let _ = std::process::Command::new("systemctl")
             .arg("stop")
             .arg("sonium-client@*.service")
@@ -390,15 +497,24 @@ pub async fn uninstall() -> anyhow::Result<()> {
         let unit_file = systemd_dir.join("sonium-client@.service");
         if unit_file.exists() {
             std::fs::remove_file(&unit_file)?;
-            println!("{} Removed systemd unit file at {:?}", style("✔").green(), unit_file);
+            println!(
+                "{} Removed systemd unit file at {:?}",
+                style("✔").green(),
+                unit_file
+            );
         }
 
         let _ = std::process::Command::new("systemctl")
             .arg("daemon-reload")
             .output();
-            
-    } else if cfg!(target_os = "macos") {
-        println!("{} Stopping and removing LaunchAgents...", style("✔").green());
+    }
+
+    #[cfg(target_os = "macos")]
+    {
+        println!(
+            "{} Stopping and removing LaunchAgents...",
+            style("✔").green()
+        );
         if let Some(home) = dirs::home_dir() {
             let launch_agents_dir = home.join("Library").join("LaunchAgents");
             if launch_agents_dir.exists() {
@@ -412,7 +528,7 @@ pub async fn uninstall() -> anyhow::Result<()> {
                                     .arg("unload")
                                     .arg(&path)
                                     .output();
-                                
+
                                 // Remove the plist file
                                 let _ = std::fs::remove_file(&path);
                                 println!("  {} Removed {}", style("✔").green(), name);
@@ -422,7 +538,10 @@ pub async fn uninstall() -> anyhow::Result<()> {
                 }
             }
         }
-    } else {
+    }
+
+    #[cfg(not(any(target_os = "linux", target_os = "macos")))]
+    {
         println!("{}", style("Automatic uninstallation of background services is only supported on Linux and macOS.").yellow());
     }
 
@@ -449,21 +568,27 @@ pub async fn uninstall() -> anyhow::Result<()> {
         let dir_to_remove = PathBuf::from(&dir_to_remove_str);
         if dir_to_remove.exists() && dir_to_remove.is_dir() {
             let confirm = Confirm::with_theme(&ColorfulTheme::default())
-                .with_prompt(format!("Are you sure you want to completely delete {:?} and all its contents?", dir_to_remove))
+                .with_prompt(format!(
+                    "Are you sure you want to completely delete {:?} and all its contents?",
+                    dir_to_remove
+                ))
                 .default(false)
                 .interact()?;
-                
+
             if confirm {
                 std::fs::remove_dir_all(&dir_to_remove)?;
                 println!("{} Deleted installation directory.", style("✔").green());
             }
         } else {
-            println!("{} Directory does not exist or is not a directory.", style("⚠").yellow());
+            println!(
+                "{} Directory does not exist or is not a directory.",
+                style("⚠").yellow()
+            );
         }
     }
 
     println!();
     println!("{}", style("Uninstallation complete.").green().bold());
-    
+
     Ok(())
 }

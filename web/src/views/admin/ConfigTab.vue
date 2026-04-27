@@ -1,7 +1,14 @@
 <script setup lang="ts">
-import { ref, onMounted, computed } from 'vue';
+import { ref, onMounted, computed, watch } from 'vue';
 import { useAuthStore } from '@/stores/auth';
 import { api } from '@/lib/api';
+import { Codemirror } from 'vue-codemirror';
+import { oneDark } from '@codemirror/theme-one-dark';
+import { StreamLanguage } from '@codemirror/language';
+import { toml } from '@codemirror/legacy-modes/mode/toml';
+import { parse } from 'smol-toml';
+
+const extensions = [StreamLanguage.define(toml), oneDark];
 
 const auth = useAuthStore();
 
@@ -11,6 +18,7 @@ const loading = ref(true);
 const saving  = ref(false);
 const reloading = ref(false);
 const status  = ref<{ type: 'success' | 'error'; msg: string } | null>(null);
+const validationError = ref<string | null>(null);
 
 onMounted(async () => {
   try {
@@ -24,7 +32,17 @@ onMounted(async () => {
 
 const isDirty = computed(() => value.value !== saved.value);
 
+watch(value, (newVal) => {
+  try {
+    parse(newVal);
+    validationError.value = null;
+  } catch (e: any) {
+    validationError.value = e.message || String(e);
+  }
+});
+
 async function save() {
+  if (validationError.value) return;
   saving.value = true;
   status.value = null;
   try {
@@ -61,13 +79,9 @@ async function reloadConfig() {
 function reset() {
   value.value  = saved.value;
   status.value = null;
+  validationError.value = null;
 }
 
-// Auto-grow textarea height to content
-function autoGrow(el: HTMLTextAreaElement) {
-  el.style.height = 'auto';
-  el.style.height = el.scrollHeight + 'px';
-}
 </script>
 
 <template>
@@ -88,7 +102,7 @@ function autoGrow(el: HTMLTextAreaElement) {
         </button>
         <button
           @click="save"
-          :disabled="!isDirty || saving || !auth.isAdmin"
+          :disabled="!isDirty || saving || !auth.isAdmin || !!validationError"
           class="flex items-center gap-1.5 px-3 py-1.5 rounded-lg bg-blue-600 hover:bg-blue-500 text-white text-sm
                  font-medium disabled:opacity-50 transition-colors"
         >
@@ -106,6 +120,20 @@ function autoGrow(el: HTMLTextAreaElement) {
         </button>
       </div>
     </div>
+
+    <!-- Validation Error Banner -->
+    <Transition name="slide">
+      <div
+        v-if="validationError"
+        class="flex items-start gap-2 p-3 rounded-lg text-sm border bg-red-900/20 border-red-800/40 text-red-400"
+      >
+        <span class="mdi mdi-alert shrink-0 mt-0.5"></span>
+        <div class="flex flex-col">
+          <span class="font-bold">Invalid TOML</span>
+          <span class="font-mono text-xs mt-1">{{ validationError }}</span>
+        </div>
+      </div>
+    </Transition>
 
     <!-- Status banner -->
     <Transition name="slide">
@@ -128,23 +156,21 @@ function autoGrow(el: HTMLTextAreaElement) {
     </div>
 
     <!-- Editor -->
-    <div v-else class="rounded-xl overflow-hidden border border-slate-700 bg-slate-950">
+    <div v-else class="rounded-xl overflow-hidden border border-slate-700 bg-[#282c34] shadow-lg">
       <div class="flex items-center justify-between px-4 py-2 border-b border-slate-800 bg-slate-900/60">
         <span class="text-xs text-slate-500 font-mono">sonium.toml</span>
         <span v-if="isDirty" class="text-xs text-amber-400 flex items-center gap-1">
           <span class="mdi mdi-circle-medium"></span> unsaved
         </span>
       </div>
-      <textarea
+      <Codemirror
         v-model="value"
-        spellcheck="false"
-        autocomplete="off"
-        autocorrect="off"
-        @input="autoGrow($event.target as HTMLTextAreaElement)"
-        class="w-full bg-transparent text-slate-200 font-mono text-sm px-4 py-4 resize-none outline-none
-               leading-relaxed min-h-[400px]"
-        style="tab-size: 2;"
-      ></textarea>
+        :extensions="extensions"
+        :autofocus="true"
+        :indent-with-tab="false"
+        :tab-size="2"
+        style="height: auto; min-height: 400px; font-family: monospace; font-size: 14px;"
+      />
     </div>
 
     <p class="text-xs text-slate-600">
@@ -157,4 +183,14 @@ function autoGrow(el: HTMLTextAreaElement) {
 <style scoped>
 .slide-enter-active, .slide-leave-active { transition: all .2s ease; }
 .slide-enter-from, .slide-leave-to { opacity: 0; transform: translateY(-6px); }
+
+/* Make CodeMirror fill the container properly and hide ugly outlines */
+:deep(.cm-editor) {
+  min-height: 400px;
+  outline: none !important;
+}
+:deep(.cm-scroller) {
+  font-family: inherit;
+  padding: 1rem 0;
+}
 </style>

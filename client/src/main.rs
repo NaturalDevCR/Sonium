@@ -22,47 +22,24 @@ use sonium_control::discovery::{self, DiscoveredServer};
 )]
 struct Cli {
     /// Config file path.
-    #[arg(
-        short,
-        long,
-        value_name = "FILE",
-        env = "SONIUM_CLIENT_CONFIG"
-    )]
+    #[arg(short, long, value_name = "FILE", env = "SONIUM_CLIENT_CONFIG")]
     config: Option<std::path::PathBuf>,
 
     /// Client instance ID (for running multiple clients on the same host).
-    #[arg(
-        short = 'i',
-        long,
-        value_name = "ID",
-        env = "SONIUM_INSTANCE"
-    )]
+    #[arg(short = 'i', long, value_name = "ID", env = "SONIUM_INSTANCE")]
     instance: Option<u32>,
 
     /// Server hostname or IP address.
     /// When --discover is used, this is ignored and mDNS discovery is used instead.
-    #[arg(
-        value_name = "SERVER",
-        env = "SONIUM_SERVER"
-    )]
+    #[arg(value_name = "SERVER", env = "SONIUM_SERVER")]
     server: Option<String>,
 
     /// Server stream port.
-    #[arg(
-        short,
-        long,
-        value_name = "PORT",
-        env = "SONIUM_PORT"
-    )]
+    #[arg(short, long, value_name = "PORT", env = "SONIUM_PORT")]
     port: Option<u16>,
 
     /// Extra playout latency offset in milliseconds (useful for Bluetooth sinks).
-    #[arg(
-        short,
-        long,
-        value_name = "MS",
-        env = "SONIUM_LATENCY"
-    )]
+    #[arg(short, long, value_name = "MS", env = "SONIUM_LATENCY")]
     latency: Option<i32>,
 
     /// Client display name shown in the web UI (defaults to hostname).

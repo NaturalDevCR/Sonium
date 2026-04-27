@@ -201,7 +201,7 @@ async fn session_loop(
                         // Force a re-subscription. We trick switch_stream by temporarily
                         // clearing our current stream_id.
                         let current_sid = stream_id.clone();
-                        stream_id.clear(); 
+                        stream_id.clear();
                         switch_stream(
                             stream, &registry,
                             &mut audio_rx, &mut stream_id, &mut bc,

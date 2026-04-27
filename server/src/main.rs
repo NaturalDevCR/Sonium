@@ -419,7 +419,9 @@ fn reload_config(
                 }
                 unregister(&registry, id);
                 state.unregister_stream(id);
-                state.events().emit(Event::StreamRemoved { stream_id: id.clone() });
+                state.events().emit(Event::StreamRemoved {
+                    stream_id: id.clone(),
+                });
                 report.removed.push(id.clone());
             }
             Some(new_stream) if stream_requires_restart(old_stream, new_stream) => {
@@ -435,7 +437,9 @@ fn reload_config(
                     shutdown.clone(),
                 );
                 handles.insert(id.clone(), (cancel, handle));
-                state.events().emit(Event::StreamRestarted { stream_id: id.clone() });
+                state.events().emit(Event::StreamRestarted {
+                    stream_id: id.clone(),
+                });
                 report.restarted.push(id.clone());
             }
             Some(new_stream) => {
