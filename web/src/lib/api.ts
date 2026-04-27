@@ -124,6 +124,14 @@ export interface DependencyActionResult {
   stderr: string;
 }
 
+export interface ConfigReloadReport {
+  added:            string[];
+  removed:          string[];
+  restarted:        string[];
+  unchanged:        string[];
+  restart_required: string[];
+}
+
 export type Event =
   | { type: 'client_connected';    client: Client }
   | { type: 'client_disconnected'; client_id: string }
@@ -274,6 +282,7 @@ export const api = {
   configRaw:      ()             => getText('/config/raw'),
   saveConfigRaw:  (toml: string) => put('/config/raw', toml, 'text/plain'),
   validateConfig: (toml: string) => postText('/config/validate', toml),
+  reloadConfig:   ()             => post<ConfigReloadReport>('/config/reload', {}),
 
   // ── Discovery ───────────────────────────────────────────────────────────
   scanSubnet: (cidr: string, port = 1710) =>

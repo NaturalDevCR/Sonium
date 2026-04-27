@@ -1,95 +1,115 @@
 # Quick Start
 
-Get Sonium running in under 5 minutes.
+This path gets one server and one client playing a test tone. It is the best way
+to prove that networking, decoding, and audio output all work before wiring in a
+real music source.
 
-## Prerequisites
+## 1. Install or Build
 
-- Rust toolchain ≥ 1.75 (`rustup update stable`)
-- A source of audio (any application that outputs to stdout as raw PCM, or
-  `ffmpeg`)
+Use a release package when possible:
 
-## Build
+```bash
+curl -fsSL https://github.com/jdavidoa91/sonium/releases/latest/download/install.sh | sudo bash
+```
+
+Or build locally:
 
 ```bash
 git clone https://github.com/jdavidoa91/sonium
 cd sonium
-cargo build --release
+pnpm --dir web install
+pnpm --dir web build
+cargo build --release --bin sonium-server --bin sonium-client
 ```
 
-Binaries land in `target/release/`:
+The binaries are:
 
-```
+```text
 target/release/sonium-server
 target/release/sonium-client
 ```
 
-## Start the server
+## 2. Start the Server
 
-Sonium server reads raw interleaved **signed 16-bit little-endian PCM** from
-stdin and streams it to all connected clients.
-
-```bash
-# Stream a 440 Hz test tone
-ffmpeg -f lavfi -i "sine=frequency=440:duration=3600" \
-       -f s16le -ar 48000 -ac 2 - \
-  | ./target/release/sonium-server
-```
-
-Output:
-
-```
-2024-01-15T12:00:00Z  INFO sonium_server: Sonium server starting stream_port=1710 control_port=1711 codec=opus format=48000Hz/16bit/2ch
-2024-01-15T12:00:00Z  INFO sonium_server: Listening on 0.0.0.0:1710
-2024-01-15T12:00:00Z  INFO sonium_server::streamreader: Stream reader started — reading PCM from stdin
-```
-
-## Connect a client
-
-On the same machine or any machine on your network:
+Create a config that reads from a FIFO:
 
 ```bash
-./target/release/sonium-client
+mkfifo /tmp/sonium.fifo
+cat > sonium.toml <<'EOF'
+[server]
+bind = "0.0.0.0"
+stream_port = 1710
+control_port = 1711
+mdns = true
+
+[[streams]]
+id = "default"
+display_name = "Main"
+source = "/tmp/sonium.fifo"
+codec = "opus"
+buffer_ms = 1000
+silence_on_idle = true
+
+[log]
+level = "info"
+EOF
+
+sonium-server --config sonium.toml
 ```
 
-If the server is on a different host:
+Open the web UI:
+
+```text
+http://127.0.0.1:1711
+```
+
+## 3. Feed Audio
+
+In a second terminal, write a test tone into the FIFO:
 
 ```bash
-./target/release/sonium-client --server 192.168.1.100
+ffmpeg -re -f lavfi -i "sine=frequency=440" \
+  -f s16le -ar 48000 -ac 2 - > /tmp/sonium.fifo
 ```
 
-## Use with Spotify / MPD / any source
+Any tool that can output signed 16-bit little-endian PCM at 48 kHz stereo can
+feed Sonium.
 
-Sonium works with any source that can write PCM to a FIFO or pipe.  Create a
-named pipe and point your audio daemon at it:
+## 4. Connect a Client
+
+On the same machine:
 
 ```bash
-# Create a FIFO
-mkfifo /tmp/sonium.pcm
-
-# Start Sonium reading from the FIFO
-sonium-server --pipe /tmp/sonium.pcm
-
-# Configure MPD to write to the FIFO (mpd.conf):
-# audio_output {
-#     type  "fifo"
-#     name  "Sonium"
-#     path  "/tmp/sonium.pcm"
-#     format "48000:16:2"
-# }
+sonium-client 127.0.0.1
 ```
 
-## Open the web interface
+On another machine on the same LAN:
 
-Once the server is running, navigate to:
-
-```
-http://<server-ip>:1711
+```bash
+sonium-client --discover
 ```
 
-> The web interface is planned for **Fase 7**.  In the current build this
-> endpoint is not yet available.
+If discovery is blocked by your network:
 
-## Next steps
+```bash
+sonium-client 192.168.1.50
+```
 
-- [Configuration](./configuration.md) — tune the server without config files
-- [Protocol reference](../reference/protocol.md) — understand the wire format
+Replace `192.168.1.50` with the server IP.
+
+## 5. What to Check
+
+In the web UI, you should see:
+
+- the connected client
+- the default group
+- stream status and level activity when audio is flowing
+- controls for volume, mute, latency, group assignment, and EQ
+
+If the client connects but you hear nothing, check the local audio device:
+
+```bash
+sonium-client --discover --device "USB"
+```
+
+The device value is a case-insensitive substring of the output device name.

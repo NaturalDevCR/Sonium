@@ -5,12 +5,12 @@ use tracing::{debug, info, warn};
 
 use sonium_common::config::ClientConfig;
 use sonium_protocol::{
-    MessageHeader, MessageType,
-    messages::{EqBand, Message, Hello, TimeMsg},
     header::HEADER_SIZE,
+    messages::{EqBand, Hello, Message, TimeMsg},
+    MessageHeader, MessageType,
 };
-use sonium_sync::{TimeProvider, SyncBuffer, PcmChunk};
 use sonium_sync::time_provider::now_us;
+use sonium_sync::{PcmChunk, SyncBuffer, TimeProvider};
 
 use crate::decoder::ActiveDecoder;
 use crate::eq::build_eq;
@@ -27,7 +27,10 @@ pub async fn run(server_addr: String, cfg: ClientConfig) -> anyhow::Result<()> {
                 info!("Disconnected cleanly");
             }
             Err(e) => {
-                warn!("Disconnected with error: {e} — reconnecting in {}ms", backoff.as_millis());
+                warn!(
+                    "Disconnected with error: {e} — reconnecting in {}ms",
+                    backoff.as_millis()
+                );
             }
         }
         tokio::time::sleep(backoff).await;
@@ -46,7 +49,7 @@ async fn connect_and_run(addr: &str, cfg: &ClientConfig) -> anyhow::Result<()> {
         .map(|h| h.to_string_lossy().to_string())
         .unwrap_or_else(|_| "sonium-client".into());
     let display_name = cfg.client_name.as_deref().unwrap_or(&hostname);
-    let client_id    = format!("{}-1", hostname);
+    let client_id = format!("{}-1", hostname);
 
     let mut hello_msg = Hello::new(display_name, &client_id);
     hello_msg.hostname = display_name.to_owned();
@@ -56,11 +59,12 @@ async fn connect_and_run(addr: &str, cfg: &ClientConfig) -> anyhow::Result<()> {
 
     // 2. Wait for CodecHeader, then ServerSettings
     let mut decoder: Option<ActiveDecoder> = None;
-    let mut player:  Option<Player>        = None;
-    let mut sync_buf: Option<SyncBuffer>   = None;
-    let mut volume: u8  = 100;
-    let mut muted       = false;
+    let mut player: Option<Player> = None;
+    let mut sync_buf: Option<SyncBuffer> = None;
+    let mut volume: u8 = 100;
+    let mut muted = false;
     let mut eq_bands: Vec<EqBand> = vec![];
+    let mut eq_processor = None;
 
     let mut hdr_buf = [0u8; HEADER_SIZE];
     let mut pending_time: Option<(u16, i64)> = None; // (msg_id, sent_us)
@@ -86,6 +90,7 @@ async fn connect_and_run(addr: &str, cfg: &ClientConfig) -> anyhow::Result<()> {
                         let fmt = dec.sample_format();
                         let p   = Player::new(fmt, cfg.device.as_deref())?;
                         let buf = SyncBuffer::new(fmt, cfg.latency_ms.unsigned_abs() + 1000);
+                        eq_processor = build_eq(&eq_bands, fmt.rate, fmt.channels as usize);
                         decoder  = Some(dec);
                         player   = Some(p);
                         sync_buf = Some(buf);
@@ -96,6 +101,10 @@ async fn connect_and_run(addr: &str, cfg: &ClientConfig) -> anyhow::Result<()> {
                         volume   = ss.volume.min(100);
                         muted    = ss.muted;
                         eq_bands = ss.eq_bands;
+                        if let Some(dec) = decoder.as_ref() {
+                            let fmt = dec.sample_format();
+                            eq_processor = build_eq(&eq_bands, fmt.rate, fmt.channels as usize);
+                        }
                         debug!(volume = ss.volume, muted = ss.muted, buffer_ms = ss.buffer_ms, "ServerSettings");
                     }
 
@@ -107,7 +116,7 @@ async fn connect_and_run(addr: &str, cfg: &ClientConfig) -> anyhow::Result<()> {
                             let mut samples = Vec::new();
                             dec.decode(&chunk.data, &mut samples)?;
                             apply_volume(&mut samples, volume, muted);
-                            if let Some(ref mut eq) = build_eq(&eq_bands, dec.sample_format().rate, dec.sample_format().channels as usize) {
+                            if let Some(ref mut eq) = eq_processor {
                                 eq.apply(&mut samples);
                             }
                             let playout_us = chunk.timestamp.to_micros()
@@ -170,7 +179,6 @@ fn apply_volume(samples: &mut [i16], volume: u8, muted: bool) {
 
     let gain = volume as f32 / 100.0;
     for sample in samples {
-        *sample = (*sample as f32 * gain)
-            .clamp(i16::MIN as f32, i16::MAX as f32) as i16;
+        *sample = (*sample as f32 * gain).clamp(i16::MIN as f32, i16::MAX as f32) as i16;
     }
 }

@@ -1,8 +1,8 @@
+use bytes::Bytes;
+use parking_lot::{Mutex, RwLock};
 use std::collections::HashMap;
 use std::sync::Arc;
 use tokio::sync::broadcast;
-use bytes::Bytes;
-use parking_lot::{Mutex, RwLock};
 
 use crate::metrics;
 
@@ -14,17 +14,17 @@ pub struct AudioFrame {
 
 /// Fan-out hub for a single stream: encodes once, delivers to all sessions.
 pub struct Broadcaster {
-    pub stream_id:   String,
-    pub buffer_ms:   u32,
-    sender:          broadcast::Sender<AudioFrame>,
-    codec_header:    Mutex<Option<Bytes>>,
+    pub stream_id: String,
+    pub buffer_ms: u32,
+    sender: broadcast::Sender<AudioFrame>,
+    codec_header: Mutex<Option<Bytes>>,
 }
 
 impl Broadcaster {
     pub fn new(stream_id: impl Into<String>, buffer_ms: u32) -> Self {
         let (sender, _) = broadcast::channel(256);
         Self {
-            stream_id:    stream_id.into(),
+            stream_id: stream_id.into(),
             buffer_ms,
             sender,
             codec_header: Mutex::new(None),
@@ -36,7 +36,9 @@ impl Broadcaster {
     }
 
     pub fn publish(&self, wire_bytes: Bytes) {
-        metrics::ENCODED_CHUNKS.with_label_values(&[&self.stream_id]).inc();
+        metrics::ENCODED_CHUNKS
+            .with_label_values(&[&self.stream_id])
+            .inc();
         let _ = self.sender.send(AudioFrame { wire_bytes });
     }
 
@@ -58,6 +60,10 @@ pub fn new_registry() -> Arc<BroadcasterRegistry> {
 
 pub fn register(registry: &Arc<BroadcasterRegistry>, bc: Arc<Broadcaster>) {
     registry.write().insert(bc.stream_id.clone(), bc);
+}
+
+pub fn unregister(registry: &Arc<BroadcasterRegistry>, stream_id: &str) {
+    registry.write().remove(stream_id);
 }
 
 pub fn lookup(registry: &Arc<BroadcasterRegistry>, stream_id: &str) -> Option<Arc<Broadcaster>> {

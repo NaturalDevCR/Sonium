@@ -160,6 +160,29 @@ async fn patch_volume_connected_client_is_204() {
     assert!(c.muted);
 }
 
+#[tokio::test]
+async fn patch_eq_connected_client_is_204() {
+    let (app, state, token) = make_app_with_state();
+    let addr: SocketAddr = "127.0.0.1:9002".parse().unwrap();
+    state.client_connected("eq-test", "host", "Test", "linux", "x86_64", addr, 2);
+
+    let bands = json!([
+        {"freq_hz": 100, "gain_db": 3.0, "q": 0.9},
+        {"freq_hz": 1000, "gain_db": -1.5, "q": 0.9},
+        {"freq_hz": 10000, "gain_db": 2.0, "q": 0.9}
+    ]);
+    let res = app
+        .oneshot(patch_json("/clients/eq-test/eq", json!({"bands": bands}), &token))
+        .await.unwrap();
+    assert_eq!(res.status(), StatusCode::NO_CONTENT);
+
+    let updated = state.all_clients();
+    let c = updated.iter().find(|c| c.id == "eq-test").unwrap();
+    assert_eq!(c.eq_bands.len(), 3);
+    assert_eq!(c.eq_bands[0].freq_hz, 100);
+    assert_eq!(c.eq_bands[0].gain_db, 3.0);
+}
+
 // ── /groups ───────────────────────────────────────────────────────────────
 
 #[tokio::test]
@@ -248,7 +271,7 @@ async fn ws_events_endpoint_upgrades() {
     let url = format!("ws://127.0.0.1:{port}/events?token={token}");
     let (mut ws, _) = connect_async(&url).await.expect("WS connect failed");
 
-    ws.send(Message::Ping(vec![42].into())).await.unwrap();
+    ws.send(Message::Ping(vec![42])).await.unwrap();
 
     // Expect a Pong back
     let reply = tokio::time::timeout(

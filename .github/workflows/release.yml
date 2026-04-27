@@ -4,39 +4,52 @@ on:
   push:
     tags:
       - 'v*'
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: 'Tag to release, for example v0.1.0'
+        required: true
+        type: string
 
 permissions:
   contents: write
 
+env:
+  CARGO_TERM_COLOR: always
+
 jobs:
   build-web:
-    name: Build Web UI
+    name: Build embedded web UI
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-      - uses: pnpm/action-setup@v3
+
+      - uses: pnpm/action-setup@v4
         with:
-          version: 8
-      - name: Setup Node
-        uses: actions/setup-node@v4
+          version: 9
+
+      - uses: actions/setup-node@v4
         with:
           node-version: 20
-          cache: 'pnpm'
+          cache: pnpm
           cache-dependency-path: web/pnpm-lock.yaml
-      - name: Install dependencies
-        run: pnpm install
+
+      - name: Install web dependencies
+        run: pnpm install --frozen-lockfile
         working-directory: web
-      - name: Build web
+
+      - name: Build web UI
         run: pnpm build
         working-directory: web
-      - name: Upload dist
+
+      - name: Upload embedded web UI
         uses: actions/upload-artifact@v4
         with:
           name: web-dist
           path: web/dist/
 
   build-rust:
-    name: Build Rust (${{ matrix.target }})
+    name: Build ${{ matrix.package }}
     needs: build-web
     runs-on: ${{ matrix.os }}
     strategy:
@@ -44,75 +57,112 @@ jobs:
       matrix:
         include:
           - os: ubuntu-latest
-            target: x86_64-unknown-linux-musl
-            arch: x86_64
-          - os: ubuntu-latest
-            target: aarch64-unknown-linux-musl
-            arch: aarch64
+            target: x86_64-unknown-linux-gnu
+            package: linux-x86_64
+            archive: tar.gz
+          - os: ubuntu-24.04-arm
+            target: aarch64-unknown-linux-gnu
+            package: linux-aarch64
+            archive: tar.gz
+          - os: macos-13
+            target: x86_64-apple-darwin
+            package: macos-x86_64
+            archive: tar.gz
+          - os: macos-14
+            target: aarch64-apple-darwin
+            package: macos-aarch64
+            archive: tar.gz
           - os: windows-latest
             target: x86_64-pc-windows-msvc
-            arch: x86_64
-          - os: macos-latest
-            target: x86_64-apple-darwin
-            arch: x86_64
-          - os: macos-latest
-            target: aarch64-apple-darwin
-            arch: aarch64
+            package: windows-x86_64
+            archive: zip
 
     steps:
       - uses: actions/checkout@v4
-      
-      - name: Download web-dist
+
+      - name: Download embedded web UI
         uses: actions/download-artifact@v4
         with:
           name: web-dist
           path: web/dist/
-      
-      - name: Install Rust toolchain
-        uses: dtolnay/rust-toolchain@stable
+
+      - uses: dtolnay/rust-toolchain@stable
         with:
           targets: ${{ matrix.target }}
 
-      - name: Install system dependencies (Linux)
+      - name: Install Linux dependencies
         if: runner.os == 'Linux'
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y libopus-dev libasound2-dev musl-tools
+        run: sudo apt-get update && sudo apt-get install -y pkg-config libopus-dev libasound2-dev
 
-      - name: Build
+      - name: Install macOS dependencies
+        if: runner.os == 'macOS'
+        run: brew install opus
+
+      - name: Build release binaries
+        run: cargo build --release --target ${{ matrix.target }} --bin sonium-server --bin sonium-client
+
+      - name: Stage package
         shell: bash
         run: |
-          # Use cross for Linux musl if available, otherwise standard cargo
-          if [[ "${{ runner.os }}" == "Linux" ]]; then
-            # Attempt to build with standard cargo + musl-tools
-            cargo build --release --target ${{ matrix.target }} --workspace
-          else
-            cargo build --release --target ${{ matrix.target }} --workspace
+          set -euxo pipefail
+          version="${GITHUB_REF_NAME}"
+          if [[ "${{ github.event_name }}" == "workflow_dispatch" ]]; then
+            version="${{ inputs.tag }}"
           fi
 
-      - name: Package artifacts
-        shell: bash
-        run: |
-          mkdir -p dist
-          BIN_SUFFIX=""
+          suffix=""
           if [[ "${{ runner.os }}" == "Windows" ]]; then
-            BIN_SUFFIX=".exe"
+            suffix=".exe"
           fi
-          
-          # Rename binaries to match install.sh expectations
-          cp target/${{ matrix.target }}/release/sonium-server${BIN_SUFFIX} dist/sonium-server-${{ matrix.arch || matrix.target }}${BIN_SUFFIX}
-          cp target/${{ matrix.target }}/release/sonium-client${BIN_SUFFIX} dist/sonium-client-${{ matrix.arch || matrix.target }}${BIN_SUFFIX}
-          
-          # Also create a generic version for manual downloads
-          cp target/${{ matrix.target }}/release/sonium-server${BIN_SUFFIX} dist/sonium-server-${{ matrix.target }}${BIN_SUFFIX}
-          cp target/${{ matrix.target }}/release/sonium-client${BIN_SUFFIX} dist/sonium-client-${{ matrix.target }}${BIN_SUFFIX}
 
-      - name: Create Release and Upload Assets
+          package_dir="sonium-${version}-${{ matrix.package }}"
+          mkdir -p "${package_dir}"
+          cp "target/${{ matrix.target }}/release/sonium-server${suffix}" "${package_dir}/"
+          cp "target/${{ matrix.target }}/release/sonium-client${suffix}" "${package_dir}/"
+          cp README.md "${package_dir}/"
+          cp LICENSE "${package_dir}/" 2>/dev/null || true
+          cp install.sh "${package_dir}/" || true
+
+          if [[ "${{ matrix.archive }}" == "zip" ]]; then
+            7z a "${package_dir}.zip" "${package_dir}"
+            mkdir -p dist
+            mv "${package_dir}.zip" dist/
+          else
+            tar -czf "${package_dir}.tar.gz" "${package_dir}"
+            mkdir -p dist
+            mv "${package_dir}.tar.gz" dist/
+          fi
+
+      - name: Upload release package
+        uses: actions/upload-artifact@v4
+        with:
+          name: sonium-${{ matrix.package }}
+          path: dist/*
+
+  publish:
+    name: Publish GitHub Release
+    needs: build-rust
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Download release packages
+        uses: actions/download-artifact@v4
+        with:
+          pattern: sonium-*
+          path: release-assets
+          merge-multiple: true
+
+      - name: Add installer
+        run: cp install.sh release-assets/install.sh
+
+      - name: Publish release
         uses: softprops/action-gh-release@v2
         with:
-          files: dist/*
+          tag_name: ${{ github.event_name == 'workflow_dispatch' && inputs.tag || github.ref_name }}
+          files: release-assets/*
           draft: false
-          prerelease: false
+          prerelease: ${{ contains(github.ref_name, '-') }}
           generate_release_notes: true
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

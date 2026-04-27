@@ -1,77 +1,114 @@
 # Sonium
 
-Open-source multiroom audio server and client written in Rust.
-Streams perfectly synchronized audio to any number of speakers over your local
-network — **no cloud, no configuration file required, no subscription**.
+Open-source multiroom audio for local networks. Sonium runs one server that
+receives audio and a lightweight client on every playback device.
 
 [![CI](https://github.com/jdavidoa91/sonium/actions/workflows/ci.yml/badge.svg)](https://github.com/jdavidoa91/sonium/actions/workflows/ci.yml)
 [![Docs](https://github.com/jdavidoa91/sonium/actions/workflows/docs.yml/badge.svg)](https://jdavidoa91.github.io/sonium/)
-[![License: GPL-3.0](https://img.shields.io/badge/License-GPL--3.0-blue.svg)](LICENSE)
+[![License: GPL-3.0](https://img.shields.io/badge/License-GPL--3.0-blue.svg)](https://www.gnu.org/licenses/gpl-3.0.html)
 
-## Quick start
+## How It Works
 
-For local development, use the one-command runner:
-
-```bash
-./dev.sh
+```text
+music source -> sonium-server -> LAN -> sonium-client -> speaker
+                                      -> sonium-client -> speaker
+                                      -> sonium-client -> speaker
 ```
 
-This builds the embedded web UI and starts `sonium-server` with
-`run/sonium.toml`. Open the web UI at <http://127.0.0.1:1711>.
+- `sonium-server` reads PCM audio, encodes stream chunks, hosts the web UI/API,
+  and coordinates groups, volume, latency, EQ, and stream selection.
+- `sonium-client` runs on each playback device, discovers or connects to the
+  server, syncs time, decodes audio, and writes to local speakers.
 
-To also start a local client:
+## Install
+
+Linux:
 
 ```bash
-./dev.sh --with-client
+curl -fsSL https://github.com/jdavidoa91/sonium/releases/latest/download/install.sh | sudo bash
 ```
 
-If your default audio device does not accept Sonium's 48 kHz stereo output,
-select one explicitly:
+macOS and Windows users can download release packages from
+[GitHub Releases](https://github.com/jdavidoa91/sonium/releases).
+
+Docker can run the server:
 
 ```bash
-./dev.sh --with-client --client-device "BlackHole"
+docker compose up -d
 ```
 
+The client should usually run directly on the playback machine because it needs
+access to local audio hardware.
+
+## Quick Start from Source
+
 ```bash
-# Build
-cargo build --release
+git clone https://github.com/jdavidoa91/sonium
+cd sonium
 
-# Start server — streams a 440 Hz test tone
-ffmpeg -f lavfi -i "sine=frequency=440" -f s16le -ar 48000 -ac 2 - \
-  | ./target/release/sonium-server
+pnpm --dir web install
+pnpm --dir web build
+cargo build --release --bin sonium-server --bin sonium-client
+```
 
-# Connect a client (same machine or any host on the LAN)
+Create a FIFO-backed stream:
+
+```bash
+mkfifo /tmp/sonium.fifo
+cat > sonium.toml <<'EOF'
+[server]
+bind = "0.0.0.0"
+stream_port = 1710
+control_port = 1711
+mdns = true
+
+[[streams]]
+id = "default"
+display_name = "Main"
+source = "/tmp/sonium.fifo"
+codec = "opus"
+buffer_ms = 1000
+silence_on_idle = true
+
+[log]
+level = "info"
+EOF
+
+./target/release/sonium-server --config sonium.toml
+```
+
+Feed audio in another terminal:
+
+```bash
+ffmpeg -re -f lavfi -i "sine=frequency=440" \
+  -f s16le -ar 48000 -ac 2 - > /tmp/sonium.fifo
+```
+
+Connect a client:
+
+```bash
 ./target/release/sonium-client --discover
+# or
+./target/release/sonium-client 192.168.1.50
 ```
+
+Open the web UI at <http://127.0.0.1:1711>.
 
 ## Documentation
 
-Full documentation: **[jdavidoa91.github.io/sonium](https://jdavidoa91.github.io/sonium/)**
+Full docs: [jdavidoa91.github.io/sonium](https://jdavidoa91.github.io/sonium/)
 
-- [Quick Start](https://jdavidoa91.github.io/sonium/getting-started/quick-start.html)
-- [Architecture](https://jdavidoa91.github.io/sonium/architecture/overview.html)
-- [Binary Protocol](https://jdavidoa91.github.io/sonium/reference/protocol.html)
-- [Roadmap](https://jdavidoa91.github.io/sonium/contributing/roadmap.html)
+- [Quick Start](https://jdavidoa91.github.io/sonium/getting-started/quick-start)
+- [Installation](https://jdavidoa91.github.io/sonium/getting-started/installation)
+- [Configuration](https://jdavidoa91.github.io/sonium/getting-started/configuration)
+- [Architecture](https://jdavidoa91.github.io/sonium/architecture/overview)
 
-## Why Sonium?
+## Current Status
 
-Sonium is a **next-generation** multiroom audio system built from scratch in Rust.
-It's designed for the modern home network: zero config, instant setup, and
-professional-grade synchronization — all without vendor lock-in.
-
-- **Zero required config** — works out of the box
-- **Built-in web UI** with drag-and-drop group management
-- **mDNS auto-discovery** — clients find the server automatically
-- **Automatic reconnection** with exponential backoff
-- **PTPv2 hardware clock support** (planned) — nanosecond-accurate sync on commodity hardware
-- **Multi-codec** — Opus, FLAC, and PCM out of the box
-- **Interoperable** — optional backward compatibility with Snapcast v2 clients for easy migration
-
-## Status
-
-Early development — core audio pipeline complete. Not production-ready yet.
-See the [roadmap](https://jdavidoa91.github.io/sonium/contributing/roadmap.html).
+Sonium is in active early development. The core audio path, web UI, REST API,
+metrics, Docker server flow, release packaging, multi-codec support, and client
+sync loop are under active iteration.
 
 ## License
 
-GNU General Public License v3.0 — see [LICENSE](LICENSE).
+GNU General Public License v3.0.

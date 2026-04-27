@@ -22,6 +22,7 @@ const sortedClients = computed(() =>
 
 // ── Volume ────────────────────────────────────────────────────────────────
 const debounceTimers: Record<string, ReturnType<typeof setTimeout>> = {};
+const eqDebounceTimers: Record<string, ReturnType<typeof setTimeout>> = {};
 
 function setVolume(clientId: string, volume: number, muted: boolean) {
   clearTimeout(debounceTimers[clientId]);
@@ -31,6 +32,17 @@ function setVolume(clientId: string, volume: number, muted: boolean) {
       c.id === clientId ? { ...c, volume, muted } : c,
     );
   }, 120);
+}
+
+function setEq(clientId: string, bands: EqBand[]) {
+  store.clients = store.clients.map(c =>
+    c.id === clientId ? { ...c, eq_bands: bands } : c,
+  );
+
+  clearTimeout(eqDebounceTimers[clientId]);
+  eqDebounceTimers[clientId] = setTimeout(() => {
+    api.setEq(clientId, bands);
+  }, 180);
 }
 
 // ── Latency ───────────────────────────────────────────────────────────────
@@ -189,8 +201,14 @@ function groupName(groupId: string) {
           </div>
         </div>
 
+        <EqControl
+          :client-id="c.id"
+          :model-value="c.eq_bands"
+          @update:model-value="setEq(c.id, $event)"
+        />
+
         <!-- Latency + group assignment -->
-        <div class="flex items-center gap-3 flex-wrap">
+        <div class="flex items-center gap-3 flex-wrap mt-2">
           <!-- Latency -->
           <div class="flex items-center gap-1.5">
             <span class="mdi mdi-timer-sand text-sm" style="color: var(--text-muted);"></span>

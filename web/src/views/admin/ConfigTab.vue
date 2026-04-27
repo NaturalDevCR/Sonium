@@ -9,6 +9,7 @@ const value   = ref('');
 const saved   = ref('');
 const loading = ref(true);
 const saving  = ref(false);
+const reloading = ref(false);
 const status  = ref<{ type: 'success' | 'error'; msg: string } | null>(null);
 
 onMounted(async () => {
@@ -29,11 +30,31 @@ async function save() {
   try {
     await api.saveConfigRaw(value.value);
     saved.value  = value.value;
-    status.value = { type: 'success', msg: 'Config saved. Restart the server for changes to take effect.' };
+    status.value = { type: 'success', msg: 'Config saved. Stream changes will reload automatically.' };
   } catch (e) {
     status.value = { type: 'error', msg: String(e) };
   } finally {
     saving.value = false;
+  }
+}
+
+async function reloadConfig() {
+  reloading.value = true;
+  status.value = null;
+  try {
+    const report = await api.reloadConfig();
+    const changed = report.added.length + report.removed.length + report.restarted.length;
+    const restartOnly = report.restart_required.length
+      ? ` Restart still required for: ${report.restart_required.join(', ')}.`
+      : '';
+    status.value = {
+      type: 'success',
+      msg: `Config reloaded: ${changed} stream change${changed === 1 ? '' : 's'} applied.${restartOnly}`,
+    };
+  } catch (e) {
+    status.value = { type: 'error', msg: String(e) };
+  } finally {
+    reloading.value = false;
   }
 }
 
@@ -73,6 +94,15 @@ function autoGrow(el: HTMLTextAreaElement) {
         >
           <span class="mdi" :class="saving ? 'mdi-loading animate-spin' : 'mdi-content-save'"></span>
           {{ saving ? 'Saving…' : 'Save' }}
+        </button>
+        <button
+          @click="reloadConfig"
+          :disabled="saving || reloading || !auth.isAdmin"
+          class="flex items-center gap-1.5 px-3 py-1.5 rounded-lg bg-slate-800 hover:bg-slate-700 text-slate-100 text-sm
+                 font-medium disabled:opacity-50 transition-colors"
+        >
+          <span class="mdi" :class="reloading ? 'mdi-loading animate-spin' : 'mdi-refresh'"></span>
+          {{ reloading ? 'Reloading…' : 'Reload' }}
         </button>
       </div>
     </div>
@@ -118,8 +148,8 @@ function autoGrow(el: HTMLTextAreaElement) {
     </div>
 
     <p class="text-xs text-slate-600">
-      Changes require a server restart to take effect.
-      Sonium validates the TOML before saving — invalid config will be rejected.
+      Stream changes reload live after saving. Bind address, ports, mDNS, and log-level changes still require a restart.
+      Sonium validates the TOML before saving.
     </p>
   </div>
 </template>

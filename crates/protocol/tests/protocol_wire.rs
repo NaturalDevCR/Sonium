@@ -114,7 +114,7 @@ fn wire_chunk_timestamp_survives_full_wire() {
 
 #[test]
 fn server_settings_json_encoding() {
-    let ss  = ServerSettings { buffer_ms: 500, latency: 150, volume: 80, muted: true };
+    let ss  = ServerSettings { buffer_ms: 500, latency: 150, volume: 80, muted: true, eq_bands: vec![] };
     let (_, msg) = parse(&wire(&Message::ServerSettings(ss)));
 
     if let Message::ServerSettings(s) = msg {

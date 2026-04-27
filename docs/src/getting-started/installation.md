@@ -1,137 +1,131 @@
 # Installation
 
-## One-line installer (Linux)
+Sonium ships as two binaries:
 
-The quickest way to get Sonium running on a Linux system:
+| Binary | Install where | Purpose |
+| --- | --- | --- |
+| `sonium-server` | One machine on the network | Reads audio, hosts the web UI/API, broadcasts streams. |
+| `sonium-client` | Every playback machine | Connects to the server and plays synchronized audio. |
 
-```bash
-curl -fsSL https://github.com/sonium-audio/sonium/releases/latest/download/install.sh | sudo bash
-```
+## Linux Installer
 
-The installer will:
-1. Download the pre-built binary for your architecture (`x86_64`, `aarch64`, `armv7`)
-2. Create a `sonium` system user
-3. Write a default config to `/etc/sonium/server.toml`
-4. Create the audio FIFO at `/tmp/sonium.fifo`
-5. Install and start the `sonium-server.service` systemd unit
-
-The web UI will be available at `http://<your-ip>:1711` immediately after installation.
-
-### Installer options
-
-```
---prefix /opt      Install binaries to /opt/bin instead of /usr/local/bin
---no-service       Skip systemd service installation
---version 0.2.0    Install a specific release version
-```
-
----
-
-## From source
+The Linux installer downloads the right release package, writes
+`/etc/sonium/sonium.toml`, creates `/tmp/sonium.fifo`, and optionally installs a
+systemd service.
 
 ```bash
-# Requires Rust 1.75+
-curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh
+curl -fsSL https://github.com/jdavidoa91/sonium/releases/latest/download/install.sh | sudo bash
+```
 
-git clone https://github.com/sonium-audio/sonium
+Useful options:
+
+```bash
+sudo bash install.sh --version v0.1.0
+sudo bash install.sh --prefix /opt/sonium
+sudo bash install.sh --no-service
+sudo bash install.sh --server-only
+```
+
+After installation:
+
+```bash
+systemctl status sonium-server
+journalctl -u sonium-server -f
+```
+
+Feed audio:
+
+```bash
+ffmpeg -re -i song.flac -f s16le -ar 48000 -ac 2 - > /tmp/sonium.fifo
+```
+
+Run a client:
+
+```bash
+sonium-client --discover
+```
+
+## GitHub Release Packages
+
+Download a package from the
+[GitHub Releases](https://github.com/jdavidoa91/sonium/releases) page.
+
+| Platform | Package |
+| --- | --- |
+| Linux x86_64 | `sonium-vX.Y.Z-linux-x86_64.tar.gz` |
+| Linux aarch64 | `sonium-vX.Y.Z-linux-aarch64.tar.gz` |
+| macOS Intel | `sonium-vX.Y.Z-macos-x86_64.tar.gz` |
+| macOS Apple Silicon | `sonium-vX.Y.Z-macos-aarch64.tar.gz` |
+| Windows x86_64 | `sonium-vX.Y.Z-windows-x86_64.zip` |
+
+Extract the package and place the binaries on your `PATH`.
+
+macOS may quarantine downloaded binaries. If Gatekeeper blocks them:
+
+```bash
+xattr -d com.apple.quarantine sonium-server sonium-client
+```
+
+On Windows, run from PowerShell:
+
+```powershell
+.\sonium-server.exe --config .\sonium.toml
+.\sonium-client.exe 192.168.1.50
+```
+
+## Docker Server
+
+Docker is useful for the server. The client should usually run directly on the
+playback device because it needs access to local audio hardware.
+
+```bash
+docker compose up -d
+```
+
+The server exposes:
+
+| Port | Purpose |
+| --- | --- |
+| `1710/tcp` | Sonium audio stream protocol |
+| `1711/tcp` | Web UI, REST API, WebSocket events |
+
+## Build from Source
+
+Install Rust and Node.js, then build the embedded web UI before building the
+server:
+
+```bash
+git clone https://github.com/jdavidoa91/sonium
 cd sonium
 
-# Build both binaries in release mode
+pnpm --dir web install
+pnpm --dir web build
 cargo build --release --bin sonium-server --bin sonium-client
-
-# Copy binaries to PATH
-sudo cp target/release/sonium-server target/release/sonium-client /usr/local/bin/
 ```
 
-### System dependencies
-
-#### Linux
-
-Opus development headers are required for the `audiopus` crate:
+Linux dependencies:
 
 ```bash
-# Debian / Ubuntu / Raspberry Pi OS
-sudo apt install libopus-dev
-
-# Arch
-sudo pacman -S opus
-
-# Fedora / RHEL
-sudo dnf install opus-devel
+sudo apt-get install pkg-config libopus-dev libasound2-dev
 ```
 
-#### macOS
+macOS dependencies:
 
 ```bash
 brew install opus
 ```
 
-#### Windows
+Windows requires the Visual Studio Build Tools with the C++ workload.
 
-`audiopus-sys` compiles `libopus` from source automatically if Visual Studio
-Build Tools are installed — no extra steps needed.
+## Server vs Client Setup
 
----
+A typical home setup looks like this:
 
-## Systemd service
-
-The installer writes the following unit file; you can also install it manually:
-
-```bash
-sudo cp sonium-server.service /etc/systemd/system/
-sudo systemctl daemon-reload
-sudo systemctl enable --now sonium-server
+```text
+music source -> sonium-server -> LAN -> sonium-client -> speaker
+                                      -> sonium-client -> speaker
+                                      -> sonium-client -> speaker
 ```
 
-Full unit file (also at [`sonium-server.service`](https://github.com/sonium-audio/sonium/blob/main/sonium-server.service) in the repo):
-
-```ini
-[Unit]
-Description=Sonium multiroom audio server
-After=network.target sound.target
-Wants=network.target
-
-[Service]
-Type=simple
-User=sonium
-ExecStart=/usr/local/bin/sonium-server --config /etc/sonium/server.toml
-Restart=on-failure
-RestartSec=5s
-AmbientCapabilities=CAP_NET_BIND_SERVICE
-NoNewPrivileges=true
-ProtectSystem=strict
-ProtectHome=true
-ReadWritePaths=/var/log/sonium /tmp
-
-[Install]
-WantedBy=multi-user.target
-```
-
----
-
-## Raspberry Pi
-
-Sonium is designed to run comfortably on a Raspberry Pi 4 or later.  The
-`aarch64` pre-built binary targets Alpine-style musl libc and runs on any
-64-bit Pi OS without needing extra runtime libraries.
-
-For cross-compilation from an x86 host:
-
-```bash
-rustup target add aarch64-unknown-linux-musl
-cargo build --release --target aarch64-unknown-linux-musl --bin sonium-client
-```
-
----
-
-## Pre-built binaries
-
-Pre-built binaries are available on the
-[GitHub Releases](https://github.com/sonium-audio/sonium/releases) page.
-
-| Platform | Binary |
-|---|---|
-| Linux x86_64 | `sonium-server-x86_64-unknown-linux-musl` |
-| Linux aarch64 | `sonium-server-aarch64-unknown-linux-musl` |
-| Linux armv7 | `sonium-server-armv7-unknown-linux-musleabihf` |
-| macOS arm64 | `sonium-server-aarch64-apple-darwin` |
+Only the server needs the web UI and config file. Each client only needs to know
+how to reach the server, either through mDNS discovery or a server IP address.

@@ -1,16 +1,17 @@
-use std::path::PathBuf;
-use std::sync::Arc;
 use axum::{
-    Router,
-    routing::get,
-    http::{Uri, StatusCode, header},
+    http::{header, StatusCode, Uri},
     response::{IntoResponse, Response},
+    routing::get,
+    Router,
 };
 use rust_embed::RustEmbed;
+use std::path::PathBuf;
+use std::sync::Arc;
+use tokio::sync::mpsc;
 use tracing::info;
 
-use sonium_control::{ServerState, UserStore, api, auth_api, config_api, system_api};
 use crate::metrics;
+use sonium_control::{api, auth_api, config_api, system_api, ServerState, UserStore};
 
 /// Embedded web UI — built from `web/dist/` at compile time.
 #[derive(RustEmbed)]
@@ -18,14 +19,16 @@ use crate::metrics;
 struct WebAssets;
 
 pub async fn run(
-    state:       Arc<ServerState>,
-    auth:        Arc<UserStore>,
+    state: Arc<ServerState>,
+    auth: Arc<UserStore>,
     config_path: PathBuf,
-    port:        u16,
+    reload_tx: Option<mpsc::Sender<config_api::ReloadRequest>>,
+    port: u16,
 ) -> anyhow::Result<()> {
     let config_state = config_api::ConfigApiState {
         config_path,
         auth: auth.clone(),
+        reload_tx,
     };
 
     let app = Router::new()
@@ -33,7 +36,7 @@ pub async fn run(
         .nest("/api", auth_api::router(auth.clone()))
         .nest("/api", config_api::router(config_state))
         .nest("/api", system_api::router(auth.clone()))
-        .route("/health",  get(|| async { "ok" }))
+        .route("/health", get(|| async { "ok" }))
         .route("/metrics", get(metrics_handler))
         .fallback(spa_handler)
         // Make UserStore available as Extension to all nested routers,
@@ -49,7 +52,14 @@ pub async fn run(
 
 async fn metrics_handler() -> Response {
     let body = metrics::gather();
-    ([(header::CONTENT_TYPE, "text/plain; version=0.0.4; charset=utf-8")], body).into_response()
+    (
+        [(
+            header::CONTENT_TYPE,
+            "text/plain; version=0.0.4; charset=utf-8",
+        )],
+        body,
+    )
+        .into_response()
 }
 
 async fn spa_handler(uri: Uri) -> Response {
@@ -72,7 +82,8 @@ async fn spa_handler(uri: Uri) -> Response {
                 Some(index) => (
                     [(header::CONTENT_TYPE, "text/html; charset=utf-8")],
                     index.data,
-                ).into_response(),
+                )
+                    .into_response(),
                 None => (StatusCode::NOT_FOUND, "index.html not found").into_response(),
             }
         }

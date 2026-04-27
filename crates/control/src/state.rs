@@ -533,19 +533,27 @@ impl ServerState {
         format:       impl Into<String>,
     ) {
         let id = id.into();
+        let codec = codec.into();
+        let format = format.into();
         let mut streams = self.streams.write();
         streams
             .entry(id.clone())
             .and_modify(|stream| {
                 stream.display_name = display_name.clone();
+                stream.codec = codec.clone();
+                stream.format = format.clone();
             })
             .or_insert_with(|| StreamInfo {
                 id: id.clone(),
                 display_name,
-                codec:  codec.into(),
-                format: format.into(),
+                codec,
+                format,
                 status: StreamStatus::Idle,
             });
+    }
+
+    pub fn unregister_stream(&self, id: &str) {
+        self.streams.write().remove(id);
     }
 
     pub fn all_streams(&self) -> Vec<StreamInfo> {
@@ -699,6 +707,7 @@ mod tests {
             muted:        true,
             latency_ms:   50,
             group_id:     "default".into(),
+            eq_bands:     vec![],
             last_seen:    Utc::now(),
         }];
         let s = Arc::new(ServerState::new(Arc::new(EventBus::new()), None, saved_clients));

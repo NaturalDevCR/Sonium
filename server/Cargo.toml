@@ -32,3 +32,4 @@ mime_guess      = { workspace = true }
 tokio-util   = "0.7.18"
 prometheus   = { version = "0.13", default-features = false }
 lazy_static  = "1.5"
+notify       = "6.1"
