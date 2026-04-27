@@ -248,8 +248,8 @@ if [[ "${INSTALL_SERVER}" == "true" ]]; then
   if [[ ! -f "${CONF_DIR}/users.json" ]]; then
     GEN_PASS=$(tr -dc 'A-Za-z0-9' < /dev/urandom | head -c 16)
     info "Initializing admin account..."
-    # We need to ensure the config file exists first if we are going to use it for --init-admin
-    # but the config is written below. Let's move this block or write the config earlier.
+  else
+    info "Existing user database found in ${CONF_DIR}/users.json; preserving it."
   fi
 
   if [[ ! -p "${FIFO_PATH}" ]]; then
@@ -340,6 +340,13 @@ Admin credentials:
   Username: admin
   Password: ${GEN_PASS}
 (You will be asked to change this on your first login)
+EOF
+  else
+    cat <<EOF
+
+Admin credentials:
+  Use your existing credentials.
+  (Default was admin/admin in previous versions)
 EOF
   fi
 
