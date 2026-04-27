@@ -152,6 +152,8 @@ pub struct ClientConfig {
     /// When set, the player will select the first output device whose name
     /// contains this string.  Useful for loopback testing with virtual cables.
     pub device: Option<String>,
+    /// The instance ID, useful for running multiple isolated clients on the same host.
+    pub instance: u32,
     pub log: LogConfig,
 }
 
@@ -163,7 +165,21 @@ impl Default for ClientConfig {
             latency_ms: 0,
             client_name: None,
             device: None,
+            instance: 1,
             log: LogConfig::default(),
         }
+    }
+}
+
+impl ClientConfig {
+    pub fn from_file(path: &std::path::Path) -> crate::error::Result<Self> {
+        let content = std::fs::read_to_string(path)
+            .map_err(|e| crate::SoniumError::Config(format!("cannot read client config: {e}")))?;
+        toml::from_str(&content)
+            .map_err(|e| crate::SoniumError::Config(format!("invalid TOML: {e}")))
+    }
+
+    pub fn from_file_or_default(path: &std::path::Path) -> Self {
+        Self::from_file(path).unwrap_or_default()
     }
 }

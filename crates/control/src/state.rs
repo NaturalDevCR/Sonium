@@ -293,6 +293,7 @@ impl ServerState {
         self.clients.write().insert(id.clone(), info.clone());
         self.events
             .emit(crate::ws::Event::ClientConnected { client: info });
+        self.persist();
     }
 
     /// Mark a client as disconnected (keeps history in the registry).
@@ -303,6 +304,8 @@ impl ServerState {
             self.events.emit(crate::ws::Event::ClientDisconnected {
                 client_id: id.into(),
             });
+            drop(clients);
+            self.persist();
         }
     }
 

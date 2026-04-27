@@ -1,0 +1,29 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <key>Label</key>
+    <string>com.sonium.client</string>
+    
+    <key>ProgramArguments</key>
+    <array>
+        <!-- Update this path to where your sonium-client binary is installed -->
+        <string>/usr/local/bin/sonium-client</string>
+        <string>--config</string>
+        <!-- Update this to point to your configuration file -->
+        <string>/Library/Preferences/sonium/sonium-client.toml</string>
+    </array>
+    
+    <key>RunAtLoad</key>
+    <true/>
+    
+    <key>KeepAlive</key>
+    <true/>
+    
+    <key>StandardOutPath</key>
+    <string>/Library/Logs/sonium-client.log</string>
+    
+    <key>StandardErrorPath</key>
+    <string>/Library/Logs/sonium-client.err</string>
+</dict>
+</plist>

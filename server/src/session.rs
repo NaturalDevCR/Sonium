@@ -194,6 +194,30 @@ async fn session_loop(
                         ).await?;
                     }
 
+                    Ok(Event::StreamRestarted { stream_id: sid })
+                        if sid == stream_id =>
+                    {
+                        // The stream we are listening to was restarted (e.g. config reload).
+                        // Force a re-subscription. We trick switch_stream by temporarily
+                        // clearing our current stream_id.
+                        let current_sid = stream_id.clone();
+                        stream_id.clear(); 
+                        switch_stream(
+                            stream, &registry,
+                            &mut audio_rx, &mut stream_id, &mut bc,
+                            &current_sid,
+                        ).await?;
+                    }
+
+                    Ok(Event::StreamRemoved { stream_id: sid })
+                        if sid == stream_id =>
+                    {
+                        // The stream we were listening to was removed entirely.
+                        // We stay connected but drop the audio subscription.
+                        audio_rx = None;
+                        bc = None;
+                    }
+
                     Ok(Event::VolumeChanged { client_id: cid, volume, muted })
                         if cid == client_id =>
                     {

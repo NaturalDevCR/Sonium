@@ -1,0 +1,34 @@
+{
+  "version": 1,
+  "groups": [
+    {
+      "id": "default",
+      "name": "Default",
+      "stream_id": "default"
+    }
+  ],
+  "clients": [
+    {
+      "id": "Josues-MacBook-Pro.local-1",
+      "hostname": "Josues-MacBook-Pro.local",
+      "display_name": null,
+      "volume": 100,
+      "muted": false,
+      "latency_ms": 0,
+      "group_id": "default",
+      "last_seen": "2026-04-27T23:00:08.457146Z",
+      "eq_bands": []
+    },
+    {
+      "id": "Josues-MacBook-Pro.local-2",
+      "hostname": "Josues-MacBook-Pro.local",
+      "display_name": null,
+      "volume": 100,
+      "muted": false,
+      "latency_ms": 0,
+      "group_id": "default",
+      "last_seen": "2026-04-27T23:00:08.457149Z",
+      "eq_bands": []
+    }
+  ]
+}

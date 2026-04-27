@@ -2,6 +2,7 @@ mod controller;
 mod decoder;
 mod eq;
 mod player;
+mod setup;
 
 use std::io::Write;
 use std::time::Duration;
@@ -20,34 +21,49 @@ use sonium_control::discovery::{self, DiscoveredServer};
     about = "Sonium multiroom audio client"
 )]
 struct Cli {
+    /// Config file path.
+    #[arg(
+        short,
+        long,
+        value_name = "FILE",
+        env = "SONIUM_CLIENT_CONFIG"
+    )]
+    config: Option<std::path::PathBuf>,
+
+    /// Client instance ID (for running multiple clients on the same host).
+    #[arg(
+        short = 'i',
+        long,
+        value_name = "ID",
+        env = "SONIUM_INSTANCE"
+    )]
+    instance: Option<u32>,
+
     /// Server hostname or IP address.
     /// When --discover is used, this is ignored and mDNS discovery is used instead.
     #[arg(
         value_name = "SERVER",
-        default_value = "127.0.0.1",
         env = "SONIUM_SERVER"
     )]
-    server: String,
+    server: Option<String>,
 
     /// Server stream port.
     #[arg(
         short,
         long,
         value_name = "PORT",
-        default_value_t = 1710,
         env = "SONIUM_PORT"
     )]
-    port: u16,
+    port: Option<u16>,
 
     /// Extra playout latency offset in milliseconds (useful for Bluetooth sinks).
     #[arg(
         short,
         long,
         value_name = "MS",
-        default_value_t = 0,
         env = "SONIUM_LATENCY"
     )]
-    latency: i32,
+    latency: Option<i32>,
 
     /// Client display name shown in the web UI (defaults to hostname).
     #[arg(short, long, value_name = "NAME", env = "SONIUM_NAME")]
@@ -59,8 +75,8 @@ struct Cli {
     device: Option<String>,
 
     /// Log level (trace/debug/info/warn/error).
-    #[arg(long, value_name = "LEVEL", default_value = "info", env = "SONIUM_LOG")]
-    log: String,
+    #[arg(long, value_name = "LEVEL", env = "SONIUM_LOG")]
+    log: Option<String>,
 
     /// Auto-discover servers on the local network via mDNS.
     /// If a single server is found it is used automatically.
@@ -76,16 +92,60 @@ struct Cli {
         env = "SONIUM_DISCOVER_TIMEOUT"
     )]
     discover_timeout: u64,
+
+    /// Launch the interactive setup wizard to install and configure instances.
+    #[arg(long)]
+    setup: bool,
+
+    /// Uninstall Sonium Client and remove all background services.
+    #[arg(long)]
+    uninstall: bool,
 }
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
     let cli = Cli::parse();
 
+    if cli.setup {
+        return setup::run().await;
+    }
+
+    if cli.uninstall {
+        return setup::uninstall().await;
+    }
+
+    let config_path = cli
+        .config
+        .unwrap_or_else(|| std::path::PathBuf::from("sonium-client.toml"));
+
+    let mut cfg = ClientConfig::from_file_or_default(&config_path);
+
+    if let Some(s) = cli.server {
+        cfg.server_host = s;
+    }
+    if let Some(p) = cli.port {
+        cfg.server_port = p;
+    }
+    if let Some(l) = cli.latency {
+        cfg.latency_ms = l;
+    }
+    if let Some(n) = cli.name {
+        cfg.client_name = Some(n);
+    }
+    if let Some(d) = cli.device {
+        cfg.device = Some(d);
+    }
+    if let Some(i) = cli.instance {
+        cfg.instance = i;
+    }
+    if let Some(log) = cli.log {
+        cfg.log.level = log;
+    }
+
     tracing_subscriber::fmt()
         .with_env_filter(
             tracing_subscriber::EnvFilter::try_from_default_env()
-                .unwrap_or_else(|_| cli.log.parse().unwrap_or_default()),
+                .unwrap_or_else(|_| cfg.log.level.parse().unwrap_or_default()),
         )
         .init();
 
@@ -93,21 +153,16 @@ async fn main() -> anyhow::Result<()> {
     let (server_host, server_port) = if cli.discover {
         discover_server(cli.discover_timeout).await?
     } else {
-        (cli.server.clone(), cli.port)
+        (cfg.server_host.clone(), cfg.server_port)
     };
 
-    let cfg = ClientConfig {
-        server_host: server_host.clone(),
-        server_port,
-        latency_ms: cli.latency,
-        client_name: cli.name,
-        device: cli.device,
-        ..Default::default()
-    };
+    cfg.server_host = server_host.clone();
+    cfg.server_port = server_port;
 
     let server_addr = format!("{server_host}:{server_port}");
     info!(
         %server_addr,
+        instance = cfg.instance,
         latency_ms = cfg.latency_ms,
         "Sonium client starting"
     );

@@ -57,6 +57,12 @@ pub enum Event {
         stream_id: String,
         status: StreamStatus,
     },
+    StreamRestarted {
+        stream_id: String,
+    },
+    StreamRemoved {
+        stream_id: String,
+    },
     /// Emitted periodically so the UI can show server uptime / clock.
     Heartbeat {
         uptime_s: i64,

@@ -49,7 +49,7 @@ async fn connect_and_run(addr: &str, cfg: &ClientConfig) -> anyhow::Result<()> {
         .map(|h| h.to_string_lossy().to_string())
         .unwrap_or_else(|_| "sonium-client".into());
     let display_name = cfg.client_name.as_deref().unwrap_or(&hostname);
-    let client_id = format!("{}-1", hostname);
+    let client_id = format!("{}-{}", hostname, cfg.instance);
 
     let mut hello_msg = Hello::new(display_name, &client_id);
     hello_msg.hostname = display_name.to_owned();

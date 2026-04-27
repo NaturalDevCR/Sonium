@@ -1,0 +1,21 @@
+[Unit]
+Description=Sonium Multiroom Audio Client (Instance %i)
+After=network-online.target sound.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+Environment="SONIUM_CLIENT_CONFIG=/etc/sonium/sonium-client-%i.toml"
+# Note: Ensure the binary is installed in /usr/bin or update this path.
+ExecStart=/usr/bin/sonium-client --instance %i
+Restart=on-failure
+RestartSec=5
+
+# Hardening
+ProtectSystem=full
+ProtectHome=read-only
+# Give the process access to audio devices
+SupplementaryGroups=audio
+
+[Install]
+WantedBy=multi-user.target

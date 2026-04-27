@@ -1,0 +1,12 @@
+{
+  "users": [
+    {
+      "id": "a0fed7e0-bd84-4503-9ed9-cc68b15bb0f9",
+      "username": "admin",
+      "password_hash": "$argon2id$v=19$m=19456,t=2,p=1$+nLEXUbsZpXoh6a3D4iEIg$FDGAvb+LRZeguwdI5gWKk+tmT80QeEMbJSNhO40b6nc",
+      "role": "admin",
+      "must_change_password": true
+    }
+  ],
+  "jwt_secret": "PmjIvlF0ZwxrOjgbEgDKwVnVaNyKSujoiNWmD81GVP6BSSCSwuDT4WpDcg68jZsH"
+}
