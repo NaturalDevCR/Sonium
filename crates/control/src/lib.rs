@@ -16,6 +16,13 @@ pub mod state;
 pub mod api;
 pub mod ws;
 pub mod discovery;
+pub mod auth;
+pub mod auth_api;
+pub mod config_api;
+pub mod system_api;
+pub mod persistence;
 
 pub use state::ServerState;
 pub use ws::EventBus;
+pub use auth::UserStore;
+pub use persistence::PersistenceStore;

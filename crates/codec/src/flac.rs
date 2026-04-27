@@ -166,7 +166,7 @@ impl Decoder for FlacDecoder {
             .map_err(|e| SoniumError::Codec(format!("flac decode: {e}")))?
         {
             let n_frames  = block.duration() as usize;  // per-channel sample count
-            let n_channels = block.channels() as u32;
+            let n_channels = block.channels();
             // Interleave channel samples.
             for i in 0..n_frames {
                 for ch in 0..n_channels {

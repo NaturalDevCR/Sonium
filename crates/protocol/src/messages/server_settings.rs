@@ -1,8 +1,19 @@
-//! `ServerSettings` — volume, mute, and buffer configuration pushed by the server.
+//! `ServerSettings` — volume, mute, buffer, and EQ configuration pushed by the server.
 
 use serde::{Deserialize, Serialize};
 use crate::wire::{WireRead, WireWrite};
 use sonium_common::error::Result;
+
+/// A single biquad peaking-EQ band.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct EqBand {
+    /// Centre frequency in Hz (e.g. 100, 1000, 10000).
+    pub freq_hz: u32,
+    /// Gain in dB, clamped to [-12, +12] by the client DSP.
+    pub gain_db: f32,
+    /// Q-factor (bandwidth control), typically 0.5 – 2.0.
+    pub q: f32,
+}
 
 /// Dynamic playback settings pushed by the server to a specific client.
 ///
@@ -20,11 +31,14 @@ pub struct ServerSettings {
     pub volume:    u8,
     /// Whether the client should mute its output.
     pub muted:     bool,
+    /// Optional per-client EQ bands (empty = flat, no DSP).
+    #[serde(default)]
+    pub eq_bands:  Vec<EqBand>,
 }
 
 impl Default for ServerSettings {
     fn default() -> Self {
-        Self { buffer_ms: 1000, latency: 0, volume: 100, muted: false }
+        Self { buffer_ms: 1000, latency: 0, volume: 100, muted: false, eq_bands: vec![] }
     }
 }
 

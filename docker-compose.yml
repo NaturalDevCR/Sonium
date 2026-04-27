@@ -1,0 +1,17 @@
+services:
+  sonium-server:
+    image: sonium/server:latest
+    build: .
+    ports:
+      - "1710:1710"   # TCP audio stream (clients connect here)
+      - "1711:1711"   # HTTP/WS control API + embedded web UI
+    volumes:
+      - sonium-config:/etc/sonium
+    restart: unless-stopped
+    # Optional: set log level
+    # environment:
+    #   - SONIUM_LOG=debug
+
+volumes:
+  sonium-config:
+    # Stores sonium.toml, users.json and sonium-state.json

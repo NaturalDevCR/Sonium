@@ -2,11 +2,15 @@ pub mod traits;
 pub mod pcm;
 pub mod opus;
 pub mod flac;
+pub mod vorbis;
+pub mod aac;
 
 pub use traits::{Decoder, Encoder};
 pub use pcm::{PcmDecoder, PcmEncoder};
 pub use opus::{OpusDecoder, OpusEncoder};
 pub use flac::{FlacDecoder, FlacEncoder};
+pub use vorbis::VorbisDecoder;
+pub use aac::AacDecoder;
 
 use sonium_common::SoniumError;
 
@@ -19,6 +23,14 @@ pub fn make_decoder(codec: &str, header_data: &[u8]) -> Result<Box<dyn Decoder +
         }
         "flac" => {
             let dec = FlacDecoder::from_header(header_data)?;
+            Ok(Box::new(dec))
+        }
+        "vorbis" => {
+            let dec = VorbisDecoder::from_header(header_data)?;
+            Ok(Box::new(dec))
+        }
+        "aac" => {
+            let dec = AacDecoder::from_header(header_data)?;
             Ok(Box::new(dec))
         }
         other  => Err(SoniumError::UnsupportedCodec(other.into())),

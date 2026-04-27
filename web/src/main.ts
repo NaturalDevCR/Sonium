@@ -1,12 +1,15 @@
-import { createApp } from 'vue';
+import { createApp }  from 'vue';
 import { createPinia } from 'pinia';
-import App from './App.vue';
-import { useServerStore } from './stores/server';
+import piniaPersistedstate from 'pinia-plugin-persistedstate';
+import { router }      from './router';
+import App             from './App.vue';
 
-const app = createApp(App);
-app.use(createPinia());
-app.mount('#app');
+import './assets/main.css';
 
-const store = useServerStore();
-store.loadAll();
-store.startLiveUpdates();
+const pinia = createPinia();
+pinia.use(piniaPersistedstate);
+
+createApp(App)
+  .use(pinia)
+  .use(router)
+  .mount('#app');

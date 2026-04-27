@@ -7,7 +7,7 @@
 //! - `_sonium._tcp`      — Sonium audio stream port
 //! - `_sonium-http._tcp` — web UI / REST API port
 //! - `_snapcast._tcp`    — only when `snapcast_compat = true` in config
-//!                         (allows legacy Snapcast clients to discover this server)
+//!   (allows legacy Snapcast clients to discover this server)
 //!
 //! Clients that call [`browse_servers`] will receive these advertisements
 //! and can auto-connect without manual IP configuration.
@@ -119,22 +119,16 @@ pub async fn browse_servers(
         let tx2 = tx.clone();
         let svc = svc.to_string();
         tokio::spawn(async move {
-            loop {
-                match rx.recv_async().await {
-                    Ok(event) => {
-                        if let mdns_sd::ServiceEvent::ServiceResolved(info) = event {
-                            for addr in info.get_addresses() {
-                                let ip = IpAddr::from(*addr);
-                                let _ = tx2.send(DiscoveredServer {
-                                    hostname: info.get_hostname().to_string(),
-                                    addr:     ip,
-                                    port:     info.get_port(),
-                                    service:  svc.clone(),
-                                }).await;
-                            }
-                        }
+            while let Ok(event) = rx.recv_async().await {
+                if let mdns_sd::ServiceEvent::ServiceResolved(info) = event {
+                    for addr in info.get_addresses() {
+                        let _ = tx2.send(DiscoveredServer {
+                            hostname: info.get_hostname().to_string(),
+                            addr:     *addr,
+                            port:     info.get_port(),
+                            service:  svc.clone(),
+                        }).await;
                     }
-                    Err(_) => break,
                 }
             }
         });
@@ -225,7 +219,7 @@ fn parse_cidr_hosts(cidr: &str) -> Option<Vec<Ipv4Addr>> {
     if host_count > 65536 { return None; }
 
     let hosts = (network + 1..broadcast)
-        .map(|n| Ipv4Addr::from(n))
+        .map(Ipv4Addr::from)
         .collect();
     Some(hosts)
 }

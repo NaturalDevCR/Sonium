@@ -39,6 +39,9 @@ chrono      = { version = "0.4", features = ["serde"] }
 clap        = { version = "4", features = ["derive", "env"] }
 rust-embed  = { version = "8", features = ["compression"] }
 mime_guess  = "2"
-cpal        = "0.15"
-argon2      = "0.5"
+cpal         = "0.15"
+argon2       = "0.5"
 jsonwebtoken = "9"
+lewton       = "0.10"
+symphonia-core      = { version = "0.5", default-features = false }
+symphonia-codec-aac = { version = "0.5", default-features = false }

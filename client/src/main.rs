@@ -1,6 +1,7 @@
 mod controller;
 mod player;
 mod decoder;
+mod eq;
 
 use std::io::Write;
 use std::time::Duration;

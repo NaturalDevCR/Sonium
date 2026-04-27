@@ -10,6 +10,28 @@ network — **no cloud, no configuration file required, no subscription**.
 
 ## Quick start
 
+For local development, use the one-command runner:
+
+```bash
+./dev.sh
+```
+
+This builds the embedded web UI and starts `sonium-server` with
+`run/sonium.toml`. Open the web UI at <http://127.0.0.1:1711>.
+
+To also start a local client:
+
+```bash
+./dev.sh --with-client
+```
+
+If your default audio device does not accept Sonium's 48 kHz stereo output,
+select one explicitly:
+
+```bash
+./dev.sh --with-client --client-device "BlackHole"
+```
+
 ```bash
 # Build
 cargo build --release

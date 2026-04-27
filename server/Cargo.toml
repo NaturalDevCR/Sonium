@@ -29,4 +29,6 @@ hostname        = "0.4"
 clap            = { workspace = true }
 rust-embed      = { workspace = true }
 mime_guess      = { workspace = true }
-tokio-util = "0.7.18"
+tokio-util   = "0.7.18"
+prometheus   = { version = "0.13", default-features = false }
+lazy_static  = "1.5"

@@ -34,10 +34,16 @@ snapcast_compat = false
 # Unique stream identifier (used in group assignments).
 id = "default"
 
+# Optional friendly name shown in the web UI.
+display_name = "Main room"
+
 # Input source:
 #   "-"              — stdin (raw PCM)
 #   "/path/to/fifo"  — named FIFO or file (raw PCM)
 #   "pipe:///usr/bin/ffmpeg?-i&song.mp3&-f&s16le&-"  — external process
+#   "tcp://127.0.0.1:4953"                           — connect to TCP PCM source
+#   "tcp-listen://0.0.0.0:4953"                      — listen for TCP PCM senders
+#   "tcp://0.0.0.0:4953?mode=server"                 — Snapcast-style listener
 source = "-"
 
 # Audio codec.

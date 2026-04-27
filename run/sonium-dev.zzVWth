@@ -1,0 +1,26 @@
+[server]
+stream_port  = 1710
+control_port = 1711
+bind         = "127.0.0.1"
+mdns         = false        # desactivado en Mac para evitar permisos extra
+
+[log]
+level = "info"
+
+# ── Streams ────────────────────────────────────────────────────────────────
+# Sin streams por ahora — agrega uno aquí cuando tengas ffmpeg o una fuente.
+# Ejemplo con ffmpeg (tono de prueba 440 Hz):
+#
+# [[streams]]
+# id        = "test"
+# source    = "pipe:///usr/local/bin/ffmpeg?-f&lavfi&-i&sine=frequency=440:sample_rate=48000&-f&s16le&-ar&48000&-ac&2&-"
+# codec     = "opus"
+# buffer_ms = 1000
+
+# Added by ./dev.sh because the selected config has no active streams.
+[[streams]]
+id           = "default"
+display_name = "Dev test tone"
+source       = "tcp-listen://127.0.0.1:4953"
+codec        = "opus"
+buffer_ms    = 1000

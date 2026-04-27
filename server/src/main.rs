@@ -3,6 +3,7 @@ mod broadcaster;
 mod streamreader;
 mod encoder;
 mod control_server;
+mod metrics;
 
 use anyhow::Context;
 use clap::Parser;
@@ -11,8 +12,10 @@ use tokio::net::TcpListener;
 use tokio_util::sync::CancellationToken;
 use tracing::{info, warn};
 
+use tokio::time::Duration;
+
 use sonium_common::config::ServerConfig;
-use sonium_control::{ServerState, EventBus};
+use sonium_control::{ServerState, EventBus, UserStore, PersistenceStore, ws::Event};
 
 use broadcaster::{new_registry, register};
 
@@ -77,9 +80,24 @@ async fn main() -> anyhow::Result<()> {
     // ── Shutdown coordination ─────────────────────────────────────────────
     let shutdown = CancellationToken::new();
 
+    // Config directory — used for users.json and sonium-state.json.
+    let config_dir = cli.config.parent()
+        .map(|p| p.to_path_buf())
+        .unwrap_or_else(|| std::path::PathBuf::from("."));
+
+    // Auth: load users from config directory.
+    let auth = UserStore::load_or_init(&config_dir);
+
+    // State persistence: load from sonium-state.json.
+    let persistence  = Arc::new(PersistenceStore::new(&config_dir));
+    let (saved_groups, saved_clients) = persistence.load();
+
     let events   = Arc::new(EventBus::new());
-    let state    = Arc::new(ServerState::new(events));
+    let state    = Arc::new(ServerState::new(events, Some(persistence), saved_clients));
     let registry = new_registry();
+
+    // Restore persisted groups before any clients connect.
+    state.restore_groups(saved_groups);
 
     // ── One stream reader per configured source ───────────────────────────
     for stream_cfg in &cfg.streams {
@@ -92,26 +110,53 @@ async fn main() -> anyhow::Result<()> {
         // Register the stream in ServerState (so the REST API exposes it).
         state.register_stream(
             &stream_cfg.id,
+            stream_cfg.display_name.clone(),
             &stream_cfg.codec,
-            &format!("{}", stream_cfg.sample_format),
+            format!("{}", stream_cfg.sample_format),
         );
 
-        let bc2       = bc.clone();
-        let stream_c  = stream_cfg.clone();
-        let state2    = state.clone();
-        let cancel    = shutdown.clone();
+        let bc2      = bc.clone();
+        let stream_c = stream_cfg.clone();
+        let state2   = state.clone();
+        let state3   = state.clone();
+        let reg2     = registry.clone();
+        let cancel   = shutdown.clone();
         tokio::spawn(async move {
+            metrics::STREAM_STATUS.with_label_values(&[&stream_c.id]).set(1);
             state2.set_stream_status(&stream_c.id, sonium_control::state::StreamStatus::Playing);
             tokio::select! {
-                result = streamreader::run(bc2, stream_c.clone()) => {
+                result = streamreader::run(bc2, stream_c.clone(), state2, reg2) => {
                     if let Err(e) = result {
                         warn!("[{}] Stream reader exited: {e}", stream_c.id);
+                        metrics::STREAM_STATUS.with_label_values(&[&stream_c.id]).set(-1);
+                    } else {
+                        metrics::STREAM_STATUS.with_label_values(&[&stream_c.id]).set(0);
                     }
-                    state2.set_stream_status(&stream_c.id, sonium_control::state::StreamStatus::Idle);
+                    state3.set_stream_status(&stream_c.id, sonium_control::state::StreamStatus::Idle);
                 }
                 _ = cancel.cancelled() => {
                     info!("[{}] Stream reader shutting down", stream_c.id);
-                    state2.set_stream_status(&stream_c.id, sonium_control::state::StreamStatus::Idle);
+                    metrics::STREAM_STATUS.with_label_values(&[&stream_c.id]).set(0);
+                    state3.set_stream_status(&stream_c.id, sonium_control::state::StreamStatus::Idle);
+                }
+            }
+        });
+    }
+
+    // ── Heartbeat task (pushes uptime to connected web UIs every 5 s) ─────
+    {
+        let state  = state.clone();
+        let cancel = shutdown.clone();
+        tokio::spawn(async move {
+            let mut interval = tokio::time::interval(Duration::from_secs(5));
+            loop {
+                tokio::select! {
+                    _ = interval.tick() => {
+                        let uptime = state.uptime_secs();
+                        state.events().emit(Event::Heartbeat { uptime_s: uptime });
+                        metrics::UPTIME_SECONDS.set(uptime);
+                    }
+                    _ = cancel.cancelled() => break,
                 }
             }
         });
@@ -119,12 +164,14 @@ async fn main() -> anyhow::Result<()> {
 
     // ── HTTP control server (REST API + embedded web UI) ──────────────────
     {
-        let state  = state.clone();
-        let port   = cfg.server.control_port;
-        let cancel = shutdown.clone();
+        let state       = state.clone();
+        let auth        = auth.clone();
+        let config_path = cli.config.clone();
+        let port        = cfg.server.control_port;
+        let cancel      = shutdown.clone();
         tokio::spawn(async move {
             tokio::select! {
-                result = control_server::run(state, port) => {
+                result = control_server::run(state, auth, config_path, port) => {
                     if let Err(e) = result {
                         warn!("Control server error: {e}");
                     }

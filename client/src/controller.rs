@@ -6,13 +6,14 @@ use tracing::{debug, info, warn};
 use sonium_common::config::ClientConfig;
 use sonium_protocol::{
     MessageHeader, MessageType,
-    messages::{Message, Hello, TimeMsg},
+    messages::{EqBand, Message, Hello, TimeMsg},
     header::HEADER_SIZE,
 };
 use sonium_sync::{TimeProvider, SyncBuffer, PcmChunk};
 use sonium_sync::time_provider::now_us;
 
 use crate::decoder::ActiveDecoder;
+use crate::eq::build_eq;
 use crate::player::Player;
 
 /// Main client loop — connects, syncs clock, decodes and plays audio.
@@ -57,6 +58,9 @@ async fn connect_and_run(addr: &str, cfg: &ClientConfig) -> anyhow::Result<()> {
     let mut decoder: Option<ActiveDecoder> = None;
     let mut player:  Option<Player>        = None;
     let mut sync_buf: Option<SyncBuffer>   = None;
+    let mut volume: u8  = 100;
+    let mut muted       = false;
+    let mut eq_bands: Vec<EqBand> = vec![];
 
     let mut hdr_buf = [0u8; HEADER_SIZE];
     let mut pending_time: Option<(u16, i64)> = None; // (msg_id, sent_us)
@@ -89,6 +93,9 @@ async fn connect_and_run(addr: &str, cfg: &ClientConfig) -> anyhow::Result<()> {
 
                     MessageType::ServerSettings => {
                         let ss = sonium_protocol::messages::ServerSettings::decode(&payload)?;
+                        volume   = ss.volume.min(100);
+                        muted    = ss.muted;
+                        eq_bands = ss.eq_bands;
                         debug!(volume = ss.volume, muted = ss.muted, buffer_ms = ss.buffer_ms, "ServerSettings");
                     }
 
@@ -99,6 +106,10 @@ async fn connect_and_run(addr: &str, cfg: &ClientConfig) -> anyhow::Result<()> {
                         {
                             let mut samples = Vec::new();
                             dec.decode(&chunk.data, &mut samples)?;
+                            apply_volume(&mut samples, volume, muted);
+                            if let Some(ref mut eq) = build_eq(&eq_bands, dec.sample_format().rate, dec.sample_format().channels as usize) {
+                                eq.apply(&mut samples);
+                            }
                             let playout_us = chunk.timestamp.to_micros()
                                 + time_provider.to_local_time(0)
                                 + cfg.latency_ms as i64 * 1000;
@@ -144,5 +155,22 @@ async fn connect_and_run(addr: &str, cfg: &ClientConfig) -> anyhow::Result<()> {
                 pending_time = Some((sync_seq, sent_us));
             }
         }
+    }
+}
+
+fn apply_volume(samples: &mut [i16], volume: u8, muted: bool) {
+    if muted {
+        samples.fill(0);
+        return;
+    }
+
+    if volume >= 100 {
+        return;
+    }
+
+    let gain = volume as f32 / 100.0;
+    for sample in samples {
+        *sample = (*sample as f32 * gain)
+            .clamp(i16::MIN as f32, i16::MAX as f32) as i16;
     }
 }

@@ -70,6 +70,50 @@ Sonium is developed in phases, each delivering independent value.
 - Client auto-discover (`--discover` + interactive menu)
 - Subnet scanner for cross-VLAN networks
 
+### Fase 11 — Authentication & authorization ✅
+
+- Server-side user accounts with Argon2 password hashing (`crates/control/src/auth.rs`)
+- JWT bearer tokens (24 h TTL) signed with per-instance secret persisted in `users.json`
+- Role-based access control: **admin** · **operator** · **viewer**
+- `POST /api/auth/setup` — first-run admin creation (blocked once any user exists)
+- `POST /api/auth/login` → JWT token response
+- `GET /api/auth/me` — current user info
+- `GET/POST/PUT/DELETE /api/users` — full user management (admin only)
+- Axum middleware: `require_viewer` (read routes) + `require_operator` (write routes)
+- Auto-generated default admin account on first boot (password printed to log once)
+
+### Fase 12 — Admin UI ✅
+
+Full-featured admin panel served at `/admin` (Vue 3 + Pinia, embedded via `rust-embed`):
+
+| Tab | What's implemented |
+|---|---|
+| **Dashboard** | Live stats (online clients, groups, playing streams, uptime via WS heartbeat) |
+| **Streams** | Add streams with 18 source-type templates; URI builder; meta-stream chain editor |
+| **Groups** | Create/delete groups, move clients, assign streams, per-client volume |
+| **Clients** | Per-client status, latency offset editor, group selector, subnet scanner |
+| **Config** | Raw TOML editor with validation + save via `PUT /api/config/raw` |
+| **Users** | Create/edit/delete users, role assignment |
+| **System** | OS/audio stack info, dependency checker (ffmpeg, shairport-sync, librespot, mpd), package install/update/remove, server log tail |
+
+### Fase 13 — Control PWA ✅ (core)
+
+Mobile-first progressive web app served at `/` (Vue 3 + Pinia):
+
+- Per-group cards: stream badge, stream selector, per-client volume sliders + mute
+- Group master volume (when 2+ clients)
+- Live drag-free client assignment via inline selects
+- Create-group FAB with modal
+- Role-aware UI (operator controls vs viewer read-only)
+- Real-time updates via WebSocket (`/api/events`)
+- Dark theme, responsive layout, safe-area insets for mobile
+
+### Fase 14 — Config API ✅
+
+- `GET /api/config/raw` → current `sonium.toml` as plain text
+- `PUT /api/config/raw` → validates TOML + `ServerConfig` shape before writing; returns 422 on error
+- Config tab in Admin UI provides the editor; changes require server restart for stream/port changes
+
 ---
 
 ## In progress / hardware-blocked
@@ -88,55 +132,11 @@ Sonium is developed in phases, each delivering independent value.
 
 ## Planned
 
-### Fase 11 — Authentication & authorization
+### Fase 15 — State persistence
 
-- Server-side user accounts (username + password, argon2 hashing)
-- JWT bearer tokens with configurable TTL
-- Role-based access control:
-  - **admin** — full access: users, server config, all management
-  - **operator** — manage groups/streams/clients/volumes; no user or config access
-  - **viewer** — read-only
-- `POST /api/auth/setup` — first-run admin account creation
-- `POST /api/auth/login` → JWT token
-- `GET/POST/PUT/DELETE /api/users` — user management (admin only)
-- Auth middleware in axum (Bearer token verification on protected routes)
-
-### Fase 12 — Admin UI
-
-Full-featured admin panel (Vue 3 + Tailwind CSS, served at `/admin`):
-
-| Tab | Description |
-|---|---|
-| **Dashboard** | Server status, uptime, active clients + streams, live metrics |
-| **Streams** | Create/edit/delete audio sources with guided forms (stdin, FIFO, ffmpeg, HTTP, AirPlay, Spotify) |
-| **Groups & Clients** | Full management — create groups, move clients, assign streams, volume |
-| **Config** | Standard form editor + Expert raw-TOML editor with syntax highlighting; hot-reload |
-| **Users** | Create/delete users, assign roles, change passwords |
-
-### Fase 13 — Control PWA
-
-Mobile-first progressive web app (served at `/`):
-
-- Vue 3 + Tailwind CSS; installs as an app on iOS / Android / desktop
-- Per-group view: stream selector, group mute, per-client volume sliders
-- Per-source volume memory (restore saved volume when switching streams)
-- Linked volume mode: move all clients in a group together by delta
-- Role-aware UI: operator sees controls, viewer sees read-only display
-- Offline page when server unreachable (service worker)
-- Dark + light theme, respects system preference
-
-### Fase 14 — Config hot-reload & rich audio sources
-
-- `GET /api/config/raw` → current `sonium.toml` as text
-- `PUT /api/config/raw` → write new TOML; validate before saving; live-reload non-structural changes
-- Source type wizards in the Admin UI:
-  - `stdin` / named FIFO — raw PCM
-  - `pipe://` — arbitrary ffmpeg or external process inline
-  - HTTP stream — pull from URL (Icecast, HLS)
-  - AirPlay — spawn `shairport-sync` as child process
-  - Spotify — spawn `librespot` as child process
-  - MPD — read from MPD's FIFO output
-- Source health indicator in Admin UI (restart stream, view last 50 log lines)
+- Persist groups, client volume/mute/latency/group assignments to `sonium-state.json`
+- Restored automatically on server restart
+- Reconnecting clients recover their previous settings without operator intervention
 
 ### Fase 9 — Cross-platform
 

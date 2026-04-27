@@ -1,5 +1,5 @@
-/// Low-level helpers for reading/writing little-endian values from byte slices.
-/// Used by all message (de)serializers.
+//! Low-level helpers for reading/writing little-endian values from byte slices.
+//! Used by all message (de)serializers.
 
 use sonium_common::SoniumError;
 
@@ -106,6 +106,10 @@ impl WireWrite {
 
     pub fn len(&self) -> usize {
         self.buf.len()
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.buf.is_empty()
     }
 }
 

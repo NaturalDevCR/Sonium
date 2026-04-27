@@ -4,12 +4,13 @@ import { api, subscribeEvents, type Client, type Group, type Stream, type Event 
 
 export const useServerStore = defineStore('server', () => {
   // ── State ──────────────────────────────────────────────────────────────
-  const clients  = ref<Client[]>([]);
-  const groups   = ref<Group[]>([]);
-  const streams  = ref<Stream[]>([]);
-  const uptime   = ref(0);
-  const loading  = ref(true);
-  const error    = ref<string | null>(null);
+  const clients      = ref<Client[]>([]);
+  const groups       = ref<Group[]>([]);
+  const streams      = ref<Stream[]>([]);
+  const uptime       = ref(0);
+  const loading      = ref(true);
+  const error        = ref<string | null>(null);
+  const streamLevels = ref<Record<string, number>>({});
 
   // ── Getters ────────────────────────────────────────────────────────────
   const connectedClients = computed(() => clients.value.filter((c) => c.status === 'connected'));
@@ -53,6 +54,20 @@ export const useServerStore = defineStore('server', () => {
         );
         break;
 
+      case 'client_deleted':
+        clients.value = clients.value.filter((c) => c.id !== event.client_id);
+        groups.value  = groups.value.map((g) => ({
+          ...g,
+          client_ids: g.client_ids.filter((id) => id !== event.client_id),
+        }));
+        break;
+
+      case 'client_renamed':
+        clients.value = clients.value.map((c) =>
+          c.id === event.client_id ? { ...c, display_name: event.display_name || null } : c,
+        );
+        break;
+
       case 'volume_changed':
         clients.value = clients.value.map((c) =>
           c.id === event.client_id ? { ...c, volume: event.volume, muted: event.muted } : c,
@@ -85,6 +100,12 @@ export const useServerStore = defineStore('server', () => {
         groups.value = groups.value.filter((g) => g.id !== event.group_id);
         break;
 
+      case 'group_renamed':
+        groups.value = groups.value.map((g) =>
+          g.id === event.group_id ? { ...g, name: event.name } : g,
+        );
+        break;
+
       case 'group_stream_changed':
         groups.value = groups.value.map((g) =>
           g.id === event.group_id ? { ...g, stream_id: event.stream_id } : g,
@@ -99,6 +120,16 @@ export const useServerStore = defineStore('server', () => {
 
       case 'heartbeat':
         uptime.value = event.uptime_s;
+        break;
+
+      case 'stream_level':
+        streamLevels.value = { ...streamLevels.value, [event.stream_id]: event.rms_db };
+        break;
+
+      case 'eq_changed':
+        clients.value = clients.value.map((c) =>
+          c.id === event.client_id ? { ...c, eq_bands: event.eq_bands } : c,
+        );
         break;
     }
   }
@@ -118,7 +149,7 @@ export const useServerStore = defineStore('server', () => {
   }
 
   return {
-    clients, groups, streams, uptime, loading, error,
+    clients, groups, streams, uptime, loading, error, streamLevels,
     connectedClients, clientsById, streamsById,
     loadAll, applyEvent, startLiveUpdates, stopLiveUpdates,
   };

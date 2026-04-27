@@ -46,16 +46,27 @@ pub struct ServerNet {
 pub struct StreamSource {
     /// Unique stream identifier.  Must match a group's `stream_id`.
     pub id: String,
+    /// Optional friendly name shown in the web UI.
+    pub display_name: Option<String>,
     /// Input source.  Supported formats:
     /// - `"-"` — stdin (raw PCM)
     /// - `/path/to/file.pcm` or `/tmp/fifo` — file or named FIFO (raw PCM)
     /// - `pipe:///usr/bin/ffmpeg?-i&song.mp3&-f&s16le&-` — external process
     ///   (command path after `pipe://`, arguments separated by `&`)
+    /// - `tcp://host:port` — connect to a TCP sender that outputs raw PCM
+    /// - `tcp-listen://0.0.0.0:4953` — listen for TCP senders
+    /// - `tcp://0.0.0.0:4953?mode=server` — Snapcast-style TCP listener
     pub source: String,
     pub codec:  String,
     pub sample_format: SampleFormat,
     /// Milliseconds of jitter buffer suggested to connected clients.
     pub buffer_ms: u32,
+    /// After this many milliseconds of no input data, mark stream as Idle.
+    /// `None` disables idle detection (stream stays in whatever state main.rs set).
+    pub idle_timeout_ms: Option<u32>,
+    /// When `idle_timeout_ms` fires, emit silence frames so connected clients
+    /// don't buffer-underrun while waiting for audio to return.
+    pub silence_on_idle: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -90,10 +101,13 @@ impl Default for StreamSource {
     fn default() -> Self {
         Self {
             id:            "default".into(),
-            source:        "-".into(),
-            codec:         "opus".into(),
-            sample_format: SampleFormat::default(),
-            buffer_ms:     1000,
+            display_name:  None,
+            source:          "-".into(),
+            codec:           "opus".into(),
+            sample_format:   SampleFormat::default(),
+            buffer_ms:       1000,
+            idle_timeout_ms: None,
+            silence_on_idle: false,
         }
     }
 }

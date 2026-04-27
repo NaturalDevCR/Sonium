@@ -7,7 +7,7 @@ pub mod time;
 pub mod error;
 
 pub use hello::Hello;
-pub use server_settings::ServerSettings;
+pub use server_settings::{EqBand, ServerSettings};
 pub use client_info::ClientInfo;
 pub use codec_header::CodecHeader;
 pub use wire_chunk::WireChunk;

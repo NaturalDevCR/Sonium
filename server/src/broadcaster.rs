@@ -4,6 +4,8 @@ use tokio::sync::broadcast;
 use bytes::Bytes;
 use parking_lot::{Mutex, RwLock};
 
+use crate::metrics;
+
 /// Encoded audio frame ready to send on the wire.
 #[derive(Clone, Debug)]
 pub struct AudioFrame {
@@ -34,6 +36,7 @@ impl Broadcaster {
     }
 
     pub fn publish(&self, wire_bytes: Bytes) {
+        metrics::ENCODED_CHUNKS.with_label_values(&[&self.stream_id]).inc();
         let _ = self.sender.send(AudioFrame { wire_bytes });
     }
 

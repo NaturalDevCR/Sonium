@@ -19,7 +19,6 @@ use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpStream;
 use tokio::sync::broadcast;
 use tracing::{debug, info, instrument, warn};
-use bytes::Bytes;
 
 use sonium_common::config::ServerConfig;
 use sonium_control::{ServerState, ws::Event};
@@ -30,6 +29,7 @@ use sonium_protocol::{
 };
 
 use crate::broadcaster::{AudioFrame, BroadcasterRegistry, lookup};
+use crate::metrics;
 
 static MSG_SEQ: AtomicU16 = AtomicU16::new(1);
 
@@ -55,11 +55,14 @@ pub async fn handle(
             return Err(anyhow::anyhow!("expected Hello, got {:?}", hello_msg.message_type()));
         };
 
-    tracing::Span::current().record("client_id", &client_id.as_str());
+    tracing::Span::current().record("client_id", client_id.as_str());
+    metrics::TOTAL_CONNECTIONS.inc();
+    metrics::CONNECTED_CLIENTS.inc();
     state.client_connected(&client_id, &hostname, &client_name, &os, &arch, peer, proto_ver);
 
     let result = session_loop(&mut stream, peer, registry, cfg, state.clone(), &client_id).await;
     state.client_disconnected(&client_id);
+    metrics::CONNECTED_CLIENTS.dec();
     result
 }
 
@@ -91,8 +94,13 @@ async fn session_loop(
         }
     }
 
+    let (init_vol, init_muted) = state.get_volume(client_id).unwrap_or((100, false));
+    let init_client   = state.get_client(client_id);
+    let init_latency  = init_client.as_ref().map(|c| c.latency_ms).unwrap_or(0);
+    let init_eq_bands = init_client.map(|c| c.eq_bands).unwrap_or_default();
+
     // Send initial ServerSettings.
-    send_server_settings(stream, buffer_ms).await?;
+    send_server_settings(stream, buffer_ms, init_vol, init_muted, init_latency, init_eq_bands).await?;
 
     info!(%peer, stream = %stream_id, "Session ready");
 
@@ -100,10 +108,6 @@ async fn session_loop(
         bc.as_ref().map(|b| b.subscribe());
     let mut events_rx = state.events().subscribe();
 
-    // ── Server-side volume mixing ─────────────────────────────────────────
-    let (init_vol, init_muted) = state.get_volume(client_id).unwrap_or((100, false));
-    let mut client_volume: u8   = init_vol;
-    let mut client_muted:  bool = init_muted;
     let mut hdr_buf = [0u8; HEADER_SIZE];
 
     loop {
@@ -125,8 +129,7 @@ async fn session_loop(
             frame = recv_audio(&mut audio_rx) => {
                 match frame {
                     Ok(f) => {
-                        let wire = apply_volume(&f.wire_bytes, client_volume, client_muted);
-                        if stream.write_all(&wire).await.is_err() { break; }
+                        if stream.write_all(&f.wire_bytes).await.is_err() { break; }
                     }
                     Err(broadcast::error::RecvError::Lagged(n)) => {
                         warn!(%peer, dropped = n, "Client lagged");
@@ -167,9 +170,30 @@ async fn session_loop(
                     Ok(Event::VolumeChanged { client_id: cid, volume, muted })
                         if cid == client_id =>
                     {
-                        client_volume = volume;
-                        client_muted  = muted;
-                        debug!(%peer, volume, muted, "Volume updated (server-side mix)");
+                        let c = state.get_client(client_id);
+                        let lat = c.as_ref().map(|c| c.latency_ms).unwrap_or(0);
+                        let eq  = c.map(|c| c.eq_bands).unwrap_or_default();
+                        send_server_settings(stream, buffer_ms, volume, muted, lat, eq).await?;
+                        debug!(%peer, volume, muted, "Volume settings pushed to client");
+                    }
+
+                    Ok(Event::LatencyChanged { client_id: cid, latency_ms })
+                        if cid == client_id =>
+                    {
+                        let c = state.get_client(client_id);
+                        let (vol, muted) = state.get_volume(client_id).unwrap_or((100, false));
+                        let eq = c.map(|c| c.eq_bands).unwrap_or_default();
+                        send_server_settings(stream, buffer_ms, vol, muted, latency_ms, eq).await?;
+                        debug!(%peer, latency_ms, "Latency settings pushed to client");
+                    }
+
+                    Ok(Event::EqChanged { client_id: cid, eq_bands })
+                        if cid == client_id =>
+                    {
+                        let (vol, muted) = state.get_volume(client_id).unwrap_or((100, false));
+                        let lat = state.get_client(client_id).map(|c| c.latency_ms).unwrap_or(0);
+                        send_server_settings(stream, buffer_ms, vol, muted, lat, eq_bands).await?;
+                        debug!(%peer, "EQ settings pushed to client");
                     }
 
                     Err(broadcast::error::RecvError::Lagged(n)) => {
@@ -223,12 +247,20 @@ async fn recv_audio(
     }
 }
 
-async fn send_server_settings(stream: &mut TcpStream, buffer_ms: u32) -> anyhow::Result<()> {
+async fn send_server_settings(
+    stream:     &mut TcpStream,
+    buffer_ms:  u32,
+    volume:     u8,
+    muted:      bool,
+    latency_ms: i32,
+    eq_bands:   Vec<sonium_protocol::messages::EqBand>,
+) -> anyhow::Result<()> {
     let settings = ServerSettings {
         buffer_ms: buffer_ms as i32,
-        latency:   0,
-        volume:    100,
-        muted:     false,
+        latency:   latency_ms,
+        volume,
+        muted,
+        eq_bands,
     };
     let mut hdr = MessageHeader::new(MessageType::ServerSettings, 0);
     hdr.id = next_id();
@@ -275,54 +307,4 @@ async fn read_message(stream: &mut TcpStream) -> anyhow::Result<Message> {
     let mut payload = vec![0u8; hdr.payload_size as usize];
     stream.read_exact(&mut payload).await?;
     Ok(Message::from_payload(&hdr, &payload)?)
-}
-
-// ── Server-side volume mixing ────────────────────────────────────────────────
-
-/// Audio data offset inside a full wire message (26-byte header + 12-byte
-/// WireChunk header = 38).
-const AUDIO_DATA_OFFSET: usize = HEADER_SIZE + 12; // 26 + 4 + 4 + 4
-
-/// Apply volume/mute to a raw wire message, returning the (possibly modified)
-/// bytes ready to write.
-///
-/// **Hot path optimisation:** volume = 100, not muted → returns the original
-/// `Bytes` with zero copies.  Mute and volume scaling only allocate when
-/// actually needed.
-///
-/// The function operates on interleaved i16 LE PCM samples inside the
-/// WireChunk data section.  For compressed codecs (Opus, FLAC) the volume
-/// scaling is approximate (it scales the raw bytes as if they were PCM), but
-/// mute always works correctly since it zeros the entire payload.
-fn apply_volume(wire: &Bytes, volume: u8, muted: bool) -> Bytes {
-    // Fast path: full volume, not muted — zero-copy.
-    if !muted && volume >= 100 {
-        return wire.clone();
-    }
-
-    let mut buf = wire.to_vec();
-
-    if buf.len() <= AUDIO_DATA_OFFSET {
-        // Message too short to contain audio data — pass through unchanged.
-        return wire.clone();
-    }
-
-    let audio = &mut buf[AUDIO_DATA_OFFSET..];
-
-    if muted {
-        // Zero entire audio payload → silence.
-        audio.iter_mut().for_each(|b| *b = 0);
-    } else {
-        // Scale each i16 LE sample by volume / 100.
-        let gain = volume as f32 / 100.0;
-        for chunk in audio.chunks_exact_mut(2) {
-            let sample = i16::from_le_bytes([chunk[0], chunk[1]]);
-            let scaled = (sample as f32 * gain) as i16;
-            let bytes  = scaled.to_le_bytes();
-            chunk[0] = bytes[0];
-            chunk[1] = bytes[1];
-        }
-    }
-
-    Bytes::from(buf)
 }
