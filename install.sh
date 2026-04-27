@@ -246,7 +246,9 @@ if [[ "${INSTALL_SERVER}" == "true" ]]; then
     ok "Created system user ${SONIUM_USER}"
   fi
 
-  install -d -m 0755 -o "${SONIUM_USER}" "${CONF_DIR}"
+  mkdir -p "${CONF_DIR}"
+  chown "${SONIUM_USER}" "${CONF_DIR}"
+  chmod 0755 "${CONF_DIR}"
 
   # Pre-initialize admin account if users.json doesn't exist
   if [[ ! -f "${CONF_DIR}/users.json" ]]; then
