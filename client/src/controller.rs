@@ -120,7 +120,6 @@ async fn connect_and_run(addr: &str, cfg: &ClientConfig) -> anyhow::Result<()> {
                                 eq.apply(&mut samples);
                             }
                             let playout_us = chunk.timestamp.to_micros()
-                                + time_provider.to_local_time(0)
                                 + cfg.latency_ms as i64 * 1000;
 
                             buf.push(PcmChunk::new(playout_us, samples, dec.sample_format()));
