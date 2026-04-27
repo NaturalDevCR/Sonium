@@ -159,11 +159,13 @@ pub async fn run() -> anyhow::Result<()> {
 
         // Create Config
         let config_path = install_dir.join(format!("client-{}.toml", instance_id));
-        let mut cfg = ClientConfig::default();
-        cfg.server_host = server_host.clone();
-        cfg.server_port = server_port;
-        cfg.device = Some(selected_device.clone());
-        cfg.instance = instance_id;
+        let cfg = ClientConfig {
+            server_host: server_host.clone(),
+            server_port,
+            device: Some(selected_device.clone()),
+            instance: instance_id,
+            ..Default::default()
+        };
 
         let toml_string = toml::to_string_pretty(&cfg)?;
         fs::write(&config_path, toml_string).context("Failed to write config file")?;
@@ -208,7 +210,7 @@ fn get_used_devices(install_dir: &Path) -> Vec<String> {
     if let Ok(entries) = fs::read_dir(install_dir) {
         for entry in entries.flatten() {
             let path = entry.path();
-            if path.extension().map_or(false, |ext| ext == "toml") {
+            if path.extension().is_some_and(|ext| ext == "toml") {
                 if let Ok(contents) = fs::read_to_string(&path) {
                     if let Ok(cfg) = toml::from_str::<ClientConfig>(&contents) {
                         if let Some(device) = cfg.device {

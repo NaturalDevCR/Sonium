@@ -10,7 +10,7 @@ fn main() {
     println!("Trying 44100 with default buffer...");
     let result = device.build_output_stream(
         &config,
-        |data: &mut [f32], _: &cpal::OutputCallbackInfo| {},
+        |_data: &mut [f32], _: &cpal::OutputCallbackInfo| {},
         |err| eprintln!("Error: {:?}", err),
         None,
     );
@@ -24,7 +24,7 @@ fn main() {
     println!("Trying 48000 with default buffer...");
     let result = device.build_output_stream(
         &config,
-        |data: &mut [f32], _: &cpal::OutputCallbackInfo| {},
+        |_data: &mut [f32], _: &cpal::OutputCallbackInfo| {},
         |err| eprintln!("Error: {:?}", err),
         None,
     );
