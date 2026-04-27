@@ -18,7 +18,7 @@ use sonium_control::{api, EventBus, ServerState, UserStore};
 fn test_auth() -> (Arc<UserStore>, String) {
     let dir = std::env::temp_dir().join(format!("sonium-api-test-{}", uuid::Uuid::new_v4()));
     std::fs::create_dir_all(&dir).unwrap();
-    let store = UserStore::load_or_init(&dir);
+    let store = UserStore::load_or_init(&dir, None);
     let _ = store.create_user("test-admin", "test-password", Role::Admin);
     let user = store.authenticate("test-admin", "test-password").unwrap();
     let token = store.create_token(&user, 1);
