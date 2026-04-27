@@ -133,7 +133,8 @@ impl UserStore {
         }
 
         if store.users.read().is_empty() {
-            let password = initial_password.unwrap_or_else(|| Alphanumeric.sample_string(&mut rand::thread_rng(), 16));
+            let password = initial_password
+                .unwrap_or_else(|| Alphanumeric.sample_string(&mut rand::thread_rng(), 16));
             store.create_user_internal("admin", &password, Role::Admin, true);
             let _ = store.persist();
             warn!("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━");
@@ -215,7 +216,13 @@ impl UserStore {
             .is_ok()
     }
 
-    fn create_user_internal(&self, username: &str, password: &str, role: Role, must_change: bool) -> User {
+    fn create_user_internal(
+        &self,
+        username: &str,
+        password: &str,
+        role: Role,
+        must_change: bool,
+    ) -> User {
         let hash = Self::hash_password(password).expect("argon2 hash failed");
         let user = User {
             id: Uuid::new_v4().to_string(),
