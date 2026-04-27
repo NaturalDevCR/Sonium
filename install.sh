@@ -153,7 +153,9 @@ do_uninstall() {
     read -p "  -> Uninstall system dependencies (ffmpeg, libasound2)? [y/N] " -n 1 -r < "$TTY_PATH"
     echo
     if [[ $REPLY =~ ^[Yy]$ ]]; then
-      info "To safely remove unused dependencies, run: apt-get autoremove"
+      info "Removing system dependencies..."
+      apt-get remove -y ffmpeg libasound2 >/dev/null 2>&1 || true
+      info "To safely remove unused shared libraries, run: apt-get autoremove"
     fi
   fi
 
@@ -183,11 +185,13 @@ if [[ "${INTERACTIVE}" == "true" ]]; then
   echo "  1) Full (Server + Client) [Default]"
   echo "  2) Server only"
   echo "  3) Client only"
-  read -p "Selection [1-3]: " -n 1 -r < "$TTY_PATH"
+  echo "  4) Uninstall"
+  read -p "Selection [1-4]: " -n 1 -r < "$TTY_PATH"
   echo
   case "$REPLY" in
     2) INSTALL_CLIENT=false ;;
     3) INSTALL_SERVER=false ;;
+    4) do_uninstall ;;
     *) ;;
   esac
 fi
