@@ -27,6 +27,8 @@ else
   TTY_PATH="/dev/null"
 fi
 
+SCRIPT_VERSION="v0.1.7"
+
 while [[ $# -gt 0 ]]; do
   case "$1" in
     --prefix) PREFIX="$2"; shift 2 ;;
@@ -38,7 +40,7 @@ while [[ $# -gt 0 ]]; do
     --uninstall) UNINSTALL=true; shift ;;
     -h|--help)
       cat <<EOF
-Sonium Linux installer
+Sonium Linux installer (${SCRIPT_VERSION})
 
 Usage:
   curl -fsSL https://github.com/${REPO}/releases/latest/download/install.sh | sudo bash
@@ -103,7 +105,7 @@ check_dependencies() {
 
 do_uninstall() {
   echo
-  echo "Sonium Uninstaller"
+  echo "Sonium Uninstaller (${SCRIPT_VERSION})"
   echo
   
   if [[ "${INTERACTIVE}" == "true" ]]; then
@@ -180,7 +182,7 @@ fi
 
 if [[ "${INTERACTIVE}" == "true" ]]; then
   echo
-  echo "Sonium Installer"
+  echo "Sonium Installer (${SCRIPT_VERSION})"
   echo "Select components to install:"
   echo "  1) Full (Server + Client) [Default]"
   echo "  2) Server only"
@@ -221,7 +223,7 @@ TMP_DIR="$(mktemp -d)"
 trap 'rm -rf "${TMP_DIR}"' EXIT
 
 echo
-echo "Sonium installer"
+echo "Sonium installer (${SCRIPT_VERSION})"
 echo
 info "Downloading ${PACKAGE_NAME}"
 curl -fsSL "${BASE_URL}/${PACKAGE_NAME}" -o "${TMP_DIR}/sonium.tar.gz" \
@@ -252,7 +254,9 @@ if [[ "${INSTALL_SERVER}" == "true" ]]; then
 
   # Pre-initialize admin account if users.json doesn't exist
   if [[ ! -f "${CONF_DIR}/users.json" ]]; then
+    set +o pipefail
     GEN_PASS=$(tr -dc 'A-Za-z0-9' < /dev/urandom | head -c 16)
+    set -o pipefail
     info "Initializing admin account..."
   else
     info "Existing user database found in ${CONF_DIR}/users.json; preserving it."
