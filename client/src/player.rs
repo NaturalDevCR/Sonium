@@ -194,6 +194,10 @@ fn try_open_stream(
 
     info!(device = %device.name().unwrap_or_default(), "Audio device selected");
 
+    let supported = device
+        .default_output_config()
+        .map_err(|e| format!("default_output_config: {e}"))?;
+
     let config = cpal::StreamConfig {
         channels: fmt.channels as cpal::ChannelCount,
         sample_rate: cpal::SampleRate(fmt.rate),
@@ -202,28 +206,59 @@ fn try_open_stream(
 
     // ~2 ms fade at the stream's sample rate (per channel).
     let fade_samples = (fmt.rate as usize * fmt.channels as usize * 2) / 1000;
+    let err_fn = |err| warn!("CPAL stream error: {err}");
 
-    // Shared fade state lives inside the closure.  No extra allocation needed
-    // because `build_output_stream` takes `FnMut`.
-    let mut fade = FadeState::new(fade_samples);
-
-    let stream = device
-        .build_output_stream(
-            &config,
-            move |data: &mut [i16], _: &cpal::OutputCallbackInfo| {
-                let mut ring = ring.lock().unwrap();
-                for sample in data.iter_mut() {
-                    if let Some(s) = ring.pop_front() {
-                        *sample = fade.feed(s);
-                    } else {
-                        *sample = fade.drain();
+    let stream = match supported.sample_format() {
+        cpal::SampleFormat::I16 => {
+            let mut fade = FadeState::new(fade_samples);
+            let ring = ring.clone();
+            device.build_output_stream(
+                &config,
+                move |data: &mut [i16], _: &cpal::OutputCallbackInfo| {
+                    let mut ring = ring.lock().unwrap();
+                    for sample in data.iter_mut() {
+                        *sample = ring.pop_front().map(|s| fade.feed(s)).unwrap_or_else(|| fade.drain());
                     }
-                }
-            },
-            |err| warn!("CPAL stream error: {err}"),
-            None,
-        )
-        .map_err(|e| format!("build_output_stream: {e}"))?;
+                },
+                err_fn,
+                None,
+            )
+        }
+        cpal::SampleFormat::U16 => {
+            let mut fade = FadeState::new(fade_samples);
+            let ring = ring.clone();
+            device.build_output_stream(
+                &config,
+                move |data: &mut [u16], _: &cpal::OutputCallbackInfo| {
+                    let mut ring = ring.lock().unwrap();
+                    for sample in data.iter_mut() {
+                        let s16 = ring.pop_front().map(|s| fade.feed(s)).unwrap_or_else(|| fade.drain());
+                        *sample = (s16 as i32 + 32768) as u16;
+                    }
+                },
+                err_fn,
+                None,
+            )
+        }
+        cpal::SampleFormat::F32 => {
+            let mut fade = FadeState::new(fade_samples);
+            let ring = ring.clone();
+            device.build_output_stream(
+                &config,
+                move |data: &mut [f32], _: &cpal::OutputCallbackInfo| {
+                    let mut ring = ring.lock().unwrap();
+                    for sample in data.iter_mut() {
+                        let s16 = ring.pop_front().map(|s| fade.feed(s)).unwrap_or_else(|| fade.drain());
+                        *sample = s16 as f32 / 32768.0;
+                    }
+                },
+                err_fn,
+                None,
+            )
+        }
+        fmt => return Err(format!("unsupported sample format: {fmt:?}")),
+    }
+    .map_err(|e| format!("build_output_stream: {e}"))?;
 
     stream.play().map_err(|e| format!("stream.play: {e}"))?;
     Ok(stream)
