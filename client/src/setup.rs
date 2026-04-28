@@ -1,7 +1,7 @@
 use std::env;
 use std::fs;
 use std::path::{Path, PathBuf};
-use std::process::Command;
+
 use std::time::Duration;
 
 use anyhow::Context;
@@ -320,10 +320,10 @@ WantedBy=multi-user.target
     );
 
     // Daemon reload
-    let _ = Command::new("systemctl").arg("daemon-reload").output();
+    let _ = std::process::Command::new("systemctl").arg("daemon-reload").output();
 
     // Enable and start
-    let output = Command::new("systemctl")
+    let output = std::process::Command::new("systemctl")
         .arg("enable")
         .arg("--now")
         .arg(&service_name)
@@ -398,12 +398,12 @@ fn install_service(exe_path: &Path, config_path: &Path, instance: u32) -> anyhow
     );
 
     // Unload first if it was already running to ensure clean state
-    let _ = Command::new("launchctl")
+    let _ = std::process::Command::new("launchctl")
         .arg("unload")
         .arg(&plist_path)
         .output();
 
-    let output = Command::new("launchctl")
+    let output = std::process::Command::new("launchctl")
         .arg("load")
         .arg("-w")
         .arg(&plist_path)
