@@ -180,7 +180,7 @@ async fn get_logs() -> Response {
     }
 
     (
-        StatusCode::NOT_FOUND,
+        StatusCode::OK,
         "No readable Sonium log file found. If running under systemd, grant journal access or configure file logging.",
     )
         .into_response()

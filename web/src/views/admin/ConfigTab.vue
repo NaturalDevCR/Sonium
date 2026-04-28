@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { ref, onMounted, computed, watch } from 'vue';
+import { ref, shallowRef, onMounted, computed, watch } from 'vue';
 import { useAuthStore } from '@/stores/auth';
 import { api } from '@/lib/api';
 import { Codemirror } from 'vue-codemirror';
@@ -8,7 +8,7 @@ import { StreamLanguage } from '@codemirror/language';
 import { toml } from '@codemirror/legacy-modes/mode/toml';
 import { parse } from 'smol-toml';
 
-const extensions = [StreamLanguage.define(toml), oneDark];
+const extensions = shallowRef([StreamLanguage.define(toml), oneDark]);
 
 const auth = useAuthStore();
 

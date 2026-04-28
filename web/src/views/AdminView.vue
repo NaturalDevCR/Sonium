@@ -1,10 +1,23 @@
 <script setup lang="ts">
 import { useRouter, useRoute, RouterView } from 'vue-router';
 import { useAuthStore } from '@/stores/auth';
+import { api } from '@/lib/api';
+import { ref, onMounted } from 'vue';
 
 const auth   = useAuthStore();
 const router = useRouter();
 const route  = useRoute();
+
+const version = ref('');
+
+onMounted(async () => {
+  try {
+    const status = await api.status();
+    version.value = status.version;
+  } catch (e) {
+    console.warn('Failed to fetch version', e);
+  }
+});
 
 const nav = [
   { name: 'admin-dashboard', icon: 'mdi-view-dashboard-outline', label: 'Overview'  },
@@ -35,7 +48,9 @@ function isActive(name: string) {
           <img src="/sonium-logo.png" alt="" class="h-8 w-8 object-contain shrink-0" />
           <div>
             <p class="sidebar-brand">SONIUM</p>
-            <p class="sidebar-sub">Audio Server</p>
+            <p class="sidebar-sub">
+              Audio Server <span v-if="version" class="opacity-60 ml-1">v{{ version }}</span>
+            </p>
           </div>
         </div>
       </div>
