@@ -320,7 +320,9 @@ WantedBy=multi-user.target
     );
 
     // Daemon reload
-    let _ = std::process::Command::new("systemctl").arg("daemon-reload").output();
+    let _ = std::process::Command::new("systemctl")
+        .arg("daemon-reload")
+        .output();
 
     // Enable and start
     let output = std::process::Command::new("systemctl")

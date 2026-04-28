@@ -157,13 +157,21 @@ async fn setup(State(store): State<AuthState>, Json(body): Json<SetupBody>) -> R
     }
 }
 
-async fn get_me(axum::Extension(user): axum::Extension<AuthUser>) -> Json<serde_json::Value> {
-    Json(serde_json::json!({
-        "id":       user.0.sub,
-        "username": user.0.username,
-        "role":     user.0.role,
-        "must_change_password": user.0.must_change_password,
-    }))
+async fn get_me(
+    State(store): State<AuthState>,
+    axum::Extension(user): axum::Extension<AuthUser>,
+) -> Response {
+    if let Some(u) = store.get_user(&user.0.sub) {
+        Json(serde_json::json!({
+            "id":       u.id,
+            "username": u.username,
+            "role":     u.role,
+            "must_change_password": u.must_change_password,
+        }))
+        .into_response()
+    } else {
+        (StatusCode::NOT_FOUND, "user not found").into_response()
+    }
 }
 
 async fn logout(
