@@ -526,7 +526,7 @@ pub async fn uninstall() -> anyhow::Result<()> {
                         if let Some(name) = path.file_name().and_then(|n| n.to_str()) {
                             if name.starts_with("com.sonium.client.") && name.ends_with(".plist") {
                                 let label = name.strip_suffix(".plist").unwrap_or(name);
-                                
+
                                 // Stop the service
                                 let _ = std::process::Command::new("launchctl")
                                     .arg("stop")
@@ -538,7 +538,7 @@ pub async fn uninstall() -> anyhow::Result<()> {
                                     .arg("unload")
                                     .arg(&path)
                                     .output();
-                                    
+
                                 // Remove from launchd by label (fallback)
                                 let _ = std::process::Command::new("launchctl")
                                     .arg("remove")
