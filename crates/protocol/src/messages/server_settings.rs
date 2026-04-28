@@ -39,7 +39,9 @@ pub struct EqBand {
     pub enabled: bool,
 }
 
-fn default_true() -> bool { true }
+fn default_true() -> bool {
+    true
+}
 
 /// Dynamic playback settings pushed by the server to a specific client.
 ///

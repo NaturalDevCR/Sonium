@@ -376,7 +376,7 @@ mod tests {
     fn test_auto_generated_password_auth() {
         let dir = tempdir().unwrap();
         let store = UserStore::load_or_init(dir.path(), Some("generated-pass".to_string()));
-        
+
         // Verify it was created
         {
             let users = store.users.read();
@@ -385,10 +385,13 @@ mod tests {
             assert_eq!(admin.username, "admin");
             assert!(admin.must_change_password);
         }
-        
+
         // Verify authentication
         let auth = store.authenticate("admin", "generated-pass");
-        assert!(auth.is_some(), "Authentication should succeed with generated password");
+        assert!(
+            auth.is_some(),
+            "Authentication should succeed with generated password"
+        );
     }
 
     #[test]
@@ -396,10 +399,15 @@ mod tests {
         let password = "testpassword123";
         let salt = SaltString::generate(&mut rand::rngs::OsRng);
         let argon2 = Argon2::default();
-        let hash = argon2.hash_password(password.as_bytes(), &salt).unwrap().to_string();
-        
+        let hash = argon2
+            .hash_password(password.as_bytes(), &salt)
+            .unwrap()
+            .to_string();
+
         let parsed_hash = PasswordHash::new(&hash).unwrap();
-        assert!(argon2.verify_password(password.as_bytes(), &parsed_hash).is_ok());
+        assert!(argon2
+            .verify_password(password.as_bytes(), &parsed_hash)
+            .is_ok());
     }
 
     #[test]
