@@ -22,6 +22,7 @@ onMounted(async () => {
 const nav = [
   { name: 'admin-dashboard', icon: 'mdi-view-dashboard-outline', label: 'Overview'  },
   { name: 'admin-streams',   icon: 'mdi-music-box-multiple-outline', label: 'Streams'  },
+  { name: 'matrix',          icon: 'mdi-grid',                  label: 'Matrix'    },
   { name: 'admin-groups',    icon: 'mdi-speaker-multiple',      label: 'Groups'    },
   { name: 'admin-clients',   icon: 'mdi-devices',               label: 'Clients'   },
   { name: 'admin-system',    icon: 'mdi-toolbox-outline',        label: 'System'    },

@@ -103,7 +103,7 @@ function fmtUptime(s: number) {
         <div class="flex items-center gap-3">
           <img src="/sonium-logo.png" alt="Sonium" class="h-8 w-8 object-contain" />
           <div>
-            <p class="ctrl-brand">SONIUM <span class="version-tag">v0.1.14</span></p>
+            <p class="ctrl-brand">SONIUM <span class="version-tag">v0.1.23</span></p>
             <p class="ctrl-tagline">
               {{ store.connectedClients.length }} client{{ store.connectedClients.length !== 1 ? 's' : '' }} online
               <span v-if="store.uptime" class="ml-2 opacity-60">· up {{ fmtUptime(store.uptime) }}</span>
@@ -112,6 +112,13 @@ function fmtUptime(s: number) {
         </div>
 
         <div class="flex items-center gap-2">
+          <button
+            @click="router.push('/matrix')"
+            class="ctrl-icon-btn"
+            title="Audio Matrix"
+          >
+            <span class="mdi mdi-grid text-lg"></span>
+          </button>
           <button
             v-if="auth.isAdmin"
             @click="router.push('/admin')"
@@ -383,22 +390,6 @@ function fmtUptime(s: number) {
   vertical-align: middle;
   margin-left: 4px;
 }
-
-.ctrl-icon-btn {
-  width: 34px;
-  height: 34px;
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  border-radius: 9px;
-  background: transparent;
-  border: 1px solid var(--border-mid);
-  color: var(--text-muted);
-  cursor: pointer;
-  transition: background 0.15s, color 0.15s;
-}
-.ctrl-icon-btn:hover { background: var(--bg-hover); color: var(--text-secondary); }
-.ctrl-icon-btn-danger:hover { background: var(--red-dim); color: var(--red); border-color: var(--red-border); }
 
 /* Content */
 .ctrl-main { max-width: 600px; margin: 0 auto; }

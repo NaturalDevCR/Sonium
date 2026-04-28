@@ -38,6 +38,12 @@ const router = createRouter({
         { path: 'users',     name: 'admin-users',     component: () => import('@/views/admin/UsersTab.vue')     },
       ],
     },
+    {
+      path: '/matrix',
+      name: 'matrix',
+      component: () => import('@/views/MatrixView.vue'),
+      meta: { requiresAuth: true },
+    },
     { path: '/:pathMatch(.*)*', redirect: '/' },
   ],
 });
