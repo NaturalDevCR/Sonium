@@ -82,7 +82,7 @@ async fn connect_and_run(
 
     let mut hdr_buf = [0u8; HEADER_SIZE];
     let mut pending_time: Option<(u16, i64)> = None; // (msg_id, sent_us)
-    
+
     // Start periodic tasks
     let mut audio_tick = tokio::time::interval(tokio::time::Duration::from_millis(20));
     let mut sync_tick = tokio::time::interval(tokio::time::Duration::from_secs(1));
@@ -106,10 +106,12 @@ async fn connect_and_run(
             // Sync clock with server
             _ = sync_tick.tick() => {
                 sync_seq = sync_seq.wrapping_add(1);
-                let msg = Message::Time(TimeMsg::request(sync_seq)).encode();
+                let mut hdr = MessageHeader::new(MessageType::Time, 8);
+                hdr.id = sync_seq;
+                let msg = Message::Time(TimeMsg::zero()).encode_with_header(hdr);
                 if let Err(e) = stream.write_all(&msg).await {
                     warn!("Failed to send sync request: {e}");
-                    break;
+                    break Ok(());
                 }
                 pending_time = Some((sync_seq, now_us()));
             }
@@ -139,12 +141,14 @@ async fn connect_and_run(
                     )
                 };
 
-                let _ = health_tx.send(report_msg.clone()).await;
+                if let Some(tx) = health_tx.as_ref() {
+                    let _ = tx.send(report_msg.clone());
+                }
 
                 let msg = Message::HealthReport(report_msg).encode();
                 if let Err(e) = stream.write_all(&msg).await {
                     warn!("Failed to send health report: {e}");
-                    break;
+                    break Ok(());
                 }
             }
 
@@ -152,21 +156,21 @@ async fn connect_and_run(
             read_result = stream.read_exact(&mut hdr_buf) => {
                 if let Err(e) = read_result {
                     warn!("Connection closed or read error: {e}");
-                    break;
+                    break Ok(());
                 }
-                
+
                 let hdr = match MessageHeader::from_bytes(&hdr_buf) {
                     Ok(h) => h,
                     Err(e) => {
                         warn!("Invalid header: {e}");
-                        break;
+                        break Ok(());
                     }
                 };
 
                 let mut payload = vec![0u8; hdr.payload_size as usize];
                 if let Err(e) = stream.read_exact(&mut payload).await {
                     warn!("Error reading payload: {e}");
-                    break;
+                    break Ok(());
                 }
 
                 match hdr.msg_type {
@@ -232,7 +236,7 @@ async fn connect_and_run(
                                 let recv_us = now_us();
                                 let time_msg = TimeMsg::decode(&payload)?;
                                 let server_lat_us = time_msg.latency.to_micros();
-                                time_provider.add_sample(sent_us, recv_us, server_lat_us);
+                                time_provider.update(sent_us, recv_us, server_lat_us);
                                 debug!(
                                     offset_ms = time_provider.offset_us() / 1000,
                                     "Clock sync updated"

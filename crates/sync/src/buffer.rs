@@ -271,7 +271,7 @@ mod tests {
         let now = 1_000_000i64;
         // Chunk finished at 800,000us (stale by 200ms, threshold is 100ms)
         buf.push(chunk(800_000 - 10_000, 960), now);
-        
+
         // pop_ready should drop the stale chunk
         assert!(buf.pop_ready(now).is_none());
         assert!(buf.is_empty());
@@ -284,7 +284,7 @@ mod tests {
         // 960 stereo samples = 10ms
         buf.push(chunk(100_000, 960), 0);
         let depth = buf.buffer_depth_us();
-        assert!((depth - 10_000).abs() < 100); 
+        assert!((depth - 10_000).abs() < 100);
     }
 
     #[test]
