@@ -10,7 +10,7 @@ pub use client_info::ClientInfo;
 pub use codec_header::CodecHeader;
 pub use error::ErrorMsg;
 pub use hello::Hello;
-pub use server_settings::{EqBand, ServerSettings};
+pub use server_settings::{EqBand, FilterType, ServerSettings};
 pub use time::TimeMsg;
 pub use wire_chunk::WireChunk;
 

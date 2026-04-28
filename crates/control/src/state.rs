@@ -241,19 +241,20 @@ impl ServerState {
         // Restore settings from the last persisted snapshot for this client ID.
         let saved = self.saved_clients.iter().find(|c| c.id == id);
 
-        let (volume, muted, latency_ms, group_id, display_name, eq_bands, eq_enabled) = if let Some(s) = saved {
-            (
-                s.volume,
-                s.muted,
-                s.latency_ms,
-                s.group_id.clone(),
-                s.display_name.clone(),
-                s.eq_bands.clone(),
-                s.eq_enabled,
-            )
-        } else {
-            (100, false, 0, "default".into(), None, vec![], false)
-        };
+        let (volume, muted, latency_ms, group_id, display_name, eq_bands, eq_enabled) =
+            if let Some(s) = saved {
+                (
+                    s.volume,
+                    s.muted,
+                    s.latency_ms,
+                    s.group_id.clone(),
+                    s.display_name.clone(),
+                    s.eq_bands.clone(),
+                    s.eq_enabled,
+                )
+            } else {
+                (100, false, 0, "default".into(), None, vec![], false)
+            };
 
         let info = ClientInfo {
             id: id.clone(),
@@ -781,6 +782,7 @@ mod tests {
             latency_ms: 50,
             group_id: "default".into(),
             eq_bands: vec![],
+            eq_enabled: true,
             last_seen: Utc::now(),
         }];
         let s = Arc::new(ServerState::new(

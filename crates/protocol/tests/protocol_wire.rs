@@ -128,6 +128,7 @@ fn server_settings_json_encoding() {
         volume: 80,
         muted: true,
         eq_bands: vec![],
+        eq_enabled: false,
     };
     let (_, msg) = parse(&wire(&Message::ServerSettings(ss)));
 

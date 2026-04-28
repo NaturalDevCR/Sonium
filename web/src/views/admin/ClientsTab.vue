@@ -204,7 +204,7 @@ function groupName(groupId: string) {
         <EqControl
           :client-id="c.id"
           :model-value="c.eq_bands"
-          :enabled="c.eq_enabled"
+          :enabled="c.eq_enabled ?? false"
           @update:model-value="setEq(c.id, $event, c.eq_enabled ?? false)"
           @update:enabled="setEq(c.id, c.eq_bands ?? [], $event)"
         />

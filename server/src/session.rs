@@ -117,7 +117,10 @@ async fn session_loop(
     let init_vol = state.get_volume(client_id).unwrap_or((100, false));
     let init_client = state.get_client(client_id);
     let init_latency = init_client.as_ref().map(|c| c.latency_ms).unwrap_or(0);
-    let init_eq_bands = init_client.as_ref().map(|c| c.eq_bands.clone()).unwrap_or_default();
+    let init_eq_bands = init_client
+        .as_ref()
+        .map(|c| c.eq_bands.clone())
+        .unwrap_or_default();
     let init_eq_enabled = init_client.as_ref().map(|c| c.eq_enabled).unwrap_or(true);
 
     // Send initial ServerSettings.
