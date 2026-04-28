@@ -133,6 +133,11 @@ export const useServerStore = defineStore('server', () => {
             : s,
         );
         break;
+      case 'client_health':
+        clients.value = clients.value.map((c) =>
+          c.id === event.client_id ? { ...c, health: event.health } : c,
+        );
+        break;
     }
   }
 

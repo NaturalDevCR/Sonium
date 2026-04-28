@@ -17,7 +17,7 @@ use std::sync::Arc;
 
 use crate::persistence::{PersistedClient, PersistedGroup, PersistedStream, PersistenceStore};
 use crate::ws::EventBus;
-use sonium_protocol::messages::EqBand;
+use sonium_protocol::messages::{EqBand, HealthReport};
 
 // ── Client ────────────────────────────────────────────────────────────────
 
@@ -63,6 +63,8 @@ pub struct ClientInfo {
     /// Optional operator-assigned display name (shown instead of hostname).
     #[serde(default)]
     pub display_name: Option<String>,
+    /// Real-time health metrics.
+    pub health: Option<HealthReport>,
 }
 
 impl ClientInfo {
@@ -301,6 +303,7 @@ impl ServerState {
             connected_at: Utc::now(),
             protocol_version,
             display_name,
+            health: None,
         };
 
         // Place into the correct group (restored or default).
@@ -431,6 +434,21 @@ impl ServerState {
             });
             drop(clients);
             self.persist();
+            true
+        } else {
+            false
+        }
+    }
+
+    /// Update health metrics for a client and push to UI.
+    pub fn set_client_health(&self, client_id: &str, health: HealthReport) -> bool {
+        let mut clients = self.clients.write();
+        if let Some(c) = clients.get_mut(client_id) {
+            c.health = Some(health.clone());
+            self.events.emit(crate::ws::Event::ClientHealth {
+                client_id: client_id.into(),
+                health,
+            });
             true
         } else {
             false

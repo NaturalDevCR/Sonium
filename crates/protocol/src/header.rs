@@ -41,6 +41,8 @@ pub enum MessageType {
     ClientInfo = 7,
     /// Error notification from the server.
     ErrorMsg = 8,
+    /// Real-time connection and buffer health report from client to server.
+    HealthReport = 9,
 }
 
 impl TryFrom<u16> for MessageType {
@@ -55,6 +57,7 @@ impl TryFrom<u16> for MessageType {
             5 => Ok(Self::Hello),
             7 => Ok(Self::ClientInfo),
             8 => Ok(Self::ErrorMsg),
+            9 => Ok(Self::HealthReport),
             n => Err(SoniumError::Protocol(format!("unknown message type {n}"))),
         }
     }
@@ -71,6 +74,7 @@ impl std::fmt::Display for MessageType {
             Self::Hello => "Hello",
             Self::ClientInfo => "ClientInfo",
             Self::ErrorMsg => "Error",
+            Self::HealthReport => "Health",
         };
         f.write_str(s)
     }

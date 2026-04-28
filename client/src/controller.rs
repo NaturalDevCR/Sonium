@@ -6,7 +6,7 @@ use tracing::{debug, info, warn};
 use sonium_common::config::ClientConfig;
 use sonium_protocol::{
     header::HEADER_SIZE,
-    messages::{EqBand, Hello, Message, TimeMsg},
+    messages::{EqBand, HealthReport, Hello, Message, TimeMsg},
     MessageHeader, MessageType,
 };
 use sonium_sync::time_provider::now_us;
@@ -40,7 +40,8 @@ pub async fn run(server_addr: String, cfg: ClientConfig) -> anyhow::Result<()> {
 
 async fn connect_and_run(addr: &str, cfg: &ClientConfig) -> anyhow::Result<()> {
     let mut stream = TcpStream::connect(addr).await?;
-    info!(%addr, "Connected to server");
+    stream.set_nodelay(true)?;
+    info!(%addr, "Connected to server (TCP_NODELAY=true)");
 
     let time_provider = TimeProvider::new();
 
@@ -73,6 +74,9 @@ async fn connect_and_run(addr: &str, cfg: &ClientConfig) -> anyhow::Result<()> {
     // Start periodic clock sync
     let mut sync_interval = tokio::time::interval(Duration::from_secs(1));
     let mut sync_seq: u16 = 0;
+
+    // Start periodic health reporting
+    let mut health_interval = tokio::time::interval(Duration::from_secs(2));
 
     loop {
         tokio::select! {
@@ -163,6 +167,26 @@ async fn connect_and_run(addr: &str, cfg: &ClientConfig) -> anyhow::Result<()> {
                 let time_req = Message::Time(TimeMsg::zero()).encode_with_header(hdr);
                 stream.write_all(&time_req).await?;
                 pending_time = Some((sync_seq, sent_us));
+            }
+
+            // Send periodic Health report
+            _ = health_interval.tick() => {
+                if let (Some(pl), Some(buf)) = (player.as_mut(), sync_buf.as_mut()) {
+                    let (underruns, overruns) = pl.take_health();
+                    let stale = buf.take_stale_drops();
+                    let depth = (buf.buffer_depth_us() / 1000) as u32;
+
+                    let report = HealthReport::new(
+                        underruns,
+                        overruns,
+                        stale,
+                        depth,
+                        0, // Jitter estimation could be added later
+                        (time_provider.offset_us() / 1000) as i32,
+                    );
+                    let msg = Message::HealthReport(report).encode();
+                    let _ = stream.write_all(&msg).await;
+                }
             }
         }
     }

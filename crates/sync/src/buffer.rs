@@ -79,6 +79,8 @@ pub struct SyncBuffer {
     target_latency_us: i64,
     buffered_samples: usize,
     fmt: SampleFormat,
+    /// Health metrics: chunks dropped because they arrived after their playout window.
+    stale_drop_count: u32,
 }
 
 impl SyncBuffer {
@@ -93,6 +95,7 @@ impl SyncBuffer {
             target_latency_us: target_latency_ms as i64 * 1_000,
             buffered_samples: 0,
             fmt,
+            stale_drop_count: 0,
         }
     }
 
@@ -122,6 +125,7 @@ impl SyncBuffer {
                 self.buffered_samples = self
                     .buffered_samples
                     .saturating_sub(dropped.remaining_samples());
+                self.stale_drop_count += 1;
                 continue;
             }
             break;
@@ -158,6 +162,14 @@ impl SyncBuffer {
     pub fn clear(&mut self) {
         self.chunks.clear();
         self.buffered_samples = 0;
+        self.stale_drop_count = 0;
+    }
+
+    /// Return and reset the accumulated stale drop counter.
+    pub fn take_stale_drops(&mut self) -> u32 {
+        let count = self.stale_drop_count;
+        self.stale_drop_count = 0;
+        count
     }
 }
 

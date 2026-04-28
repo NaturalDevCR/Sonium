@@ -1,8 +1,9 @@
 use std::collections::VecDeque;
+use std::sync::atomic::{AtomicU32, Ordering};
 use std::sync::mpsc::{self, Receiver, SyncSender};
 use std::sync::{Arc, Mutex};
 use std::thread;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
 use tracing::{debug, info, warn};
@@ -22,9 +23,16 @@ use sonium_common::{SampleFormat, SoniumError};
 ///
 /// Dropping `Player` closes the keep-alive sender, which unblocks the audio
 /// thread so the stream is stopped and the thread exits cleanly.
+#[derive(Debug, Default)]
+struct HealthState {
+    underrun_count: AtomicU32,
+    overrun_count: AtomicU32,
+}
+
 pub struct Player {
     ring: Arc<Mutex<VecDeque<i16>>>,
     fmt: SampleFormat,
+    health: Arc<HealthState>,
     /// Dropping this disconnects the audio thread's park channel, stopping it.
     _keepalive: SyncSender<()>,
 }
@@ -33,6 +41,7 @@ impl Player {
     pub fn new(fmt: SampleFormat, device_name: Option<&str>) -> Result<Self, SoniumError> {
         let capacity = fmt.rate as usize * fmt.channels as usize * 2; // ~2 s headroom
         let ring = Arc::new(Mutex::new(VecDeque::<i16>::with_capacity(capacity)));
+        let health = Arc::new(HealthState::default());
 
         // init_tx/rx: audio thread reports success or failure back to Player::new.
         let (init_tx, init_rx) = mpsc::sync_channel::<Result<(), String>>(0);
@@ -40,10 +49,11 @@ impl Player {
         let (park_tx, park_rx) = mpsc::sync_channel::<()>(0);
 
         let ring_clone = ring.clone();
+        let health_clone = health.clone();
         let device_owned = device_name.map(String::from);
         thread::Builder::new()
             .name("sonium-audio".into())
-            .spawn(move || audio_thread(ring_clone, fmt, device_owned, init_tx, park_rx))
+            .spawn(move || audio_thread(ring_clone, health_clone, fmt, device_owned, init_tx, park_rx))
             .map_err(|e| SoniumError::Audio(format!("spawn: {e}")))?;
 
         init_rx
@@ -59,6 +69,7 @@ impl Player {
         Ok(Self {
             ring,
             fmt,
+            health,
             _keepalive: park_tx,
         })
     }
@@ -70,6 +81,7 @@ impl Player {
         let max = self.fmt.rate as usize * self.fmt.channels as usize * 4;
         if ring.len() + samples.len() > max {
             warn!(drop = samples.len(), "Ring buffer full — dropping chunk");
+            self.health.overrun_count.fetch_add(1, Ordering::Relaxed);
             return Ok(());
         }
         ring.extend(samples.iter().copied());
@@ -81,10 +93,18 @@ impl Player {
     pub fn sample_format(&self) -> SampleFormat {
         self.fmt
     }
+
+    /// Return and reset health metrics.
+    pub fn take_health(&self) -> (u32, u32) {
+        let underruns = self.health.underrun_count.swap(0, Ordering::Relaxed);
+        let overruns = self.health.overrun_count.swap(0, Ordering::Relaxed);
+        (underruns, overruns)
+    }
 }
 
 fn audio_thread(
     ring: Arc<Mutex<VecDeque<i16>>>,
+    health: Arc<HealthState>,
     fmt: SampleFormat,
     device_name: Option<String>,
     init_tx: SyncSender<Result<(), String>>,
@@ -99,7 +119,7 @@ fn audio_thread(
     }
 
     // ── Initial open ──────────────────────────────────────────────────────
-    let stream = match try_open_stream(ring.clone(), fmt, device_name.as_deref()) {
+    let stream = match try_open_stream(ring.clone(), health.clone(), fmt, device_name.as_deref()) {
         Ok(s) => {
             let _ = init_tx.send(Ok(()));
             s
@@ -133,7 +153,7 @@ fn audio_thread(
             Err(mpsc::RecvTimeoutError::Timeout) => {
                 if current_stream.is_none() {
                     // Device was lost — attempt to re-open
-                    match try_open_stream(ring.clone(), fmt, device_name.as_deref()) {
+                    match try_open_stream(ring.clone(), health.clone(), fmt, device_name.as_deref()) {
                         Ok(s) => {
                             info!("Audio device recovered — stream re-opened");
                             current_stream = Some(s);
@@ -186,6 +206,7 @@ fn select_device(host: &cpal::Host, requested: Option<&str>) -> Result<cpal::Dev
 
 fn try_open_stream(
     ring: Arc<Mutex<VecDeque<i16>>>,
+    health: Arc<HealthState>,
     fmt: SampleFormat,
     device_name: Option<&str>,
 ) -> Result<cpal::Stream, String> {
@@ -212,15 +233,20 @@ fn try_open_stream(
         cpal::SampleFormat::I16 => {
             let mut fade = FadeState::new(fade_samples);
             let ring = ring.clone();
+            let health = health.clone();
             device.build_output_stream(
                 &config,
                 move |data: &mut [i16], _: &cpal::OutputCallbackInfo| {
                     let mut ring = ring.lock().unwrap();
                     for sample in data.iter_mut() {
-                        *sample = ring
-                            .pop_front()
-                            .map(|s| fade.feed(s))
-                            .unwrap_or_else(|| fade.drain());
+                        if let Some(s) = ring.pop_front() {
+                            *sample = fade.feed(s);
+                        } else {
+                            if fade.phase == FadePhase::Playing {
+                                health.underrun_count.fetch_add(1, Ordering::Relaxed);
+                            }
+                            *sample = fade.drain();
+                        }
                     }
                 },
                 err_fn,
@@ -230,15 +256,20 @@ fn try_open_stream(
         cpal::SampleFormat::U16 => {
             let mut fade = FadeState::new(fade_samples);
             let ring = ring.clone();
+            let health = health.clone();
             device.build_output_stream(
                 &config,
                 move |data: &mut [u16], _: &cpal::OutputCallbackInfo| {
                     let mut ring = ring.lock().unwrap();
                     for sample in data.iter_mut() {
-                        let s16 = ring
-                            .pop_front()
-                            .map(|s| fade.feed(s))
-                            .unwrap_or_else(|| fade.drain());
+                        let s16 = if let Some(s) = ring.pop_front() {
+                            fade.feed(s)
+                        } else {
+                            if fade.phase == FadePhase::Playing {
+                                health.underrun_count.fetch_add(1, Ordering::Relaxed);
+                            }
+                            fade.drain()
+                        };
                         *sample = (s16 as i32 + 32768) as u16;
                     }
                 },
@@ -249,15 +280,20 @@ fn try_open_stream(
         cpal::SampleFormat::F32 => {
             let mut fade = FadeState::new(fade_samples);
             let ring = ring.clone();
+            let health = health.clone();
             device.build_output_stream(
                 &config,
                 move |data: &mut [f32], _: &cpal::OutputCallbackInfo| {
                     let mut ring = ring.lock().unwrap();
                     for sample in data.iter_mut() {
-                        let s16 = ring
-                            .pop_front()
-                            .map(|s| fade.feed(s))
-                            .unwrap_or_else(|| fade.drain());
+                        let s16 = if let Some(s) = ring.pop_front() {
+                            fade.feed(s)
+                        } else {
+                            if fade.phase == FadePhase::Playing {
+                                health.underrun_count.fetch_add(1, Ordering::Relaxed);
+                            }
+                            fade.drain()
+                        };
                         *sample = s16 as f32 / 32768.0;
                     }
                 },

@@ -43,6 +43,15 @@ export interface UserView {
   role:     'admin' | 'operator' | 'viewer';
 }
 
+export interface HealthReport {
+  underrun_count:   number;
+  overrun_count:    number;
+  stale_drop_count: number;
+  buffer_depth_ms:  number;
+  jitter_ms:        number;
+  latency_ms:       number;
+}
+
 export interface Client {
   id:               string;
   hostname:         string;
@@ -58,6 +67,7 @@ export interface Client {
   status:           'connected' | 'disconnected';
   connected_at:     string;
   protocol_version: number;
+  health?:          HealthReport | null;
 }
 
 export interface Group {
@@ -153,7 +163,8 @@ export type Event =
   | { type: 'stream_status';       stream_id: string; status: string }
   | { type: 'heartbeat';           uptime_s: number }
   | { type: 'stream_level';        stream_id: string; rms_db: number }
-  | { type: 'stream_eq_changed';   stream_id: string; eq_bands: EqBand[]; enabled: boolean };
+  | { type: 'stream_eq_changed';   stream_id: string; eq_bands: EqBand[]; enabled: boolean }
+  | { type: 'client_health';       client_id: string; health: HealthReport };
 
 // ── HTTP helpers ──────────────────────────────────────────────────────────
 

@@ -353,6 +353,11 @@ async fn handle_client_msg(
                 state.set_volume(client_id, ci.volume, ci.muted);
             }
         }
+        MessageType::HealthReport => {
+            if let Ok(Message::HealthReport(health)) = Message::from_payload(&hdr, payload) {
+                state.set_client_health(client_id, health);
+            }
+        }
         other => debug!("Ignoring message: {other:?}"),
     }
     Ok(())

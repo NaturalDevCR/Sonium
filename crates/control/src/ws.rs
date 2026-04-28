@@ -6,7 +6,7 @@
 
 use crate::state::{ClientInfo, Group, StreamStatus};
 use serde::Serialize;
-use sonium_protocol::messages::EqBand;
+use sonium_protocol::messages::{EqBand, HealthReport};
 use tokio::sync::broadcast;
 
 /// All events that can be pushed to connected web UI clients.
@@ -77,6 +77,10 @@ pub enum Event {
         stream_id: String,
         eq_bands: Vec<EqBand>,
         enabled: bool,
+    },
+    ClientHealth {
+        client_id: String,
+        health: HealthReport,
     },
 }
 

@@ -1,6 +1,7 @@
 pub mod client_info;
 pub mod codec_header;
 pub mod error;
+pub mod health_report;
 pub mod hello;
 pub mod server_settings;
 pub mod time;
@@ -9,6 +10,7 @@ pub mod wire_chunk;
 pub use client_info::ClientInfo;
 pub use codec_header::CodecHeader;
 pub use error::ErrorMsg;
+pub use health_report::HealthReport;
 pub use hello::Hello;
 pub use server_settings::{EqBand, FilterType, ServerSettings};
 pub use time::TimeMsg;
@@ -27,6 +29,7 @@ pub enum Message {
     WireChunk(WireChunk),
     Time(TimeMsg),
     Error(ErrorMsg),
+    HealthReport(HealthReport),
 }
 
 impl Message {
@@ -39,6 +42,7 @@ impl Message {
             Self::WireChunk(_) => MessageType::WireChunk,
             Self::Time(_) => MessageType::Time,
             Self::Error(_) => MessageType::ErrorMsg,
+            Self::HealthReport(_) => MessageType::HealthReport,
         }
     }
 
@@ -54,6 +58,7 @@ impl Message {
             MessageType::WireChunk => Ok(Self::WireChunk(WireChunk::decode(payload)?)),
             MessageType::Time => Ok(Self::Time(TimeMsg::decode(payload)?)),
             MessageType::ErrorMsg => Ok(Self::Error(ErrorMsg::decode(payload)?)),
+            MessageType::HealthReport => Ok(Self::HealthReport(HealthReport::decode(payload)?)),
             MessageType::Base => Err(SoniumError::Protocol("base message unsupported".into())),
         }
     }
@@ -87,6 +92,7 @@ impl Message {
             Self::WireChunk(m) => m.encode(),
             Self::Time(m) => m.encode(),
             Self::Error(m) => m.encode(),
+            Self::HealthReport(m) => m.encode(),
         }
     }
 }

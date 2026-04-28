@@ -7,6 +7,7 @@ import { api }            from '@/lib/api';
 import StreamBadge        from '@/components/StreamBadge.vue';
 import VolumeControl      from '@/components/VolumeControl.vue';
 import LevelMeter         from '@/components/LevelMeter.vue';
+import HealthStatus       from '@/components/HealthStatus.vue';
 import type { Client } from '@/lib/api';
 
 const store  = useServerStore();
@@ -238,14 +239,18 @@ function fmtUptime(s: number) {
                   <span v-if="client.status !== 'connected'" style="font-size: 11px; color: var(--text-muted); font-style: italic;">offline</span>
                 </div>
 
-                <select
-                  v-if="auth.isOperator && store.groups.length > 1"
-                  :value="client.group_id"
-                  @change="moveClient(client.id, ($event.target as HTMLSelectElement).value)"
-                  class="ctrl-select-xs"
-                >
-                  <option v-for="g in store.groups" :key="g.id" :value="g.id">{{ g.name }}</option>
-                </select>
+                <div class="flex items-center gap-2">
+                  <HealthStatus v-if="client.status === 'connected'" :health="client.health" />
+                  
+                  <select
+                    v-if="auth.isOperator && store.groups.length > 1"
+                    :value="client.group_id"
+                    @change="moveClient(client.id, ($event.target as HTMLSelectElement).value)"
+                    class="ctrl-select-xs"
+                  >
+                    <option v-for="g in store.groups" :key="g.id" :value="g.id">{{ g.name }}</option>
+                  </select>
+                </div>
               </div>
 
               <!-- Volume slider -->
