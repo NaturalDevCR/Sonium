@@ -23,7 +23,7 @@ const localIp = ref('');
 const scanning = ref(false);
 
 const healthState = ref<Record<number, { lastSeen: number, connected: boolean }>>({});
-const APP_VERSION = 'v0.1.34';
+const APP_VERSION = 'v0.1.35';
 
 const localSubnet = computed(() => {
   if (!localIp.value) return '';
@@ -135,7 +135,8 @@ onMounted(async () => {
 
   // Listen for health updates from all instances
   await listen('client-health', (event: { payload: { id: number, report: any } }) => {
-    const { id } = event.payload;
+    const { id, report } = event.payload;
+    console.log(`[Health] Received report for instance ${id}:`, report);
     healthState.value[id] = {
       lastSeen: Date.now(),
       connected: true
