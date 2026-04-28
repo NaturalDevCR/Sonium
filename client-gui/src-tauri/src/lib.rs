@@ -47,7 +47,7 @@ async fn scan_subnet() -> Result<Vec<String>, String> {
         return Err("Invalid local IP".into());
     }
     let base = format!("{}.{}.{}", parts[0], parts[1], parts[2]);
-    
+
     let mut tasks = Vec::new();
     for i in 1..255 {
         let target_ip = format!("{}.{}", base, i);
@@ -56,14 +56,16 @@ async fn scan_subnet() -> Result<Vec<String>, String> {
             // 500ms timeout for scanning
             match tokio::time::timeout(
                 tokio::time::Duration::from_millis(500),
-                tokio::net::TcpStream::connect(&addr)
-            ).await {
+                tokio::net::TcpStream::connect(&addr),
+            )
+            .await
+            {
                 Ok(Ok(_)) => Some(target_ip),
                 _ => None,
             }
         }));
     }
-    
+
     let mut found = Vec::new();
     for task in tasks {
         if let Ok(Some(ip)) = task.await {

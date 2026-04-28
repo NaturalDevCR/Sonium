@@ -20,7 +20,7 @@
         "label": "main",
         "decorations": true,
         "transparent": true,
-        "titleBarStyle": "hidden",
+        "titleBarStyle": "Overlay",
         "windowEffects": {
           "effects": [
             "windowBackground"
