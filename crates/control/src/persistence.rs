@@ -37,6 +37,9 @@ pub struct PersistedClient {
     /// Per-client EQ bands (empty = flat).
     #[serde(default)]
     pub eq_bands: Vec<EqBand>,
+    /// Whether the EQ is enabled for this client.
+    #[serde(default)]
+    pub eq_enabled: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

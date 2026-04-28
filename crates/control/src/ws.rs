@@ -76,6 +76,7 @@ pub enum Event {
     EqChanged {
         client_id: String,
         eq_bands: Vec<EqBand>,
+        enabled: bool,
     },
 }
 

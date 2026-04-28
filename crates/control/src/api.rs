@@ -210,6 +210,7 @@ async fn patch_client_name(
 #[derive(Deserialize)]
 struct EqBody {
     bands: Vec<sonium_protocol::messages::EqBand>,
+    enabled: bool,
 }
 
 async fn patch_client_eq(
@@ -217,7 +218,7 @@ async fn patch_client_eq(
     Path(id): Path<String>,
     Json(body): Json<EqBody>,
 ) -> Response {
-    if s.set_eq(&id, body.bands) {
+    if s.set_eq(&id, body.bands, body.enabled) {
         StatusCode::NO_CONTENT.into_response()
     } else {
         StatusCode::NOT_FOUND.into_response()

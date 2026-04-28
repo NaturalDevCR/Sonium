@@ -64,6 +64,7 @@ async fn connect_and_run(addr: &str, cfg: &ClientConfig) -> anyhow::Result<()> {
     let mut volume: u8 = 100;
     let mut muted = false;
     let mut eq_bands: Vec<EqBand> = vec![];
+    let mut eq_enabled = false;
     let mut eq_processor = None;
 
     let mut hdr_buf = [0u8; HEADER_SIZE];
@@ -90,7 +91,7 @@ async fn connect_and_run(addr: &str, cfg: &ClientConfig) -> anyhow::Result<()> {
                         let fmt = dec.sample_format();
                         let p   = Player::new(fmt, cfg.device.as_deref())?;
                         let buf = SyncBuffer::new(fmt, cfg.latency_ms.unsigned_abs() + 1000);
-                        eq_processor = build_eq(&eq_bands, fmt.rate, fmt.channels as usize);
+                        eq_processor = build_eq(eq_enabled, &eq_bands, fmt.rate, fmt.channels as usize);
                         decoder  = Some(dec);
                         player   = Some(p);
                         sync_buf = Some(buf);
@@ -101,9 +102,10 @@ async fn connect_and_run(addr: &str, cfg: &ClientConfig) -> anyhow::Result<()> {
                         volume   = ss.volume.min(100);
                         muted    = ss.muted;
                         eq_bands = ss.eq_bands;
+                        eq_enabled = ss.eq_enabled;
                         if let Some(dec) = decoder.as_ref() {
                             let fmt = dec.sample_format();
-                            eq_processor = build_eq(&eq_bands, fmt.rate, fmt.channels as usize);
+                            eq_processor = build_eq(eq_enabled, &eq_bands, fmt.rate, fmt.channels as usize);
                         }
                         debug!(volume = ss.volume, muted = ss.muted, buffer_ms = ss.buffer_ms, "ServerSettings");
                     }

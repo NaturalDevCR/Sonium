@@ -34,14 +34,14 @@ function setVolume(clientId: string, volume: number, muted: boolean) {
   }, 120);
 }
 
-function setEq(clientId: string, bands: EqBand[]) {
+function setEq(clientId: string, bands: EqBand[], enabled: boolean) {
   store.clients = store.clients.map(c =>
-    c.id === clientId ? { ...c, eq_bands: bands } : c,
+    c.id === clientId ? { ...c, eq_bands: bands, eq_enabled: enabled } : c,
   );
 
   clearTimeout(eqDebounceTimers[clientId]);
   eqDebounceTimers[clientId] = setTimeout(() => {
-    api.setEq(clientId, bands);
+    api.setEq(clientId, bands, enabled);
   }, 180);
 }
 
@@ -204,7 +204,9 @@ function groupName(groupId: string) {
         <EqControl
           :client-id="c.id"
           :model-value="c.eq_bands"
-          @update:model-value="setEq(c.id, $event)"
+          :enabled="c.eq_enabled"
+          @update:model-value="setEq(c.id, $event, c.eq_enabled ?? false)"
+          @update:enabled="setEq(c.id, c.eq_bands ?? [], $event)"
         />
 
         <!-- Latency + group assignment -->

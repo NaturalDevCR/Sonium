@@ -20,23 +20,48 @@ struct BiquadState {
 }
 
 impl BiquadState {
-    /// Compute peaking EQ coefficients for the given band and sample rate.
+    /// Compute biquad coefficients for the given band and sample rate.
     fn from_band(band: &EqBand, sample_rate: u32) -> Self {
+        use sonium_protocol::messages::FilterType;
+
         let f0 = band.freq_hz as f32;
-        let gain_db = band.gain_db.clamp(-12.0, 12.0);
-        let q = band.q.clamp(0.1, 10.0);
         let sr = sample_rate as f32;
-
-        let a = 10.0_f32.powf(gain_db / 40.0); // sqrt(10^(gain/20))
         let w0 = 2.0 * std::f32::consts::PI * f0 / sr;
-        let alpha = w0.sin() / (2.0 * q);
+        let cos_w0 = w0.cos();
+        let sin_w0 = w0.sin();
+        let q = band.q.clamp(0.1, 10.0);
+        let alpha = sin_w0 / (2.0 * q);
 
-        let b0 = 1.0 + alpha * a;
-        let b1 = -2.0 * w0.cos();
-        let b2 = 1.0 - alpha * a;
-        let a0 = 1.0 + alpha / a;
-        let a1 = -2.0 * w0.cos();
-        let a2 = 1.0 - alpha / a;
+        let (b0, b1, b2, a0, a1, a2) = match band.filter_type {
+            FilterType::Peaking => {
+                let gain_db = band.gain_db.clamp(-24.0, 24.0);
+                let a = 10.0_f32.powf(gain_db / 40.0); // sqrt(10^(gain/20))
+                (
+                    1.0 + alpha * a,
+                    -2.0 * cos_w0,
+                    1.0 - alpha * a,
+                    1.0 + alpha / a,
+                    -2.0 * cos_w0,
+                    1.0 - alpha / a,
+                )
+            }
+            FilterType::HighPass => (
+                (1.0 + cos_w0) / 2.0,
+                -(1.0 + cos_w0),
+                (1.0 + cos_w0) / 2.0,
+                1.0 + alpha,
+                -2.0 * cos_w0,
+                1.0 - alpha,
+            ),
+            FilterType::LowPass => (
+                (1.0 - cos_w0) / 2.0,
+                1.0 - cos_w0,
+                (1.0 - cos_w0) / 2.0,
+                1.0 + alpha,
+                -2.0 * cos_w0,
+                1.0 - alpha,
+            ),
+        };
 
         // Normalise by a0
         Self {
@@ -125,9 +150,14 @@ impl EqProcessor {
     }
 }
 
-/// Build an [`EqProcessor`] from a slice of `EqBand`, or `None` if the slice is empty.
-pub fn build_eq(bands: &[EqBand], sample_rate: u32, n_channels: usize) -> Option<EqProcessor> {
-    if bands.is_empty() {
+/// Build an [`EqProcessor`] from a slice of `EqBand`, or `None` if the slice is empty or EQ is disabled.
+pub fn build_eq(
+    enabled: bool,
+    bands: &[EqBand],
+    sample_rate: u32,
+    n_channels: usize,
+) -> Option<EqProcessor> {
+    if !enabled || bands.is_empty() {
         return None;
     }
     Some(EqProcessor::new(bands, sample_rate, n_channels))

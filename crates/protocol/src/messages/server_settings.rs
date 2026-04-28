@@ -4,14 +4,29 @@ use crate::wire::{WireRead, WireWrite};
 use serde::{Deserialize, Serialize};
 use sonium_common::error::Result;
 
-/// A single biquad peaking-EQ band.
+/// Type of biquad filter.
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum FilterType {
+    /// Peaking EQ (bell filter)
+    Peaking,
+    /// High-pass filter
+    HighPass,
+    /// Low-pass filter
+    LowPass,
+}
+
+/// A single biquad EQ band.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
 pub struct EqBand {
-    /// Centre frequency in Hz (e.g. 100, 1000, 10000).
+    /// Type of filter.
+    pub filter_type: FilterType,
+    /// Centre or cutoff frequency in Hz.
     pub freq_hz: u32,
-    /// Gain in dB, clamped to [-12, +12] by the client DSP.
+    /// Gain in dB (only for Peaking filters).
     pub gain_db: f32,
-    /// Q-factor (bandwidth control), typically 0.5 – 2.0.
+    /// Q-factor (bandwidth control).
     pub q: f32,
 }
 
@@ -20,7 +35,7 @@ pub struct EqBand {
 /// The server sends this message immediately after accepting a [`super::Hello`]
 /// and can re-send it at any time to update the client's playback configuration.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
+#[serde(rename_all = "snake_case")]
 pub struct ServerSettings {
     /// Requested jitter buffer size in milliseconds.
     pub buffer_ms: i32,
@@ -34,6 +49,9 @@ pub struct ServerSettings {
     /// Optional per-client EQ bands (empty = flat, no DSP).
     #[serde(default)]
     pub eq_bands: Vec<EqBand>,
+    /// Whether the EQ is enabled.
+    #[serde(default)]
+    pub eq_enabled: bool,
 }
 
 impl Default for ServerSettings {
@@ -44,6 +62,7 @@ impl Default for ServerSettings {
             volume: 100,
             muted: false,
             eq_bands: vec![],
+            eq_enabled: false,
         }
     }
 }

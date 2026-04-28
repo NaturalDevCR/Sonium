@@ -4797,7 +4797,7 @@ dependencies = [
 
 [[package]]
 name = "sonium-client"
-version = "0.1.23"
+version = "0.1.24"
 dependencies = [
  "anyhow",
  "bytes",
@@ -4825,7 +4825,7 @@ dependencies = [
 
 [[package]]
 name = "sonium-codec"
-version = "0.1.23"
+version = "0.1.24"
 dependencies = [
  "audiopus",
  "bytes",
@@ -4841,7 +4841,7 @@ dependencies = [
 
 [[package]]
 name = "sonium-common"
-version = "0.1.23"
+version = "0.1.24"
 dependencies = [
  "anyhow",
  "serde",
@@ -4853,7 +4853,7 @@ dependencies = [
 
 [[package]]
 name = "sonium-control"
-version = "0.1.23"
+version = "0.1.24"
 dependencies = [
  "anyhow",
  "argon2",
@@ -4880,7 +4880,7 @@ dependencies = [
 
 [[package]]
 name = "sonium-protocol"
-version = "0.1.23"
+version = "0.1.24"
 dependencies = [
  "bytes",
  "serde",
@@ -4891,7 +4891,7 @@ dependencies = [
 
 [[package]]
 name = "sonium-server"
-version = "0.1.23"
+version = "0.1.24"
 dependencies = [
  "anyhow",
  "axum",
@@ -4922,7 +4922,7 @@ dependencies = [
 
 [[package]]
 name = "sonium-sync"
-version = "0.1.23"
+version = "0.1.24"
 dependencies = [
  "parking_lot",
  "rubato",

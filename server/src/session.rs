@@ -114,19 +114,21 @@ async fn session_loop(
         }
     }
 
-    let (init_vol, init_muted) = state.get_volume(client_id).unwrap_or((100, false));
+    let init_vol = state.get_volume(client_id).unwrap_or((100, false));
     let init_client = state.get_client(client_id);
     let init_latency = init_client.as_ref().map(|c| c.latency_ms).unwrap_or(0);
-    let init_eq_bands = init_client.map(|c| c.eq_bands).unwrap_or_default();
+    let init_eq_bands = init_client.as_ref().map(|c| c.eq_bands.clone()).unwrap_or_default();
+    let init_eq_enabled = init_client.as_ref().map(|c| c.eq_enabled).unwrap_or(true);
 
     // Send initial ServerSettings.
     send_server_settings(
         stream,
         buffer_ms,
-        init_vol,
-        init_muted,
+        init_vol.0,
+        init_vol.1,
         init_latency,
         init_eq_bands,
+        init_eq_enabled,
     )
     .await?;
 
@@ -223,8 +225,9 @@ async fn session_loop(
                     {
                         let c = state.get_client(client_id);
                         let lat = c.as_ref().map(|c| c.latency_ms).unwrap_or(0);
-                        let eq  = c.map(|c| c.eq_bands).unwrap_or_default();
-                        send_server_settings(stream, buffer_ms, volume, muted, lat, eq).await?;
+                        let eq  = c.as_ref().map(|c| c.eq_bands.clone()).unwrap_or_default();
+                        let en  = c.as_ref().map(|c| c.eq_enabled).unwrap_or(true);
+                        send_server_settings(stream, buffer_ms, volume, muted, lat, eq, en).await?;
                         debug!(%peer, volume, muted, "Volume settings pushed to client");
                     }
 
@@ -233,17 +236,18 @@ async fn session_loop(
                     {
                         let c = state.get_client(client_id);
                         let (vol, muted) = state.get_volume(client_id).unwrap_or((100, false));
-                        let eq = c.map(|c| c.eq_bands).unwrap_or_default();
-                        send_server_settings(stream, buffer_ms, vol, muted, latency_ms, eq).await?;
+                        let eq = c.as_ref().map(|c| c.eq_bands.clone()).unwrap_or_default();
+                        let en = c.as_ref().map(|c| c.eq_enabled).unwrap_or(true);
+                        send_server_settings(stream, buffer_ms, vol, muted, latency_ms, eq, en).await?;
                         debug!(%peer, latency_ms, "Latency settings pushed to client");
                     }
 
-                    Ok(Event::EqChanged { client_id: cid, eq_bands })
+                    Ok(Event::EqChanged { client_id: cid, eq_bands, enabled })
                         if cid == client_id =>
                     {
                         let (vol, muted) = state.get_volume(client_id).unwrap_or((100, false));
                         let lat = state.get_client(client_id).map(|c| c.latency_ms).unwrap_or(0);
-                        send_server_settings(stream, buffer_ms, vol, muted, lat, eq_bands).await?;
+                        send_server_settings(stream, buffer_ms, vol, muted, lat, eq_bands, enabled).await?;
                         debug!(%peer, "EQ settings pushed to client");
                     }
 
@@ -307,6 +311,7 @@ async fn send_server_settings(
     muted: bool,
     latency_ms: i32,
     eq_bands: Vec<sonium_protocol::messages::EqBand>,
+    eq_enabled: bool,
 ) -> anyhow::Result<()> {
     let settings = ServerSettings {
         buffer_ms: buffer_ms as i32,
@@ -314,6 +319,7 @@ async fn send_server_settings(
         volume,
         muted,
         eq_bands,
+        eq_enabled,
     };
     let mut hdr = MessageHeader::new(MessageType::ServerSettings, 0);
     hdr.id = next_id();

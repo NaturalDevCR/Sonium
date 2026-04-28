@@ -419,7 +419,7 @@ function editStream(s: any) {
   addSilence.value = !!s.silence_on_idle;
   
   // Meta handling
-  if (s.source.startsWith('meta://')) {
+  if (s.source?.startsWith('meta://')) {
     const list = s.source.replace('meta://', '').split(',');
     metaSources.value = list.filter((x: string) => x);
     selectType(sourceTypes.find(t => t.id === 'meta')!);
@@ -427,7 +427,7 @@ function editStream(s: any) {
   } else {
     // Try to find matching source type for others if they are simple
     // For now, if it's not meta, we use raw URI mode to be safe
-    rawUri.value = s.source;
+    rawUri.value = s.source || '';
     uriOverridden.value = true;
   }
   

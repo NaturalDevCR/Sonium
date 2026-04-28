@@ -66,6 +66,9 @@ pub struct ClientInfo {
     /// Per-client EQ bands (empty = flat).
     #[serde(default)]
     pub eq_bands: Vec<EqBand>,
+    /// Whether the EQ is enabled for this client.
+    #[serde(default)]
+    pub eq_enabled: bool,
 }
 
 impl ClientInfo {
@@ -94,7 +97,7 @@ pub struct Group {
     pub client_ids: Vec<String>,
 }
 
-// ── Stream ────────────────────────────────────────────────────────────────
+// ── Stream ───────────────────────────────────────────────────────────────
 
 /// An active audio stream.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -103,6 +106,7 @@ pub struct StreamInfo {
     pub display_name: Option<String>,
     pub codec: String,
     pub format: String,
+    pub source: String,
     pub status: StreamStatus,
 }
 
@@ -152,6 +156,7 @@ impl ServerState {
                 display_name: None,
                 codec: "opus".into(),
                 format: "48000Hz/16bit/2ch".into(),
+                source: "-".into(),
                 status: StreamStatus::Idle,
             },
         );
@@ -209,6 +214,7 @@ impl ServerState {
                 latency_ms: c.latency_ms,
                 group_id: c.group_id.clone(),
                 eq_bands: c.eq_bands.clone(),
+                eq_enabled: c.eq_enabled,
                 last_seen: Utc::now(),
             })
             .collect();
@@ -235,14 +241,7 @@ impl ServerState {
         // Restore settings from the last persisted snapshot for this client ID.
         let saved = self.saved_clients.iter().find(|c| c.id == id);
 
-        let (volume, muted, latency_ms, group_id, display_name, eq_bands): (
-            u8,
-            bool,
-            i32,
-            String,
-            Option<String>,
-            Vec<EqBand>,
-        ) = if let Some(s) = saved {
+        let (volume, muted, latency_ms, group_id, display_name, eq_bands, eq_enabled) = if let Some(s) = saved {
             (
                 s.volume,
                 s.muted,
@@ -250,9 +249,10 @@ impl ServerState {
                 s.group_id.clone(),
                 s.display_name.clone(),
                 s.eq_bands.clone(),
+                s.eq_enabled,
             )
         } else {
-            (100, false, 0, "default".into(), None, vec![])
+            (100, false, 0, "default".into(), None, vec![], false)
         };
 
         let info = ClientInfo {
@@ -271,6 +271,7 @@ impl ServerState {
             protocol_version,
             display_name,
             eq_bands,
+            eq_enabled,
         };
 
         // Place into the correct group (restored or default).
@@ -364,13 +365,15 @@ impl ServerState {
     }
 
     /// Update the EQ bands for a client and push to connected sessions.
-    pub fn set_eq(&self, client_id: &str, eq_bands: Vec<EqBand>) -> bool {
+    pub fn set_eq(&self, client_id: &str, eq_bands: Vec<EqBand>, enabled: bool) -> bool {
         let mut clients = self.clients.write();
         if let Some(c) = clients.get_mut(client_id) {
             c.eq_bands = eq_bands.clone();
+            c.eq_enabled = enabled;
             self.events.emit(crate::ws::Event::EqChanged {
                 client_id: client_id.into(),
                 eq_bands,
+                enabled,
             });
             drop(clients);
             self.persist();
@@ -584,10 +587,12 @@ impl ServerState {
         display_name: Option<String>,
         codec: impl Into<String>,
         format: impl Into<String>,
+        source: impl Into<String>,
     ) {
         let id = id.into();
         let codec = codec.into();
         let format = format.into();
+        let source = source.into();
         let mut streams = self.streams.write();
         streams
             .entry(id.clone())
@@ -595,12 +600,14 @@ impl ServerState {
                 stream.display_name = display_name.clone();
                 stream.codec = codec.clone();
                 stream.format = format.clone();
+                stream.source = source.clone();
             })
             .or_insert_with(|| StreamInfo {
                 id: id.clone(),
                 display_name,
                 codec,
                 format,
+                source,
                 status: StreamStatus::Idle,
             });
     }

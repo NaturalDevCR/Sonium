@@ -292,6 +292,7 @@ fn spawn_stream(
         stream_cfg.display_name.clone(),
         &stream_cfg.codec,
         format!("{}", stream_cfg.sample_format),
+        &stream_cfg.source,
     );
 
     let stream_id = stream_cfg.id.clone();
@@ -456,6 +457,7 @@ fn reload_config(
                     new_stream.display_name.clone(),
                     &new_stream.codec,
                     format!("{}", new_stream.sample_format),
+                    &new_stream.source,
                 );
                 report.unchanged.push(id.clone());
             }

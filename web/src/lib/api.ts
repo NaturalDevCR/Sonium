@@ -59,6 +59,7 @@ export interface Client {
   connected_at:     string;
   protocol_version: number;
   eq_bands?:        EqBand[];
+  eq_enabled?:      boolean;
 }
 
 export interface Group {
@@ -68,10 +69,13 @@ export interface Group {
   client_ids: string[];
 }
 
+export type FilterType = 'peaking' | 'high_pass' | 'low_pass';
+
 export interface EqBand {
-  freq_hz: number;
-  gain_db: number;
-  q:       number;
+  filter_type: FilterType;
+  freq_hz:     number;
+  gain_db:     number;
+  q:           number;
 }
 
 export interface Stream {
@@ -79,6 +83,7 @@ export interface Stream {
   display_name?: string | null;
   codec:        string;
   format:       string;
+  source:       string;
   status:       'playing' | 'idle' | 'error';
 }
 
@@ -147,7 +152,7 @@ export type Event =
   | { type: 'stream_status';       stream_id: string; status: string }
   | { type: 'heartbeat';           uptime_s: number }
   | { type: 'stream_level';        stream_id: string; rms_db: number }
-  | { type: 'eq_changed';          client_id: string; eq_bands: EqBand[] };
+  | { type: 'eq_changed';          client_id: string; eq_bands: EqBand[]; enabled: boolean };
 
 // ── HTTP helpers ──────────────────────────────────────────────────────────
 
@@ -251,8 +256,8 @@ export const api = {
   setClientName: (id: string, display_name: string | null) =>
     patch(`/clients/${id}/name`, { display_name }),
 
-  setEq:       (id: string, bands: EqBand[]) =>
-    patch(`/clients/${id}/eq`, { bands }),
+  setEq:       (id: string, bands: EqBand[], enabled: boolean) =>
+    patch(`/clients/${id}/eq`, { bands, enabled }),
 
   deleteClient: (id: string) => del(`/clients/${id}`),
 
