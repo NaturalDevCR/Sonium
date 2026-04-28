@@ -139,7 +139,7 @@ onMounted(async () => {
       
       <div class="flex items-center space-x-2 pointer-events-none">
         <span class="text-[10px] font-bold tracking-[0.2em] text-slate-400 uppercase">Sonium Agent</span>
-        <span class="text-[10px] text-slate-600 font-medium">v0.1.20</span>
+        <span class="text-[10px] text-slate-600 font-medium">v0.1.21</span>
       </div>
       <div class="w-16 h-full pointer-events-none"></div>
     </div>
@@ -310,7 +310,7 @@ onMounted(async () => {
     </div>
     
     <div class="h-8 bg-white/5 flex items-center justify-center px-4 shrink-0">
-      <span class="text-[9px] font-bold text-slate-600 uppercase tracking-[0.3em]">Ready to Stream • v0.1.20</span>
+      <span class="text-[9px] font-bold text-slate-600 uppercase tracking-[0.3em]">Ready to Stream • v0.1.21</span>
     </div>
   </div>
 </template>

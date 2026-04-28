@@ -421,7 +421,7 @@ function editStream(s: any) {
   // Meta handling
   if (s.source.startsWith('meta://')) {
     const list = s.source.replace('meta://', '').split(',');
-    metaSources.value = list.filter(x => x);
+    metaSources.value = list.filter((x: string) => x);
     selectType(sourceTypes.find(t => t.id === 'meta')!);
     uriOverridden.value = false;
   } else {
