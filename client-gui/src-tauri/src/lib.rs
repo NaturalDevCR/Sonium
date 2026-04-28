@@ -5,8 +5,9 @@ use std::collections::HashMap;
 use std::sync::Arc;
 use tauri::menu::{Menu, MenuItem, PredefinedMenuItem};
 use tauri::tray::{MouseButton, MouseButtonState, TrayIconBuilder, TrayIconEvent};
-use tauri::Manager;
-use tokio::sync::Mutex;
+use sonium_protocol::messages::HealthReport;
+use tauri::{Emitter, Manager};
+use tokio::sync::{mpsc, Mutex};
 
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct InstanceConfig {
@@ -144,9 +145,19 @@ async fn save_instances(
             };
 
             let server_addr = format!("{}:{}", cfg.server_host, cfg.server_port);
+            let (health_tx, mut health_rx) = mpsc::unbounded_channel::<HealthReport>();
+            let app_handle = app.clone();
+            let instance_id = config.id;
 
             let handle = tauri::async_runtime::spawn(async move {
-                let _ = controller::run(server_addr, cfg).await;
+                let _ = controller::run(server_addr, cfg, Some(health_tx)).await;
+            });
+
+            // Monitor health for this instance
+            tauri::async_runtime::spawn(async move {
+                while let Some(report) = health_rx.recv().await {
+                    let _ = app_handle.emit(&format!("health:{}", instance_id), report);
+                }
             });
 
             running.insert(config.id, handle);
@@ -182,6 +193,7 @@ async fn get_default_audio_device() -> Result<String, String> {
 #[tauri::command]
 async fn start_instance(
     state: tauri::State<'_, AppState>,
+    app: tauri::AppHandle,
     config: InstanceConfig,
 ) -> Result<(), String> {
     let mut instances = state.running_instances.lock().await;
@@ -206,9 +218,19 @@ async fn start_instance(
     };
 
     let server_addr = format!("{}:{}", cfg.server_host, cfg.server_port);
+    let (health_tx, mut health_rx) = mpsc::unbounded_channel::<HealthReport>();
+    let app_handle = app.clone();
+    let instance_id = config.id;
 
     let handle = tauri::async_runtime::spawn(async move {
-        let _ = controller::run(server_addr, cfg).await;
+        let _ = controller::run(server_addr, cfg, Some(health_tx)).await;
+    });
+
+    // Monitor health for this instance
+    tauri::async_runtime::spawn(async move {
+        while let Some(report) = health_rx.recv().await {
+            let _ = app_handle.emit(&format!("health:{}", instance_id), report);
+        }
     });
 
     instances.insert(config.id, handle);

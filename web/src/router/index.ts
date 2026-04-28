@@ -33,6 +33,7 @@ const router = createRouter({
         { path: 'streams',   name: 'admin-streams',   component: () => import('@/views/admin/StreamsTab.vue')   },
         { path: 'groups',    name: 'admin-groups',    component: () => import('@/views/admin/GroupsTab.vue')    },
         { path: 'clients',   name: 'admin-clients',   component: () => import('@/views/admin/ClientsTab.vue')   },
+        { path: 'health',    name: 'admin-health',    component: () => import('@/views/admin/HealthTab.vue')    },
         { path: 'system',    name: 'admin-system',    component: () => import('@/views/admin/SystemTab.vue')    },
         { path: 'config',    name: 'admin-config',    component: () => import('@/views/admin/ConfigTab.vue')    },
         { path: 'users',     name: 'admin-users',     component: () => import('@/views/admin/UsersTab.vue')     },

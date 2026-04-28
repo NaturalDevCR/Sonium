@@ -225,6 +225,7 @@ mod tests {
             (5, MessageType::Hello),
             (7, MessageType::ClientInfo),
             (8, MessageType::ErrorMsg),
+            (9, MessageType::HealthReport),
         ];
         for (raw, expected) in variants {
             let got = MessageType::try_from(raw).expect("should parse");
@@ -238,7 +239,7 @@ mod tests {
     fn unknown_type_returns_error() {
         // Type 6 is not assigned in the Sonium protocol
         assert!(MessageType::try_from(6u16).is_err());
-        assert!(MessageType::try_from(9u16).is_err());
+        assert!(MessageType::try_from(10u16).is_err());
         assert!(MessageType::try_from(u16::MAX).is_err());
     }
 
@@ -311,6 +312,7 @@ mod tests {
             MessageType::Hello,
             MessageType::ClientInfo,
             MessageType::ErrorMsg,
+            MessageType::HealthReport,
         ] {
             let hdr = MessageHeader::new(t, 0);
             let bytes = hdr.to_bytes();

@@ -16,13 +16,19 @@ use crate::decoder::ActiveDecoder;
 use crate::eq::build_eq;
 use crate::player::Player;
 
+use tokio::sync::mpsc;
+
 /// Main client loop — connects, syncs clock, decodes and plays audio.
 /// Auto-reconnects on disconnect with exponential backoff.
-pub async fn run(server_addr: String, cfg: ClientConfig) -> anyhow::Result<()> {
+pub async fn run(
+    server_addr: String,
+    cfg: ClientConfig,
+    health_tx: Option<mpsc::UnboundedSender<HealthReport>>,
+) -> anyhow::Result<()> {
     let mut backoff = Duration::from_millis(500);
 
     loop {
-        match connect_and_run(&server_addr, &cfg).await {
+        match connect_and_run(&server_addr, &cfg, health_tx.clone()).await {
             Ok(()) => {
                 info!("Disconnected cleanly");
             }
@@ -38,7 +44,11 @@ pub async fn run(server_addr: String, cfg: ClientConfig) -> anyhow::Result<()> {
     }
 }
 
-async fn connect_and_run(addr: &str, cfg: &ClientConfig) -> anyhow::Result<()> {
+async fn connect_and_run(
+    addr: &str,
+    cfg: &ClientConfig,
+    health_tx: Option<mpsc::UnboundedSender<HealthReport>>,
+) -> anyhow::Result<()> {
     let mut stream = TcpStream::connect(addr).await?;
     stream.set_nodelay(true)?;
     info!(%addr, "Connected to server (TCP_NODELAY=true)");
@@ -107,11 +117,14 @@ async fn connect_and_run(addr: &str, cfg: &ClientConfig) -> anyhow::Result<()> {
                         muted    = ss.muted;
                         eq_bands = ss.eq_bands;
                         eq_enabled = ss.eq_enabled;
+                        if let Some(buf) = sync_buf.as_mut() {
+                            buf.set_target_latency_ms(ss.buffer_ms as u32);
+                        }
                         if let Some(dec) = decoder.as_ref() {
                             let fmt = dec.sample_format();
                             eq_processor = build_eq(eq_enabled, &eq_bands, fmt.rate, fmt.channels as usize);
                         }
-                        debug!(volume = ss.volume, muted = ss.muted, buffer_ms = ss.buffer_ms, "ServerSettings");
+                        debug!(volume = ss.volume, muted = ss.muted, buffer_ms = ss.buffer_ms, "ServerSettings applied");
                     }
 
                     MessageType::WireChunk => {
@@ -128,10 +141,10 @@ async fn connect_and_run(addr: &str, cfg: &ClientConfig) -> anyhow::Result<()> {
                             let playout_us = chunk.timestamp.to_micros()
                                 + cfg.latency_ms as i64 * 1000;
 
-                            buf.push(PcmChunk::new(playout_us, samples, dec.sample_format()));
+                            let now = now_us();
+                            buf.push(PcmChunk::new(playout_us, samples, dec.sample_format()), now);
 
                             // Drain buffer for any chunks ready to play
-                            let now = now_us();
                             while let Some(c) = buf.pop_ready(time_provider.to_server_time(now)) {
                                 pl.write(&c.samples)?;
                             }
@@ -181,11 +194,15 @@ async fn connect_and_run(addr: &str, cfg: &ClientConfig) -> anyhow::Result<()> {
                         overruns,
                         stale,
                         depth,
-                        0, // Jitter estimation could be added later
+                        (buf.jitter_us() / 1000) as u32,
                         (time_provider.offset_us() / 1000) as i32,
                     );
-                    let msg = Message::HealthReport(report).encode();
+                    let msg = Message::HealthReport(report.clone()).encode();
                     let _ = stream.write_all(&msg).await;
+
+                    if let Some(ref tx) = health_tx {
+                        let _ = tx.send(report);
+                    }
                 }
             }
         }

@@ -25,6 +25,7 @@ const nav = [
   { name: 'matrix',          icon: 'mdi-grid',                  label: 'Matrix'    },
   { name: 'admin-groups',    icon: 'mdi-speaker-multiple',      label: 'Groups'    },
   { name: 'admin-clients',   icon: 'mdi-devices',               label: 'Clients'   },
+  { name: 'admin-health',    icon: 'mdi-pulse',                 label: 'Observability' },
   { name: 'admin-system',    icon: 'mdi-toolbox-outline',        label: 'System'    },
   { name: 'admin-config',    icon: 'mdi-code-braces',            label: 'Config'    },
   { name: 'admin-users',     icon: 'mdi-account-multiple-outline', label: 'Users'   },

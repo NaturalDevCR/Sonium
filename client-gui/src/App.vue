@@ -1,6 +1,7 @@
 <script setup lang="ts">
 import { ref, onMounted, computed } from 'vue';
 import { invoke } from '@tauri-apps/api/core';
+import { listen } from '@tauri-apps/api/event';
 import { enable, isEnabled, disable } from '@tauri-apps/plugin-autostart';
 
 interface InstanceConfig {
@@ -20,6 +21,9 @@ const autostart = ref(false);
 const editingInstance = ref<InstanceConfig | null>(null);
 const localIp = ref('');
 const scanning = ref(false);
+
+const healthState = ref<Record<number, { lastSeen: number, connected: boolean }>>({});
+const APP_VERSION = 'v0.1.33';
 
 const localSubnet = computed(() => {
   if (!localIp.value) return '';
@@ -128,6 +132,28 @@ onMounted(async () => {
   await fetchAudioDevices();
   await loadInstances();
   await checkAutostart();
+
+  // Listen for health updates from all instances
+  await listen('health:*', (event) => {
+    // Event names are formatted as health:ID
+    const id = parseInt(event.event.split(':')[1]);
+    if (!isNaN(id)) {
+      healthState.value[id] = {
+        lastSeen: Date.now(),
+        connected: true
+      };
+    }
+  });
+
+  // Periodically check for stale connections
+  setInterval(() => {
+    const now = Date.now();
+    for (const id in healthState.value) {
+      if (now - healthState.value[id].lastSeen > 5000) {
+        healthState.value[id].connected = false;
+      }
+    }
+  }, 2000);
 });
 </script>
 
@@ -145,7 +171,7 @@ onMounted(async () => {
       >
         <div class="flex items-center space-x-2 pointer-events-none">
           <span class="text-[10px] font-bold tracking-[0.2em] text-slate-400 uppercase">Sonium Agent</span>
-          <span class="text-[10px] text-slate-600 font-medium">v0.1.22</span>
+          <span class="text-[10px] text-slate-600 font-medium">{{ APP_VERSION }}</span>
         </div>
       </div>
       
@@ -211,7 +237,21 @@ onMounted(async () => {
               />
             </button>
             <div>
-              <h3 class="font-bold text-slate-200 group-hover:text-white transition-colors">{{ instance.name }}</h3>
+              <div class="flex items-center space-x-2">
+                <h3 class="font-bold text-slate-200 group-hover:text-white transition-colors">{{ instance.name }}</h3>
+                <div 
+                  v-if="instance.enabled"
+                  class="flex items-center"
+                >
+                  <span 
+                    class="w-1.5 h-1.5 rounded-full mr-1.5"
+                    :class="healthState[instance.id]?.connected ? 'bg-emerald-500 animate-pulse' : 'bg-red-500'"
+                  ></span>
+                  <span class="text-[9px] font-bold uppercase tracking-widest" :class="healthState[instance.id]?.connected ? 'text-emerald-500/70' : 'text-red-500/70'">
+                    {{ healthState[instance.id]?.connected ? 'Connected' : 'Offline' }}
+                  </span>
+                </div>
+              </div>
               <div class="flex items-center space-x-2 mt-0.5">
                 <span class="text-[10px] font-mono text-slate-500 bg-white/5 px-1.5 py-0.5 rounded">{{ instance.server_host }}:{{ instance.server_port }}</span>
                 <span class="text-[10px] text-slate-600">•</span>
@@ -318,7 +358,7 @@ onMounted(async () => {
     </div>
     
     <div class="h-8 bg-white/5 flex items-center justify-center px-4 shrink-0">
-      <span class="text-[9px] font-bold text-slate-600 uppercase tracking-[0.3em]">Ready to Stream • v0.1.22</span>
+      <span class="text-[9px] font-bold text-slate-600 uppercase tracking-[0.3em]">Ready to Stream • {{ APP_VERSION }}</span>
     </div>
   </div>
 </template>

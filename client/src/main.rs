@@ -139,7 +139,7 @@ async fn main() -> anyhow::Result<()> {
         "Sonium client starting"
     );
 
-    controller::run(server_addr, cfg)
+    controller::run(server_addr, cfg, None)
         .await
         .context("client controller error")
 }
