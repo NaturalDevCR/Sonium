@@ -36,6 +36,51 @@ fn config_path(app_handle: &tauri::AppHandle) -> std::path::PathBuf {
 }
 
 #[tauri::command]
+async fn scan_subnet() -> Result<Vec<String>, String> {
+    let local_ip = local_ip_address::local_ip().map_err(|e| e.to_string())?;
+    if !local_ip.is_ipv4() {
+        return Err("Only IPv4 subnet scanning is supported".into());
+    }
+    let ip_str = local_ip.to_string();
+    let parts: Vec<&str> = ip_str.split('.').collect();
+    if parts.len() != 4 {
+        return Err("Invalid local IP".into());
+    }
+    let base = format!("{}.{}.{}", parts[0], parts[1], parts[2]);
+    
+    let mut tasks = Vec::new();
+    for i in 1..255 {
+        let target_ip = format!("{}.{}", base, i);
+        tasks.push(tokio::spawn(async move {
+            let addr = format!("{}:1710", target_ip);
+            // 500ms timeout for scanning
+            match tokio::time::timeout(
+                tokio::time::Duration::from_millis(500),
+                tokio::net::TcpStream::connect(&addr)
+            ).await {
+                Ok(Ok(_)) => Some(target_ip),
+                _ => None,
+            }
+        }));
+    }
+    
+    let mut found = Vec::new();
+    for task in tasks {
+        if let Ok(Some(ip)) = task.await {
+            found.push(ip);
+        }
+    }
+    Ok(found)
+}
+
+#[tauri::command]
+async fn get_local_ip() -> Result<String, String> {
+    local_ip_address::local_ip()
+        .map(|ip| ip.to_string())
+        .map_err(|e| e.to_string())
+}
+
+#[tauri::command]
 async fn get_instances(app: tauri::AppHandle) -> Result<Vec<InstanceConfig>, String> {
     let path = config_path(&app);
     if path.exists() {
@@ -194,7 +239,9 @@ pub fn run() {
             get_audio_devices,
             get_default_audio_device,
             start_instance,
-            stop_instance
+            stop_instance,
+            get_local_ip,
+            scan_subnet
         ])
         .setup(|app| {
             #[cfg(target_os = "macos")]
@@ -249,6 +296,13 @@ pub fn run() {
                 .build(app)?;
 
             Ok(())
+        })
+        .on_window_event(|window, event| match event {
+            tauri::WindowEvent::CloseRequested { api, .. } => {
+                window.hide().unwrap();
+                api.prevent_close();
+            }
+            _ => {}
         })
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

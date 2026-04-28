@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { ref, onMounted } from 'vue';
+import { ref, onMounted, computed } from 'vue';
 import { invoke } from '@tauri-apps/api/core';
 import { enable, isEnabled, disable } from '@tauri-apps/plugin-autostart';
 
@@ -18,6 +18,35 @@ const audioDevices = ref<string[]>([]);
 const autostart = ref(false);
 
 const editingInstance = ref<InstanceConfig | null>(null);
+const localIp = ref('');
+const scanning = ref(false);
+
+const localSubnet = computed(() => {
+  if (!localIp.value) return '';
+  return localIp.value.split('.').slice(0, 3).join('.');
+});
+
+async function fetchLocalIp() {
+  try {
+    localIp.value = await invoke('get_local_ip');
+  } catch (e) {
+    console.error("Failed to fetch local IP", e);
+  }
+}
+
+async function startScan() {
+  scanning.value = true;
+  try {
+    const found = await invoke<string[]>('scan_subnet');
+    if (found.length > 0 && editingInstance.value) {
+      editingInstance.value.server_host = found[0];
+    }
+  } catch (e) {
+    console.error("Scan failed", e);
+  } finally {
+    scanning.value = false;
+  }
+}
 
 async function loadInstances() {
   instances.value = await invoke('get_instances');
@@ -63,8 +92,8 @@ function addInstance() {
   editingInstance.value = {
     id: Date.now() >>> 0,
     name: `Instance ${instances.value.length + 1}`,
-    server_host: '127.0.0.1',
-    server_port: 7331,
+    server_host: localIp.value || '127.0.0.1',
+    server_port: 1710,
     device: null,
     latency_ms: 0,
     enabled: true,
@@ -94,7 +123,7 @@ function cancelEdit() {
   editingInstance.value = null;
 }
 
-onMounted(async () => {
+  await fetchLocalIp();
   await fetchAudioDevices();
   await loadInstances();
   await checkAutostart();
@@ -215,8 +244,26 @@ onMounted(async () => {
 
           <div class="grid grid-cols-3 gap-4">
             <div class="col-span-2">
-              <label class="block text-[10px] font-black text-slate-500 uppercase tracking-[0.2em] mb-2 ml-1">Server Host</label>
-              <input v-model="editingInstance.server_host" type="text" class="w-full bg-white/5 border border-white/5 rounded-xl p-3 text-sm text-white focus:border-indigo-500 outline-none transition-all" placeholder="127.0.0.1" />
+              <label class="block text-xs font-semibold text-slate-400 uppercase tracking-wider mb-1">Server Host</label>
+              <div class="flex gap-2">
+                <input 
+                  v-model="editingInstance.server_host" 
+                  type="text" 
+                  class="w-full bg-slate-900/50 border border-slate-700 rounded-lg px-4 py-2.5 text-white focus:outline-none focus:border-indigo-500 transition-colors"
+                  placeholder="e.g. 192.168.1.50"
+                />
+                <button 
+                  @click="startScan"
+                  :disabled="scanning"
+                  class="px-3 bg-indigo-600 hover:bg-indigo-500 disabled:bg-slate-700 text-white rounded-lg transition-all flex items-center justify-center min-w-[80px]"
+                >
+                  <span v-if="scanning" class="animate-spin mr-1">◌</span>
+                  {{ scanning ? '...' : 'Scan' }}
+                </button>
+              </div>
+              <p v-if="localIp" class="text-[10px] text-slate-500 mt-1">
+                Your IP: {{ localIp }} • Suggested subnet: {{ localSubnet }}.0/24
+              </p>
             </div>
             <div>
               <label class="block text-[10px] font-black text-slate-500 uppercase tracking-[0.2em] mb-2 ml-1">Port</label>

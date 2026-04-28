@@ -97,8 +97,13 @@ async fn main() -> anyhow::Result<()> {
         .compact()
         .init();
 
+    let local_ip = local_ip_address::local_ip()
+        .map(|ip| ip.to_string())
+        .unwrap_or_else(|_| "unknown".into());
+
     info!(
         version = env!("CARGO_PKG_VERSION"),
+        local_ip = local_ip,
         stream_port = cfg.server.stream_port,
         control_port = cfg.server.control_port,
         streams = cfg.streams.len(),

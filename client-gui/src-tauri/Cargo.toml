@@ -1,6 +1,6 @@
 [package]
 name = "client-gui"
-version = "0.1.18"
+version = "0.1.19"
 description = "A Tauri App"
 authors = ["you"]
 edition = "2021"
@@ -27,6 +27,7 @@ tokio = { version = "1.37.0", features = ["full"] }
 cpal = "0.15.3"
 anyhow = "1.0.81"
 dirs = "5.0.1"
+local-ip-address = "0.6.1"
 
 sonium-control = { path = "../../crates/control" }
 sonium-common = { path = "../../crates/common" }

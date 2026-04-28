@@ -1,7 +1,7 @@
 {
   "$schema": "https://schema.tauri.app/config/2",
   "productName": "Sonium",
-  "version": "0.1.18",
+  "version": "0.1.19",
   "identifier": "com.sonium.desktop",
   "build": {
     "beforeDevCommand": "npm run dev",
@@ -19,8 +19,14 @@
         "visible": true,
         "label": "main",
         "decorations": true,
+        "transparent": true,
         "titleBarStyle": "hidden",
-        "vibrancy": "under-window"
+        "windowEffects": {
+          "effects": [
+            "windowBackground"
+          ],
+          "state": "active"
+        }
       }
     ],
     "security": {
