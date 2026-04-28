@@ -142,10 +142,11 @@ async fn connect_and_run(
                                 + cfg.latency_ms as i64 * 1000;
 
                             let now = now_us();
-                            buf.push(PcmChunk::new(playout_us, samples, dec.sample_format()), now);
+                            let now_server = time_provider.to_server_time(now);
+                            buf.push(PcmChunk::new(playout_us, samples, dec.sample_format()), now_server);
 
                             // Drain buffer for any chunks ready to play
-                            while let Some(c) = buf.pop_ready(time_provider.to_server_time(now)) {
+                            while let Some(c) = buf.pop_ready(now_server) {
                                 pl.write(&c.samples)?;
                             }
                         }

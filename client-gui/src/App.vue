@@ -146,7 +146,7 @@ onMounted(async () => {
   setInterval(() => {
     const now = Date.now();
     for (const id in healthState.value) {
-      if (now - healthState.value[id].lastSeen > 5000) {
+      if (now - healthState.value[id].lastSeen > 10000) {
         healthState.value[id].connected = false;
       }
     }
