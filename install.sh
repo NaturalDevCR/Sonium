@@ -66,6 +66,26 @@ warn() { printf '  \033[33m!!\033[0m %s\n' "$*"; }
 ok() { printf '  \033[32mOK\033[0m %s\n' "$*"; }
 die() { printf '  \033[31mERR\033[0m %s\n' "$*" >&2; exit 1; }
 
+run_as_user() {
+  local user="$1"
+  shift
+
+  if [[ "${EUID}" -ne 0 ]]; then
+    "$@"
+    return
+  fi
+
+  if command -v runuser >/dev/null 2>&1; then
+    runuser -u "${user}" -- "$@"
+  elif command -v sudo >/dev/null 2>&1; then
+    sudo -u "${user}" "$@"
+  elif command -v su >/dev/null 2>&1; then
+    su -s /bin/sh -c "$(printf '%q ' "$@")" "${user}"
+  else
+    return 1
+  fi
+}
+
 if [[ "$(uname)" == "Darwin" && "${UNINSTALL}" == "false" ]]; then
   warn "You are running this on macOS. We recommend using the native Sonium Desktop Agent instead."
   warn "The Desktop Agent provides a premium tray-based GUI and automatic audio device management."
@@ -326,7 +346,11 @@ EOF
   fi
 
   if [[ -n "${GEN_PASS:-}" ]]; then
-    sudo -u "${SONIUM_USER}" "${BIN_DIR}/sonium-server" --config "${CONF_DIR}/sonium.toml" --init-admin "${GEN_PASS}" >/dev/null 2>&1 || true
+    if run_as_user "${SONIUM_USER}" "${BIN_DIR}/sonium-server" --config "${CONF_DIR}/sonium.toml" --init-admin "${GEN_PASS}" >/dev/null 2>&1; then
+      ok "Initialized default admin credentials"
+    else
+      warn "Could not initialize default admin credentials automatically"
+    fi
   fi
 
   if [[ "${INSTALL_SERVICE}" == "true" && -d /run/systemd/system && -x "$(command -v systemctl)" ]]; then

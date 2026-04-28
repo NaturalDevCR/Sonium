@@ -4,7 +4,6 @@ import { useServerStore } from '@/stores/server';
 import { useAuthStore }   from '@/stores/auth';
 import { api }            from '@/lib/api';
 import StreamBadge        from '@/components/StreamBadge.vue';
-import EqControl          from '@/components/EqControl.vue';
 import { parse, stringify } from 'smol-toml';
 
 const store = useServerStore();
@@ -330,8 +329,6 @@ const addInfo    = ref('');
 const saving     = ref(false);
 const isEditMode = ref(false);
 const editIdOriginal = ref('');
-const editingEqStreamId = ref<string | null>(null);
-
 // Raw URI — stays in sync with computed, can be manually overridden.
 const rawUri         = ref('');
 const uriOverridden  = ref(false);
@@ -528,11 +525,6 @@ async function submitAdd() {
         </div>
         <div class="flex items-center gap-4">
           <StreamBadge :status="s.status" :codec="s.codec" />
-          <button v-if="auth.isAdmin" @click="editingEqStreamId = s.id" 
-                  class="p-2 rounded-lg text-slate-500 hover:text-white hover:bg-white/5 transition-colors"
-                  title="Equalizer">
-            <span class="mdi mdi-tune"></span>
-          </button>
           <button v-if="auth.isAdmin" @click="editStream(s)" 
                   class="p-2 rounded-lg text-slate-500 hover:text-white hover:bg-white/5 transition-colors"
                   title="Edit stream">
@@ -873,12 +865,6 @@ async function submitAdd() {
         </div>
       </div>
     </Teleport>
-
-    <EqControl
-      v-if="editingEqStreamId"
-      :stream-id="editingEqStreamId"
-      @close="editingEqStreamId = null"
-    />
   </div>
 </template>
 

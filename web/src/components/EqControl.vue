@@ -32,7 +32,7 @@
         v-for="(band, idx) in bands" 
         :key="idx"
         class="eq-node"
-        :class="[`eq-node-${idx}`, { 'eq-node-active': activeBand === idx }]"
+        :class="[`eq-node-${idx}`, { 'eq-node-active': activeBand === idx, 'eq-node-disabled': !band.enabled }]"
         :style="getNodeStyle(band)"
         @mousedown="startDrag(idx, $event)"
         @touchstart="startDrag(idx, $event)"
@@ -47,19 +47,32 @@
         v-for="(band, idx) in bands" 
         :key="idx" 
         class="band-strip"
-        :class="{ 'band-strip-active': activeBand === idx }"
+        :class="{ 'band-strip-active': activeBand === idx, 'band-strip-disabled': !band.enabled }"
         @mouseenter="activeBand = idx"
       >
         <div class="band-header">
-          <span class="band-number">{{ idx + 1 }}</span>
+          <div class="flex items-center gap-2">
+            <button 
+              class="band-toggle-mini" 
+              :class="{ 'band-toggle-mini-on': band.enabled }"
+              @click="band.enabled = !band.enabled; update()"
+              :title="band.enabled ? 'Bypass Band' : 'Enable Band'"
+            >
+              <span class="mdi" :class="band.enabled ? 'mdi-power' : 'mdi-power-off'"></span>
+            </button>
+            <span class="band-number">{{ idx + 1 }}</span>
+          </div>
           <select 
             v-model="band.filter_type" 
             class="band-type-select"
             @change="update"
           >
             <option value="peaking">Peak</option>
+            <option value="low_shelf">Low Shelf</option>
+            <option value="high_shelf">High Shelf</option>
             <option value="high_pass">HPF</option>
             <option value="low_pass">LPF</option>
+            <option value="notch">Notch</option>
           </select>
         </div>
 
@@ -72,10 +85,10 @@
             </div>
           </div>
           
-          <div class="param" v-if="band.filter_type === 'peaking'">
+          <div class="param" v-if="['peaking', 'low_shelf', 'high_shelf'].includes(band.filter_type)">
             <label>Gain</label>
             <div class="value-input">
-              <input type="number" v-model.number="band.gain_db" min="-18" max="18" step="0.1" @change="update" />
+              <input type="number" v-model.number="band.gain_db" min="-24" max="24" step="0.1" @change="update" />
               <span>dB</span>
             </div>
           </div>
@@ -93,8 +106,8 @@
 </template>
 
 <script setup lang="ts">
-import { ref, watch, onMounted, onUnmounted, computed } from 'vue';
-import type { EqBand, FilterType } from '@/lib/api';
+import { ref, watch, onMounted, onUnmounted, nextTick } from 'vue';
+import type { EqBand } from '@/lib/api';
 import { useServerStore } from '@/stores/server';
 
 const props = defineProps<{
@@ -115,12 +128,13 @@ const bands = ref<EqBand[]>([]);
 const activeBand = ref<number | null>(null);
 const plotCanvas = ref<HTMLCanvasElement | null>(null);
 const plotContainer = ref<HTMLDivElement | null>(null);
+let resizeObserver: ResizeObserver | null = null;
 
 const DEFAULT_BANDS: EqBand[] = [
-  { filter_type: 'peaking', freq_hz: 100,   gain_db: 0, q: 1.0 },
-  { filter_type: 'peaking', freq_hz: 500,   gain_db: 0, q: 1.0 },
-  { filter_type: 'peaking', freq_hz: 2000,  gain_db: 0, q: 1.0 },
-  { filter_type: 'peaking', freq_hz: 8000,  gain_db: 0, q: 1.0 },
+  { filter_type: 'peaking', freq_hz: 100,   gain_db: 0, q: 1.0, enabled: true },
+  { filter_type: 'peaking', freq_hz: 500,   gain_db: 0, q: 1.0, enabled: true },
+  { filter_type: 'peaking', freq_hz: 2000,  gain_db: 0, q: 1.0, enabled: true },
+  { filter_type: 'peaking', freq_hz: 8000,  gain_db: 0, q: 1.0, enabled: true },
 ];
 
 // Initialize bands from props
@@ -141,27 +155,39 @@ watch(() => props.modelValue, () => {
   // Only update if external value is different and not currently dragging
   if (!isDragging.value) {
     initBands();
+    scheduleRender({ recalculateCurve: true });
   }
 }, { deep: true });
 
-onMounted(() => {
+watch(() => props.enabled, () => {
+  scheduleRender();
+});
+
+onMounted(async () => {
   initBands();
-  setTimeout(() => {
-    recalculateCurve();
-    startAnimation();
-  }, 100); // Wait for layout
+  await nextTick();
+  if (plotContainer.value && typeof ResizeObserver !== 'undefined') {
+    resizeObserver = new ResizeObserver(() => {
+      scheduleRender({ recalculateCurve: true });
+    });
+    resizeObserver.observe(plotContainer.value);
+  }
+  scheduleRender({ recalculateCurve: true });
+  startAnimation();
 });
 
 onUnmounted(() => {
   stopAnimation();
+  stopDrag();
+  resizeObserver?.disconnect();
+  if (renderFrameId !== null) cancelAnimationFrame(renderFrameId);
+  if (dragFrameId !== null) cancelAnimationFrame(dragFrameId);
 });
 
 // ── Update Logic ──────────────────────────────────────────────────────────
 
 const update = () => {
-  emit('update:modelValue', bands.value.map(b => ({ ...b })));
-  recalculateCurve();
-  draw();
+  scheduleRender({ emitModel: true, recalculateCurve: true });
 };
 
 const reset = () => {
@@ -173,6 +199,8 @@ const reset = () => {
 
 const isDragging = ref(false);
 const dragIdx = ref(-1);
+let dragFrameId: number | null = null;
+let pendingDragPosition: { clientX: number; clientY: number } | null = null;
 
 const startDrag = (idx: number, e: MouseEvent | TouchEvent) => {
   isDragging.value = true;
@@ -189,37 +217,50 @@ const startDrag = (idx: number, e: MouseEvent | TouchEvent) => {
 
 const handleDrag = (e: MouseEvent | TouchEvent) => {
   if (!isDragging.value || !plotContainer.value) return;
-  
-  const rect = plotContainer.value.getBoundingClientRect();
+
   const clientX = 'touches' in e ? e.touches[0].clientX : e.clientX;
   const clientY = 'touches' in e ? e.touches[0].clientY : e.clientY;
-  
-  const x = Math.max(0, Math.min(1, (clientX - rect.left) / rect.width));
-  const y = Math.max(0, Math.min(1, (clientY - rect.top) / rect.height));
-  
-  // Frequency: Logarithmic scale 20Hz - 20kHz
-  const minF = Math.log10(20);
-  const maxF = Math.log10(20000);
-  const freq = Math.pow(10, minF + x * (maxF - minF));
-  
-  const band = bands.value[dragIdx.value];
-  band.freq_hz = Math.round(freq);
-  
-  if (band.filter_type === 'peaking') {
-    // Gain: linear +/- 18dB
-    band.gain_db = Math.round((0.5 - y) * 36 * 10) / 10;
+
+  pendingDragPosition = { clientX, clientY };
+  if (dragFrameId === null) {
+    dragFrameId = requestAnimationFrame(() => {
+      dragFrameId = null;
+      applyPendingDrag();
+    });
   }
-  
-  update();
+  e.preventDefault();
 };
 
 const stopDrag = () => {
   isDragging.value = false;
   dragIdx.value = -1;
+  pendingDragPosition = null;
   window.removeEventListener('mousemove', handleDrag);
   window.removeEventListener('mouseup', stopDrag);
   window.removeEventListener('touchmove', handleDrag);
   window.removeEventListener('touchend', stopDrag);
+};
+
+const applyPendingDrag = () => {
+  if (!isDragging.value || !plotContainer.value || !pendingDragPosition) return;
+
+  const rect = plotContainer.value.getBoundingClientRect();
+  const x = Math.max(0, Math.min(1, (pendingDragPosition.clientX - rect.left) / rect.width));
+  const y = Math.max(0, Math.min(1, (pendingDragPosition.clientY - rect.top) / rect.height));
+
+  const minF = Math.log10(20);
+  const maxF = Math.log10(20000);
+  const freq = Math.pow(10, minF + x * (maxF - minF));
+
+  const band = bands.value[dragIdx.value];
+  if (!band) return;
+  band.freq_hz = Math.round(freq);
+
+  if (['peaking', 'low_shelf', 'high_shelf'].includes(band.filter_type)) {
+    band.gain_db = Math.round((0.5 - y) * 48 * 10) / 10;
+  }
+
+  update();
 };
 
 // ── Plot Geometry ─────────────────────────────────────────────────────────
@@ -231,9 +272,22 @@ const freqToX = (f: number, width: number) => {
 };
 
 const gainToY = (g: number, height: number) => {
-  // Range +/- 18dB
-  const range = 18;
+  // Range +/- 24dB for visualization
+  const range = 24;
   return height / 2 - (g / range) * (height / 2);
+};
+
+// Pre-calculate frequency map for the curve to avoid Math.pow/log in the loop
+let frequencyMap: number[] = [];
+const updateFrequencyMap = (width: number) => {
+  const map = [];
+  const minF = Math.log10(20);
+  const maxF = Math.log10(20000);
+  for (let x = 0; x <= width; x += 6) { // Increased step to 6
+    const ratio = x / width;
+    map.push(Math.pow(10, minF + ratio * (maxF - minF)));
+  }
+  frequencyMap = map;
 };
 
 const getNodeStyle = (band: EqBand) => {
@@ -242,7 +296,8 @@ const getNodeStyle = (band: EqBand) => {
   const height = plotContainer.value.clientHeight;
   
   const x = freqToX(band.freq_hz, width);
-  const y = band.filter_type === 'peaking' ? gainToY(band.gain_db, height) : height / 2;
+  const hasGain = ['peaking', 'low_shelf', 'high_shelf'].includes(band.filter_type);
+  const y = hasGain ? gainToY(band.gain_db, height) : height / 2;
   
   return {
     left: `${x}px`,
@@ -253,44 +308,84 @@ const getNodeStyle = (band: EqBand) => {
 // ── Drawing Logic ─────────────────────────────────────────────────────────
 
 // Pre-calculate curve points to avoid heavy math in draw loop
-const curvePoints = ref<{x: number, y: number}[]>([]);
+// Non-reactive state for high-frequency updates
+let curvePoints: {x: number, y: number}[] = [];
+let rmsHistory: number[] = new Array(40).fill(-90);
 const sampleRate = 44100;
+let renderFrameId: number | null = null;
+let renderNeedsCurve = false;
+let renderNeedsEmit = false;
+
+// Grid cache
+let gridCanvas: HTMLCanvasElement | null = null;
 
 const recalculateCurve = () => {
   if (!plotContainer.value) return;
   const width = plotContainer.value.clientWidth;
   const height = plotContainer.value.clientHeight;
+  
+  if (frequencyMap.length === 0 || frequencyMap.length !== Math.floor(width / 6) + 1) {
+    updateFrequencyMap(width);
+  }
+
   const points: {x: number, y: number}[] = [];
   
-  for (let x = 0; x <= width; x += 3) { // Increased step to 3 for better performance
-    const ratio = x / width;
-    const minF = Math.log10(20);
-    const maxF = Math.log10(20000);
-    const f = Math.pow(10, minF + ratio * (maxF - minF));
-    
+  // Pre-calculate band coefficients once
+  const activeBands = bands.value
+    .filter(b => b.enabled)
+    .map(b => getCoefficients(b, sampleRate))
+    .filter(Boolean);
+
+  frequencyMap.forEach((f, i) => {
+    const x = i * 6;
     let totalGain = 0;
-    bands.value.forEach(b => {
-      totalGain += getMagnitude(f, sampleRate, b);
+    activeBands.forEach(coeffs => {
+      totalGain += getMagnitudeFromCoeffs(f, sampleRate, coeffs);
     });
-    
     points.push({ x, y: gainToY(totalGain, height) });
+  });
+  
+  curvePoints = points;
+};
+
+const flushRender = () => {
+  renderFrameId = null;
+
+  if (renderNeedsCurve) {
+    recalculateCurve();
+    renderNeedsCurve = false;
   }
-  curvePoints.value = points;
+
+  if (renderNeedsEmit) {
+    emit('update:modelValue', bands.value.map(b => ({ ...b })));
+    renderNeedsEmit = false;
+  }
+
+  draw();
+};
+
+const scheduleRender = (options: { emitModel?: boolean; recalculateCurve?: boolean } = {}) => {
+  renderNeedsEmit ||= options.emitModel ?? false;
+  renderNeedsCurve ||= options.recalculateCurve ?? false;
+
+  if (renderFrameId !== null) return;
+  renderFrameId = requestAnimationFrame(flushRender);
 };
 
 let animationId: number | null = null;
-const rmsHistory = ref<number[]>(new Array(40).fill(-90));
 
 const startAnimation = () => {
   let lastRtaUpdate = 0;
   const loop = (timestamp: number) => {
-    // Throttled RTA update (30fps is enough for visualizer)
-    if (timestamp - lastRtaUpdate > 33) {
+    if (!animationId) return;
+
+    // Throttled RTA update (12fps is enough and even lighter)
+    if (timestamp - lastRtaUpdate > 80) {
       const currentRms = getStreamRms();
-      rmsHistory.value.push(currentRms);
-      if (rmsHistory.value.length > 40) rmsHistory.value.shift();
+      rmsHistory.push(currentRms);
+      if (rmsHistory.length > 40) rmsHistory.shift();
       lastRtaUpdate = timestamp;
-      draw();
+      scheduleRender();
     }
     animationId = requestAnimationFrame(loop);
   };
@@ -299,6 +394,7 @@ const startAnimation = () => {
 
 const stopAnimation = () => {
   if (animationId) cancelAnimationFrame(animationId);
+  animationId = null;
 };
 
 const getStreamRms = () => {
@@ -306,13 +402,11 @@ const getStreamRms = () => {
 };
 
 // Biquad Magnitude Response calculation
-// This is a simplified version for visualization
-const getMagnitude = (f: number, sampleRate: number, band: EqBand) => {
+// Pre-calculate coefficients to avoid heavy math in frequency loop
+const getCoefficients = (band: EqBand, sampleRate: number) => {
   const w0 = 2 * Math.PI * band.freq_hz / sampleRate;
   const alpha = Math.sin(w0) / (2 * band.q);
   const A = Math.pow(10, band.gain_db / 40);
-  const w = 2 * Math.PI * f / sampleRate;
-  const cosW = Math.cos(w);
   const cosW0 = Math.cos(w0);
 
   let b0, b1, b2, a0, a1, a2;
@@ -331,23 +425,98 @@ const getMagnitude = (f: number, sampleRate: number, band: EqBand) => {
     a0 = 1 + alpha;
     a1 = -2 * cosW0;
     a2 = 1 - alpha;
-  } else { // low_pass
+  } else if (band.filter_type === 'low_pass') {
     b0 = (1 - cosW0) / 2;
     b1 = 1 - cosW0;
     b2 = (1 - cosW0) / 2;
     a0 = 1 + alpha;
     a1 = -2 * cosW0;
     a2 = 1 - alpha;
+  } else if (band.filter_type === 'low_shelf') {
+    const sqrtA = Math.sqrt(A);
+    b0 = A * ((A + 1) - (A - 1) * cosW0 + 2 * sqrtA * alpha);
+    b1 = 2 * A * ((A - 1) - (A + 1) * cosW0);
+    b2 = A * ((A + 1) - (A - 1) * cosW0 - 2 * sqrtA * alpha);
+    a0 = (A + 1) + (A - 1) * cosW0 + 2 * sqrtA * alpha;
+    a1 = -2 * ((A - 1) + (A + 1) * cosW0);
+    a2 = (A + 1) + (A - 1) * cosW0 - 2 * sqrtA * alpha;
+  } else if (band.filter_type === 'high_shelf') {
+    const sqrtA = Math.sqrt(A);
+    b0 = A * ((A + 1) + (A - 1) * cosW0 + 2 * sqrtA * alpha);
+    b1 = -2 * A * ((A - 1) + (A + 1) * cosW0);
+    b2 = A * ((A + 1) + (A - 1) * cosW0 - 2 * sqrtA * alpha);
+    a0 = (A + 1) - (A - 1) * cosW0 + 2 * sqrtA * alpha;
+    a1 = 2 * ((A - 1) - (A + 1) * cosW0);
+    a2 = (A + 1) - (A - 1) * cosW0 - 2 * sqrtA * alpha;
+  } else if (band.filter_type === 'notch') {
+    b0 = 1;
+    b1 = -2 * cosW0;
+    b2 = 1;
+    a0 = 1 + alpha;
+    a1 = -2 * cosW0;
+    a2 = 1 - alpha;
+  } else {
+    return null;
   }
+  return { b0, b1, b2, a0, a1, a2 };
+};
 
-  // Transfer function H(z) = (b0 + b1*z^-1 + b2*z^-2) / (a0 + a1*z^-1 + a2*z^-2)
-  // evaluated at z = exp(j*w)
+const getMagnitudeFromCoeffs = (f: number, sampleRate: number, coeffs: any) => {
+  const w = 2 * Math.PI * f / sampleRate;
   const phi = Math.sin(w / 2) ** 2;
+  const { b0, b1, b2, a0, a1, a2 } = coeffs;
   const num = (b0 + b1 + b2) ** 2 - 4 * (b0 * b1 + 4 * b0 * b2 + b1 * b2) * phi + 16 * b0 * b2 * phi * phi;
   const den = (a0 + a1 + a2) ** 2 - 4 * (a0 * a1 + 4 * a0 * a2 + a1 * a2) * phi + 16 * a0 * a2 * phi * phi;
   
   if (den <= 0) return 0;
   return 10 * Math.log10(num / den);
+};
+
+const drawGrid = (width: number, height: number, dpr: number) => {
+  if (!gridCanvas) gridCanvas = document.createElement('canvas');
+  if (gridCanvas.width !== width * dpr || gridCanvas.height !== height * dpr) {
+    gridCanvas.width = width * dpr;
+    gridCanvas.height = height * dpr;
+  } else {
+    return gridCanvas;
+  }
+
+  const ctx = gridCanvas.getContext('2d');
+  if (!ctx) return null;
+
+  ctx.scale(dpr, dpr);
+  ctx.strokeStyle = '#222';
+  ctx.lineWidth = 1;
+  ctx.beginPath();
+  // Hz markers
+  [20, 50, 100, 200, 500, 1000, 2000, 5000, 10000, 20000].forEach(f => {
+    const x = freqToX(f, width);
+    ctx.moveTo(x, 0);
+    ctx.lineTo(x, height);
+    
+    ctx.fillStyle = '#444';
+    ctx.font = '500 9px Inter';
+    const label = f >= 1000 ? `${f/1000}k` : f.toString();
+    ctx.fillText(label, x + 2, height - 6);
+  });
+  // dB markers
+  [-24, -12, 0, 12, 24].forEach(db => {
+    const y = gainToY(db, height);
+    ctx.moveTo(0, y);
+    ctx.lineTo(width, y);
+    ctx.fillStyle = '#444';
+    ctx.fillText(`${db > 0 ? '+' : ''}${db}dB`, 4, y - 4);
+  });
+  ctx.stroke();
+
+  // Zero line highlight
+  ctx.strokeStyle = 'rgba(255, 255, 255, 0.05)';
+  ctx.beginPath();
+  ctx.moveTo(0, height / 2);
+  ctx.lineTo(width, height / 2);
+  ctx.stroke();
+
+  return gridCanvas;
 };
 
 const draw = () => {
@@ -361,88 +530,70 @@ const draw = () => {
   if (canvas.width !== width * dpr || canvas.height !== height * dpr) {
     canvas.width = width * dpr;
     canvas.height = height * dpr;
+    gridCanvas = null; // Invalidate grid cache
   }
   
-  const ctx = canvas.getContext('2d');
+  const ctx = canvas.getContext('2d', { alpha: false }); // Disable alpha for slight perf gain
   if (!ctx) return;
   
-  ctx.scale(dpr, dpr);
-  ctx.clearRect(0, 0, width, height);
+  ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+  
+  // Background
+  ctx.fillStyle = '#0f0f0f';
+  ctx.fillRect(0, 0, width, height);
 
-  // ── 1. Draw Grid ────────────────────────────────────────────────────────
-  ctx.strokeStyle = '#2d2d2d';
-  ctx.lineWidth = 1;
-  ctx.beginPath();
-  // Hz markers
-  [20, 50, 100, 200, 500, 1000, 2000, 5000, 10000, 20000].forEach(f => {
-    const x = freqToX(f, width);
-    ctx.moveTo(x, 0);
-    ctx.lineTo(x, height);
-    
-    ctx.fillStyle = '#666';
-    ctx.font = '9px Inter';
-    const label = f >= 1000 ? `${f/1000}k` : f.toString();
-    ctx.fillText(label, x + 2, height - 4);
-  });
-  // dB markers
-  [-12, -6, 0, 6, 12].forEach(db => {
-    const y = gainToY(db, height);
-    ctx.moveTo(0, y);
-    ctx.lineTo(width, y);
-    if (db !== 0) {
-      ctx.fillStyle = '#666';
-      ctx.fillText(`${db}dB`, 4, y - 2);
-    }
-  });
-  ctx.stroke();
-
-  // Zero line highlight
-  ctx.strokeStyle = '#444';
-  ctx.beginPath();
-  ctx.moveTo(0, height / 2);
-  ctx.lineTo(width, height / 2);
-  ctx.stroke();
+  // ── 1. Draw Grid (from cache) ───────────────────────────────────────────
+  const grid = drawGrid(width, height, dpr);
+  if (grid) {
+    ctx.drawImage(grid, 0, 0, width, height);
+  }
 
   // ── 2. Draw Simulated RTA ───────────────────────────────────────────────
-  // We use RMS history to create a moving "spectrum" effect
   if (props.enabled) {
-    const rms = rmsHistory.value[rmsHistory.value.length - 1];
-    const normalized = Math.max(0, (rms + 80) / 80); // 0 to 1
+    const rms = rmsHistory[rmsHistory.length - 1];
+    const normalized = Math.max(0, (rms + 70) / 70);
     
-    ctx.fillStyle = 'rgba(56, 189, 248, 0.08)';
-    const barCount = 40;
+    const barCount = 40; // Reduced from 60
     const barWidth = width / barCount;
+    ctx.fillStyle = 'rgba(56, 189, 248, 0.1)';
+
+    const now = Date.now() / 300;
     for (let i = 0; i < barCount; i++) {
-      // Simulate frequency peaks using some noise and volume
-      const noise = Math.sin(Date.now() / 500 + i * 0.5) * 0.2 + 0.8;
-      const h = normalized * height * 0.6 * noise * (1 - Math.abs(i - 20) / 30);
-      ctx.fillRect(i * barWidth, height - h, barWidth - 1, h);
+      const noise = Math.sin(now + i * 0.3) * 0.15 + 0.85;
+      const h = normalized * height * 0.5 * noise * (1 - Math.abs(i - barCount/2) / (barCount * 0.75));
+      if (h > 2) {
+        ctx.fillRect(i * barWidth, height - h, barWidth - 1, h);
+      }
     }
   }
 
   // ── 3. Draw Combined Curve ──────────────────────────────────────────────
-  if (curvePoints.value.length > 0) {
+  if (curvePoints.length > 0) {
     ctx.beginPath();
-    ctx.lineWidth = 3;
+    ctx.lineWidth = 2.5; // Slightly thinner
     ctx.lineJoin = 'round';
-    ctx.strokeStyle = props.enabled ? '#38bdf8' : '#666';
+    ctx.strokeStyle = props.enabled ? '#38bdf8' : '#555';
     
-    curvePoints.value.forEach((p, i) => {
+    // Use moveTo/lineTo for the curve
+    for (let i = 0; i < curvePoints.length; i++) {
+      const p = curvePoints[i];
       if (i === 0) ctx.moveTo(p.x, p.y);
       else ctx.lineTo(p.x, p.y);
-    });
+    }
     ctx.stroke();
 
     // Fill area under curve
-    const gradient = ctx.createLinearGradient(0, 0, 0, height);
-    gradient.addColorStop(0, 'rgba(56, 189, 248, 0.2)');
-    gradient.addColorStop(0.5, 'rgba(56, 189, 248, 0.05)');
-    gradient.addColorStop(1, 'rgba(56, 189, 248, 0)');
-    ctx.fillStyle = gradient;
-    ctx.lineTo(curvePoints.value[curvePoints.value.length - 1].x, height);
-    ctx.lineTo(0, height);
-    ctx.closePath();
-    if (props.enabled) ctx.fill();
+    if (props.enabled) {
+      ctx.lineTo(curvePoints[curvePoints.length - 1].x, height);
+      ctx.lineTo(0, height);
+      ctx.closePath();
+      
+      const fillGradient = ctx.createLinearGradient(0, 0, 0, height);
+      fillGradient.addColorStop(0, 'rgba(56, 189, 248, 0.12)');
+      fillGradient.addColorStop(0.8, 'rgba(56, 189, 248, 0)');
+      ctx.fillStyle = fillGradient;
+      ctx.fill();
+    }
   }
 };
 
@@ -557,12 +708,13 @@ const draw = () => {
 .eq-plot-container {
   width: 100%;
   height: 180px;
-  background: #121212;
+  background: #0f0f0f;
   border-radius: 10px;
   position: relative;
   overflow: hidden;
   border: 1px solid #1a1a1a;
   margin-bottom: 24px;
+  box-shadow: inset 0 2px 10px rgba(0,0,0,0.5);
 }
 
 .eq-plot-canvas {
@@ -583,78 +735,122 @@ const draw = () => {
   justify-content: center;
   cursor: grab;
   z-index: 10;
-  transition: transform 0.2s, box-shadow 0.2s;
-  background: rgba(18, 18, 18, 0.8);
+  transition: transform 0.2s, box-shadow 0.2s, opacity 0.2s;
+  background: rgba(15, 15, 15, 0.9);
   border: 2px solid #38bdf8;
   color: #38bdf8;
-  box-shadow: 0 0 8px rgba(56, 189, 248, 0.3);
+  box-shadow: 0 0 10px rgba(56, 189, 248, 0.3);
 }
 
-.eq-node:active { cursor: grabbing; transform: scale(1.1); }
-.eq-node-active { border-width: 3px; box-shadow: 0 0 15px rgba(56, 189, 248, 0.6); }
+.eq-node:active { cursor: grabbing; transform: scale(1.15); }
+.eq-node-active { border-width: 3px; box-shadow: 0 0 18px rgba(56, 189, 248, 0.6); z-index: 11; }
+.eq-node-disabled { opacity: 0.3; border-style: dashed; filter: grayscale(1); box-shadow: none; }
 
 .eq-node-label {
   font-size: 10px;
-  font-weight: 800;
-  font-family: var(--font-mono);
+  font-weight: 900;
+  user-select: none;
 }
 
-/* Band Controls */
+/* Band Strips */
 .eq-bands-controls {
   display: grid;
-  grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));
+  grid-template-columns: repeat(auto-fit, minmax(200px, 1fr));
   gap: 12px;
 }
 
 .band-strip {
   background: var(--bg-elevated);
   border: 1px solid var(--border-mid);
-  border-radius: 10px;
-  padding: 10px;
-  transition: all 0.2s;
+  border-radius: 12px;
+  padding: 12px;
+  transition: all 0.25s cubic-bezier(0.4, 0, 0.2, 1);
+  position: relative;
+  overflow: hidden;
 }
-
+.band-strip::before {
+  content: '';
+  position: absolute;
+  top: 0; left: 0; width: 100%; height: 3px;
+  background: var(--accent);
+  opacity: 0;
+  transition: opacity 0.2s;
+}
 .band-strip-active {
   border-color: var(--accent-border);
   background: var(--bg-hover);
+  transform: translateY(-2px);
+  box-shadow: 0 4px 12px rgba(0,0,0,0.15);
 }
+.band-strip-active::before { opacity: 1; }
+.band-strip-disabled { opacity: 0.5; filter: grayscale(0.5); }
 
 .band-header {
   display: flex;
   align-items: center;
   justify-content: space-between;
-  margin-bottom: 10px;
+  margin-bottom: 14px;
 }
 
 .band-number {
-  width: 20px;
-  height: 20px;
+  font-weight: 900;
+  font-size: 12px;
+  color: var(--text-muted);
+  width: 18px;
+  height: 18px;
   background: var(--bg-surface);
-  border-radius: 50%;
+  border-radius: 4px;
   display: flex;
   align-items: center;
   justify-content: center;
-  font-size: 10px;
-  font-weight: 700;
+  border: 1px solid var(--border-dim);
+}
+.band-strip-active .band-number {
+  color: var(--accent);
+  border-color: var(--accent-border);
+}
+
+.band-toggle-mini {
+  width: 24px;
+  height: 24px;
+  border-radius: 6px;
+  background: var(--bg-surface);
+  border: 1px solid var(--border-mid);
+  color: var(--text-muted);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  font-size: 14px;
+  transition: all 0.2s;
+  cursor: pointer;
+}
+.band-toggle-mini:hover {
+  background: var(--bg-hover);
   color: var(--text-secondary);
+}
+.band-toggle-mini-on {
+  color: var(--accent);
+  border-color: var(--accent-border);
+  background: rgba(56, 189, 248, 0.08);
 }
 
 .band-type-select {
-  background: transparent;
-  border: none;
-  font-size: 11px;
+  background: var(--bg-surface);
+  border: 1px solid var(--border-mid);
+  border-radius: 6px;
+  padding: 3px 8px;
+  font-size: 10px;
   font-weight: 700;
   color: var(--text-primary);
   text-transform: uppercase;
   letter-spacing: 0.05em;
   cursor: pointer;
-  outline: none;
 }
 
 .band-params {
-  display: grid;
-  grid-template-columns: 1fr;
-  gap: 8px;
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
 }
 
 .param {
@@ -662,38 +858,40 @@ const draw = () => {
   align-items: center;
   justify-content: space-between;
 }
-
 .param label {
   font-size: 10px;
-  color: var(--text-muted);
   text-transform: uppercase;
+  font-weight: 800;
+  color: var(--text-muted);
+  letter-spacing: 0.08em;
 }
 
 .value-input {
   display: flex;
   align-items: center;
-  gap: 4px;
+  gap: 6px;
 }
-
 .value-input input {
-  width: 54px;
   background: var(--bg-surface);
   border: 1px solid var(--border-mid);
-  border-radius: 4px;
-  padding: 2px 4px;
-  font-family: var(--font-mono);
+  border-radius: 5px;
+  padding: 2px 6px;
+  width: 58px;
   font-size: 11px;
+  font-weight: 700;
   color: var(--text-primary);
   text-align: right;
+  font-family: var(--font-mono);
   outline: none;
+  transition: border-color 0.2s;
 }
-
-.value-input input:focus { border-color: var(--accent); }
-
+.value-input input:focus {
+  border-color: var(--accent);
+}
 .value-input span {
   font-size: 10px;
   color: var(--text-muted);
-  width: 18px;
+  font-weight: 600;
+  width: 20px;
 }
-
 </style>

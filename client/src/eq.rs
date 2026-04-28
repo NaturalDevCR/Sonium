@@ -61,6 +61,40 @@ impl BiquadState {
                 -2.0 * cos_w0,
                 1.0 - alpha,
             ),
+            FilterType::LowShelf => {
+                let gain_db = band.gain_db.clamp(-24.0, 24.0);
+                let a = 10.0_f32.powf(gain_db / 40.0);
+                let sqrt_a_2_alpha = 2.0 * a.sqrt() * alpha;
+                (
+                    a * ((a + 1.0) - (a - 1.0) * cos_w0 + sqrt_a_2_alpha),
+                    2.0 * a * ((a - 1.0) - (a + 1.0) * cos_w0),
+                    a * ((a + 1.0) - (a - 1.0) * cos_w0 - sqrt_a_2_alpha),
+                    (a + 1.0) + (a - 1.0) * cos_w0 + sqrt_a_2_alpha,
+                    -2.0 * ((a - 1.0) + (a + 1.0) * cos_w0),
+                    (a + 1.0) + (a - 1.0) * cos_w0 - sqrt_a_2_alpha,
+                )
+            }
+            FilterType::HighShelf => {
+                let gain_db = band.gain_db.clamp(-24.0, 24.0);
+                let a = 10.0_f32.powf(gain_db / 40.0);
+                let sqrt_a_2_alpha = 2.0 * a.sqrt() * alpha;
+                (
+                    a * ((a + 1.0) + (a - 1.0) * cos_w0 + sqrt_a_2_alpha),
+                    -2.0 * a * ((a - 1.0) + (a + 1.0) * cos_w0),
+                    a * ((a + 1.0) + (a - 1.0) * cos_w0 - sqrt_a_2_alpha),
+                    (a + 1.0) - (a - 1.0) * cos_w0 + sqrt_a_2_alpha,
+                    2.0 * ((a - 1.0) - (a + 1.0) * cos_w0),
+                    (a + 1.0) - (a - 1.0) * cos_w0 - sqrt_a_2_alpha,
+                )
+            }
+            FilterType::Notch => (
+                1.0,
+                -2.0 * cos_w0,
+                1.0,
+                1.0 + alpha,
+                -2.0 * cos_w0,
+                1.0 - alpha,
+            ),
         };
 
         // Normalise by a0
@@ -125,6 +159,7 @@ impl EqProcessor {
         Self {
             bands: bands
                 .iter()
+                .filter(|b| b.enabled)
                 .map(|b| BandFilter::new(b, sample_rate, n_channels))
                 .collect(),
             n_channels,

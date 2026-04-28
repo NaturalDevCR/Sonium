@@ -67,13 +67,14 @@ export interface Group {
   client_ids: string[];
 }
 
-export type FilterType = 'peaking' | 'high_pass' | 'low_pass';
+export type FilterType = 'peaking' | 'high_pass' | 'low_pass' | 'low_shelf' | 'high_shelf' | 'notch';
 
 export interface EqBand {
   filter_type: FilterType;
   freq_hz:     number;
   gain_db:     number;
   q:           number;
+  enabled:     boolean;
 }
 
 export interface Stream {

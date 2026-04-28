@@ -14,6 +14,12 @@ pub enum FilterType {
     HighPass,
     /// Low-pass filter
     LowPass,
+    /// Low-shelf filter
+    LowShelf,
+    /// High-shelf filter
+    HighShelf,
+    /// Notch filter
+    Notch,
 }
 
 /// A single biquad EQ band.
@@ -26,9 +32,14 @@ pub struct EqBand {
     pub freq_hz: u32,
     /// Gain in dB (only for Peaking filters).
     pub gain_db: f32,
-    /// Q-factor (bandwidth control).
+    /// Quality factor (bandwidth)
     pub q: f32,
+    /// Whether this band is active
+    #[serde(default = "default_true")]
+    pub enabled: bool,
 }
+
+fn default_true() -> bool { true }
 
 /// Dynamic playback settings pushed by the server to a specific client.
 ///

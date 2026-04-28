@@ -13,6 +13,17 @@ const auth  = useAuthStore();
 
 onMounted(() => store.loadAll());
 
+// ── EQ Expansion ──────────────────────────────────────────────────────────
+const expandedEqGroups = ref<Set<string>>(new Set());
+
+function toggleEq(groupId: string) {
+  if (expandedEqGroups.value.has(groupId)) {
+    expandedEqGroups.value.delete(groupId);
+  } else {
+    expandedEqGroups.value.add(groupId);
+  }
+}
+
 // ── Create group ──────────────────────────────────────────────────────────
 const showCreate  = ref(false);
 const newName     = ref('');
@@ -186,14 +197,36 @@ const ungroupedClients = computed(() =>
           >
             <span class="mdi mdi-delete-outline text-base"></span>
           </button>
+
+          <!-- EQ Toggle -->
+          <button
+            v-if="stream"
+            @click="toggleEq(group.id)"
+            class="tune-btn"
+            :class="{ 'tune-btn-active': expandedEqGroups.has(group.id) }"
+            title="Tune Equalizer"
+          >
+            <span class="mdi mdi-equalizer text-sm mr-1.5"></span>
+            Tune
+          </button>
         </div>
       </div>
 
-      <!-- Stream EQ -->
-      <div v-if="stream" class="px-5 py-4 border-b" style="border-color: var(--border);">
-        <p class="text-xs font-semibold mb-3" style="color: var(--text-muted); opacity: 0.8; text-transform: uppercase; letter-spacing: 0.05em;">
-          Group EQ ({{ stream.display_name || stream.id }})
-        </p>
+      <!-- Stream EQ (Lazy) -->
+      <div v-if="stream && expandedEqGroups.has(group.id)" class="px-5 py-5 border-b bg-black/20" style="border-color: var(--border);">
+        <div class="flex items-center justify-between mb-4">
+          <div>
+            <p class="text-xs font-bold" style="color: var(--text-primary); text-transform: uppercase; letter-spacing: 0.05em;">
+              Parametric EQ
+            </p>
+            <p class="text-[10px]" style="color: var(--text-muted);">
+              Applying to: {{ stream.display_name || stream.id }}
+            </p>
+          </div>
+          <button @click="toggleEq(group.id)" class="icon-btn-sm">
+            <span class="mdi mdi-close"></span>
+          </button>
+        </div>
         <EqControl
           :stream-id="stream.id"
           :model-value="stream.eq_bands"
@@ -353,6 +386,51 @@ const ungroupedClients = computed(() =>
 }
 .icon-btn:hover { background: var(--bg-hover); color: var(--text-secondary); }
 .icon-btn-danger:hover { background: var(--red-dim); color: var(--red); }
+
+.tune-btn {
+  display: flex;
+  align-items: center;
+  padding: 4px 12px;
+  border-radius: 8px;
+  font-size: 11.5px;
+  font-weight: 700;
+  background: var(--bg-elevated);
+  border: 1px solid var(--border-mid);
+  color: var(--text-secondary);
+  transition: all 0.2s cubic-bezier(0.4, 0, 0.2, 1);
+  cursor: pointer;
+}
+
+.tune-btn:hover {
+  background: var(--bg-hover);
+  border-color: var(--accent-border);
+  color: var(--accent);
+}
+
+.tune-btn-active {
+  background: var(--accent-dim);
+  border-color: var(--accent-border);
+  color: var(--accent);
+  box-shadow: 0 0 12px rgba(56, 189, 248, 0.15);
+}
+
+.icon-btn-sm {
+  width: 24px;
+  height: 24px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  border-radius: 6px;
+  background: var(--bg-elevated);
+  border: 1px solid var(--border-mid);
+  color: var(--text-muted);
+  cursor: pointer;
+}
+
+.icon-btn-sm:hover {
+  background: var(--bg-hover);
+  color: var(--text-secondary);
+}
 
 .dialog-overlay {
   position: fixed;

@@ -5,7 +5,6 @@ import { useAuthStore }   from '@/stores/auth';
 import { api }            from '@/lib/api';
 import type { EqBand, ScanResult } from '@/lib/api';
 import VolumeControl      from '@/components/VolumeControl.vue';
-import EqControl          from '@/components/EqControl.vue';
 
 const store = useServerStore();
 const auth  = useAuthStore();
@@ -29,7 +28,6 @@ const clientsWithStreams = computed(() =>
 
 // ── Volume ────────────────────────────────────────────────────────────────
 const debounceTimers: Record<string, ReturnType<typeof setTimeout>> = {};
-const eqDebounceTimers: Record<string, ReturnType<typeof setTimeout>> = {};
 
 function getStreamForClient(clientId: string) {
   const client = store.clients.find(c => c.id === clientId);
@@ -49,16 +47,6 @@ function setVolume(clientId: string, volume: number, muted: boolean) {
   }, 120);
 }
 
-function setStreamEq(streamId: string, bands: EqBand[], enabled: boolean) {
-  store.streams = store.streams.map(s =>
-    s.id === streamId ? { ...s, eq_bands: bands, eq_enabled: enabled } : s,
-  );
-
-  clearTimeout(eqDebounceTimers[streamId]);
-  eqDebounceTimers[streamId] = setTimeout(() => {
-    api.setEq(streamId, bands, enabled);
-  }, 180);
-}
 
 // ── Latency ───────────────────────────────────────────────────────────────
 const latencyEditing = ref<Record<string, number>>({});
@@ -216,18 +204,6 @@ function groupName(groupId: string) {
           </div>
         </div>
 
-        <div v-if="stream" class="mt-4">
-          <p class="text-xs font-semibold mb-2" style="color: var(--text-muted); opacity: 0.8; text-transform: uppercase; letter-spacing: 0.05em;">
-            Stream EQ ({{ stream.display_name || stream.id }})
-          </p>
-          <EqControl
-            :stream-id="stream.id"
-            :model-value="stream.eq_bands"
-            :enabled="stream.eq_enabled ?? false"
-            @update:model-value="setStreamEq(stream.id, $event, stream.eq_enabled ?? false)"
-            @update:enabled="setStreamEq(stream.id, stream.eq_bands ?? [], $event)"
-          />
-        </div>
 
         <!-- Latency + group assignment -->
         <div class="flex items-center gap-3 flex-wrap mt-2">

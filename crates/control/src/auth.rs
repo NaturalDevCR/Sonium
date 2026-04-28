@@ -117,6 +117,12 @@ impl UserStore {
     /// if the file does not exist.
     pub fn load_or_init(config_dir: &Path, initial_password: Option<String>) -> Arc<Self> {
         let file_path = config_dir.join("users.json");
+        if let Err(e) = std::fs::create_dir_all(config_dir) {
+            warn!(
+                path = %config_dir.display(),
+                "Failed to create auth config directory: {e}"
+            );
+        }
         let store = Arc::new(Self {
             users: RwLock::new(HashMap::new()),
             jwt_secret: RwLock::new(Self::generate_secret()),
@@ -136,7 +142,7 @@ impl UserStore {
             let password = initial_password
                 .unwrap_or_else(|| Alphanumeric.sample_string(&mut rand::thread_rng(), 16));
             store.create_user_internal("admin", &password, Role::Admin, true);
-            let _ = store.persist();
+            store.persist_or_warn("Failed to persist generated admin account");
             warn!("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━");
             warn!(" No users found — created default admin account.");
             warn!(" Username: admin");
@@ -145,7 +151,7 @@ impl UserStore {
             warn!("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━");
         }
         // Ensure older users.json files gain a persistent JWT secret.
-        let _ = store.persist();
+        store.persist_or_warn("Failed to persist users file");
 
         store
     }
@@ -196,6 +202,12 @@ impl UserStore {
         let json = serde_json::to_string_pretty(&file)?;
         std::fs::write(&self.file_path, json)?;
         Ok(())
+    }
+
+    fn persist_or_warn(&self, message: &str) {
+        if let Err(e) = self.persist() {
+            warn!(path = %self.file_path.display(), "{message}: {e}");
+        }
     }
 
     fn hash_password(password: &str) -> anyhow::Result<String> {
@@ -310,7 +322,7 @@ impl UserStore {
             return None;
         }
         let user = self.create_user_internal(username, password, role, false);
-        let _ = self.persist();
+        self.persist_or_warn("Failed to persist created user");
         info!(username, id = %user.id, "User created");
         Some(UserView::from(&user))
     }
@@ -327,7 +339,7 @@ impl UserStore {
                 u.must_change_password = false;
             }
             drop(users);
-            let _ = self.persist();
+            self.persist_or_warn("Failed to persist updated user");
             true
         } else {
             false
@@ -350,7 +362,56 @@ impl UserStore {
         }
         drop(users);
         self.users.write().remove(id);
-        let _ = self.persist();
+        self.persist_or_warn("Failed to persist deleted user");
         true
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use tempfile::tempdir;
+
+    #[test]
+    fn test_auto_generated_password_auth() {
+        let dir = tempdir().unwrap();
+        let store = UserStore::load_or_init(dir.path(), Some("generated-pass".to_string()));
+        
+        // Verify it was created
+        {
+            let users = store.users.read();
+            assert_eq!(users.len(), 1);
+            let admin = users.values().next().unwrap();
+            assert_eq!(admin.username, "admin");
+            assert!(admin.must_change_password);
+        }
+        
+        // Verify authentication
+        let auth = store.authenticate("admin", "generated-pass");
+        assert!(auth.is_some(), "Authentication should succeed with generated password");
+    }
+
+    #[test]
+    fn test_raw_argon2_logic() {
+        let password = "testpassword123";
+        let salt = SaltString::generate(&mut rand::rngs::OsRng);
+        let argon2 = Argon2::default();
+        let hash = argon2.hash_password(password.as_bytes(), &salt).unwrap().to_string();
+        
+        let parsed_hash = PasswordHash::new(&hash).unwrap();
+        assert!(argon2.verify_password(password.as_bytes(), &parsed_hash).is_ok());
+    }
+
+    #[test]
+    fn test_auto_generated_password_persists_in_new_config_dir() {
+        let root = tempdir().unwrap();
+        let config_dir = root.path().join("nested/config");
+
+        let store = UserStore::load_or_init(&config_dir, Some("generated-pass".to_string()));
+        assert!(store.authenticate("admin", "generated-pass").is_some());
+        assert!(config_dir.join("users.json").exists());
+
+        let reloaded = UserStore::load_or_init(&config_dir, None);
+        assert!(reloaded.authenticate("admin", "generated-pass").is_some());
     }
 }

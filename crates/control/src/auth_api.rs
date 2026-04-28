@@ -21,6 +21,7 @@ use axum::{
     Router,
 };
 use serde::{Deserialize, Serialize};
+use tracing::{info, warn};
 
 use crate::auth::{Claims, Role, UserStore, UserView};
 
@@ -95,22 +96,44 @@ struct LoginBody {
 }
 
 #[derive(Serialize)]
+struct LoginResponse {
+    token: String,
+    user: UserInfo,
+}
+
+#[derive(Serialize)]
+struct UserInfo {
+    id: String,
+    username: String,
+    role: Role,
+    must_change_password: bool,
+}
+
+#[derive(Serialize)]
 struct TokenResponse {
     token: String,
     user: UserView,
 }
 
 async fn login(State(store): State<AuthState>, Json(body): Json<LoginBody>) -> Response {
-    match store.authenticate(&body.username, &body.password) {
-        Some(user) => {
-            let token = store.create_token(&user, 24);
-            Json(TokenResponse {
-                token,
-                user: UserView::from(&user),
-            })
-            .into_response()
-        }
-        None => (StatusCode::UNAUTHORIZED, "invalid credentials").into_response(),
+    if let Some(user) = store.authenticate(&body.username, &body.password) {
+        let token = store.create_token(&user, 24);
+
+        info!("User logged in: {} ({})", user.username, user.role);
+
+        Json(LoginResponse {
+            token,
+            user: UserInfo {
+                id: user.id,
+                username: user.username,
+                role: user.role,
+                must_change_password: user.must_change_password,
+            },
+        })
+        .into_response()
+    } else {
+        warn!("Failed login attempt for username: '{}'", body.username);
+        (StatusCode::UNAUTHORIZED, "invalid credentials").into_response()
     }
 }
 
@@ -139,6 +162,7 @@ async fn get_me(axum::Extension(user): axum::Extension<AuthUser>) -> Json<serde_
         "id":       user.0.sub,
         "username": user.0.username,
         "role":     user.0.role,
+        "must_change_password": user.0.must_change_password,
     }))
 }
 
