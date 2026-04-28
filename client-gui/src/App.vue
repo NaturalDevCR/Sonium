@@ -123,6 +123,7 @@ function cancelEdit() {
   editingInstance.value = null;
 }
 
+onMounted(async () => {
   await fetchLocalIp();
   await fetchAudioDevices();
   await loadInstances();
@@ -135,7 +136,7 @@ function cancelEdit() {
     <div data-tauri-drag-region class="h-10 flex items-center justify-between px-4 bg-white/5 border-b border-white/5 shrink-0 select-none">
       <div class="flex items-center space-x-2 pointer-events-none">
         <span class="text-[10px] font-bold tracking-[0.2em] text-slate-400 uppercase">Sonium Agent</span>
-        <span class="text-[10px] text-slate-600 font-medium">v0.1.18</span>
+        <span class="text-[10px] text-slate-600 font-medium">v0.1.19</span>
       </div>
     </div>
 
