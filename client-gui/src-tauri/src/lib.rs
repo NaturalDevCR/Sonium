@@ -198,7 +198,7 @@ pub fn run() {
         ])
         .setup(|app| {
             #[cfg(target_os = "macos")]
-            app.set_activation_policy(tauri::ActivationPolicy::Accessory);
+            app.set_activation_policy(tauri::ActivationPolicy::Regular);
 
             let app_handle = app.handle().clone();
             tauri::async_runtime::spawn(async move {
@@ -216,6 +216,10 @@ pub fn run() {
             )?;
 
             let _tray = TrayIconBuilder::new()
+                .icon(app.default_window_icon().cloned().unwrap_or_else(|| {
+                    // Fallback to a blank icon or handle error gracefully
+                    tauri::image::Image::new(&[], 0, 0)
+                }))
                 .menu(&menu)
                 .on_menu_event(|app, event| match event.id.as_ref() {
                     "quit" => {
