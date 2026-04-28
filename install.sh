@@ -66,6 +66,20 @@ warn() { printf '  \033[33m!!\033[0m %s\n' "$*"; }
 ok() { printf '  \033[32mOK\033[0m %s\n' "$*"; }
 die() { printf '  \033[31mERR\033[0m %s\n' "$*" >&2; exit 1; }
 
+if [[ "$(uname)" == "Darwin" && "${UNINSTALL}" == "false" ]]; then
+  warn "You are running this on macOS. We recommend using the native Sonium Desktop Agent instead."
+  warn "The Desktop Agent provides a premium tray-based GUI and automatic audio device management."
+  warn "Download it here: https://github.com/${REPO}/releases/latest"
+  echo
+  if [[ "${INTERACTIVE}" == "true" ]]; then
+    read -p "  -> Continue with CLI installation anyway? [y/N] " -n 1 -r < "$TTY_PATH"
+    echo
+    if [[ ! $REPLY =~ ^[Yy]$ ]]; then
+      exit 0
+    fi
+  fi
+fi
+
 install_pkg() {
   local pkg="$1"
   if ! dpkg -l "$pkg" >/dev/null 2>&1; then
@@ -114,6 +128,18 @@ do_uninstall() {
     if [[ ! $REPLY =~ ^[Yy]$ ]]; then
       die "Aborted."
     fi
+  fi
+  if [[ "$(uname)" == "Darwin" ]]; then
+    info "Cleaning up macOS background services..."
+    for plist in ~/Library/LaunchAgents/com.sonium.client.*.plist; do
+      if [[ -f "$plist" ]]; then
+        launchctl unload "$plist" >/dev/null 2>&1 || true
+        rm -f "$plist"
+        ok "Removed $(basename "$plist")"
+      fi
+    done
+    rm -rf ~/.sonium
+    ok "Removed ~/.sonium configuration"
   fi
 
   if [[ -d /run/systemd/system ]] && systemctl is-active --quiet sonium-server; then

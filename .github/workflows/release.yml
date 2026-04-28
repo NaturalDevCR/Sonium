@@ -137,6 +137,7 @@ jobs:
 
   build-gui:
     name: Build Desktop Agent (${{ matrix.os }})
+    needs: publish
     runs-on: ${{ matrix.os }}
     strategy:
       fail-fast: false
@@ -150,15 +151,9 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - uses: pnpm/action-setup@v4
-        with:
-          version: 9
-
       - uses: actions/setup-node@v4
         with:
           node-version: 20
-          cache: pnpm
-          cache-dependency-path: client-gui/package.json
 
       - uses: dtolnay/rust-toolchain@stable
         with:
@@ -168,13 +163,8 @@ jobs:
         if: runner.os == 'macOS'
         run: brew install opus
 
-      - name: Install Windows dependencies
-        if: runner.os == 'Windows'
-        run: |
-          # Vcpkg is usually preinstalled on windows runners, skip for now.
-
       - name: Install web dependencies
-        run: pnpm install --no-frozen-lockfile
+        run: npm install
         working-directory: client-gui
 
       - name: Build Tauri Desktop Agent
@@ -191,6 +181,8 @@ jobs:
     name: Publish GitHub Release
     needs: build-rust
     runs-on: ubuntu-latest
+    outputs:
+      release_id: ${{ steps.create_release.outputs.id }}
     steps:
       - uses: actions/checkout@v4
 
@@ -205,6 +197,7 @@ jobs:
         run: cp install.sh release-assets/install.sh
 
       - name: Publish release
+        id: create_release
         uses: softprops/action-gh-release@v2
         with:
           tag_name: ${{ github.event_name == 'workflow_dispatch' && inputs.tag || github.ref_name }}
