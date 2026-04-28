@@ -102,11 +102,6 @@ async fn session_loop(
 
     let mut bc = lookup(&registry, &stream_id);
 
-    let buffer_ms = bc
-        .as_ref()
-        .map(|b| b.buffer_ms)
-        .unwrap_or_else(|| cfg.default_stream().buffer_ms);
-
     // Send CodecHeader if stream is already active.
     if let Some(b) = &bc {
         if let Some(hdr) = b.codec_header() {
@@ -120,9 +115,14 @@ async fn session_loop(
     let (init_eq_bands, init_eq_enabled) = state.get_stream_eq(&stream_id).unwrap_or_default();
 
     // Send initial ServerSettings.
+    let init_buffer = bc
+        .as_ref()
+        .map(|b| b.buffer_ms)
+        .unwrap_or_else(|| cfg.default_stream().buffer_ms);
+
     send_server_settings(
         stream,
-        buffer_ms,
+        init_buffer,
         init_vol.0,
         init_vol.1,
         init_latency,
@@ -225,7 +225,8 @@ async fn session_loop(
                         let c = state.get_client(client_id);
                         let lat = c.as_ref().map(|c| c.latency_ms).unwrap_or(0);
                         let (eq, en) = state.get_stream_eq(&stream_id).unwrap_or_default();
-                        send_server_settings(stream, buffer_ms, volume, muted, lat, eq, en).await?;
+                        let current_buffer = bc.as_ref().map(|b| b.buffer_ms).unwrap_or_else(|| cfg.default_stream().buffer_ms);
+                        send_server_settings(stream, current_buffer, volume, muted, lat, eq, en).await?;
                         debug!(%peer, volume, muted, "Volume settings pushed to client");
                     }
 
@@ -234,7 +235,8 @@ async fn session_loop(
                     {
                         let (vol, muted) = state.get_volume(client_id).unwrap_or((100, false));
                         let (eq, en) = state.get_stream_eq(&stream_id).unwrap_or_default();
-                        send_server_settings(stream, buffer_ms, vol, muted, latency_ms, eq, en).await?;
+                        let current_buffer = bc.as_ref().map(|b| b.buffer_ms).unwrap_or_else(|| cfg.default_stream().buffer_ms);
+                        send_server_settings(stream, current_buffer, vol, muted, latency_ms, eq, en).await?;
                         debug!(%peer, latency_ms, "Latency settings pushed to client");
                     }
 
@@ -244,7 +246,8 @@ async fn session_loop(
                         let (vol, muted) = state.get_volume(client_id).unwrap_or((100, false));
                         let c = state.get_client(client_id);
                         let lat = c.as_ref().map(|c| c.latency_ms).unwrap_or(0);
-                        send_server_settings(stream, buffer_ms, vol, muted, lat, eq_bands, enabled).await?;
+                        let current_buffer = bc.as_ref().map(|b| b.buffer_ms).unwrap_or_else(|| cfg.default_stream().buffer_ms);
+                        send_server_settings(stream, current_buffer, vol, muted, lat, eq_bands, enabled).await?;
                         debug!(%peer, stream_id, "Stream EQ settings pushed to client");
                     }
 

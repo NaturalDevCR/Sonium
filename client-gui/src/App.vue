@@ -22,8 +22,8 @@ const editingInstance = ref<InstanceConfig | null>(null);
 const localIp = ref('');
 const scanning = ref(false);
 
-const healthState = ref<Record<number, { lastSeen: number, connected: boolean }>>({});
-const APP_VERSION = 'v0.1.35';
+const healthState = ref<Record<number, { lastSeen: number, connected: boolean, report?: any, logs: string[] }>>({});
+const APP_VERSION = 'v0.1.37';
 
 const localSubnet = computed(() => {
   if (!localIp.value) return '';
@@ -136,10 +136,22 @@ onMounted(async () => {
   // Listen for health updates from all instances
   await listen('client-health', (event: { payload: { id: number, report: any } }) => {
     const { id, report } = event.payload;
-    console.log(`[Health] Received report for instance ${id}:`, report);
+    const currentState = healthState.value[id] || { logs: [] };
+    
+    // Detect significant events for the log
+    const newLogs = [...currentState.logs];
+    if (report.underrun_count > 0 && (!currentState.report || report.underrun_count > currentState.report.underrun_count)) {
+      newLogs.unshift(`${new Date().toLocaleTimeString()} - Buffer underrun detected (+${report.underrun_count - (currentState.report?.underrun_count || 0)})`);
+    }
+    if (report.stale_drop_count > 0 && (!currentState.report || report.stale_drop_count > currentState.report.stale_drop_count)) {
+      newLogs.unshift(`${new Date().toLocaleTimeString()} - Stale chunks dropped (+${report.stale_drop_count - (currentState.report?.stale_drop_count || 0)})`);
+    }
+    
     healthState.value[id] = {
       lastSeen: Date.now(),
-      connected: true
+      connected: true,
+      report,
+      logs: newLogs.slice(0, 10) // Keep last 10 logs
     };
   });
 
@@ -148,6 +160,9 @@ onMounted(async () => {
     const now = Date.now();
     for (const id in healthState.value) {
       if (now - healthState.value[id].lastSeen > 10000) {
+        if (healthState.value[id].connected) {
+          healthState.value[id].logs.unshift(`[${new Date().toLocaleTimeString()}] Connection timed out`);
+        }
         healthState.value[id].connected = false;
       }
     }
@@ -158,22 +173,22 @@ onMounted(async () => {
 <template>
   <div class="h-screen flex flex-col bg-slate-900/60 backdrop-blur-xl text-slate-100 overflow-hidden border border-white/10 rounded-xl">
     <!-- Header with drag region -->
-    <div class="h-12 flex items-center bg-white/10 border-b border-white/5 shrink-0 relative z-50 pointer-events-none">
+    <div 
+      data-tauri-drag-region
+      class="h-12 flex items-center bg-white/10 border-b border-white/5 shrink-0 relative z-50 select-none"
+    >
       <!-- Traffic lights spacer (macOS) - pointer-events-none ensures clicks pass to native controls -->
-      <div class="w-20 h-full"></div>
+      <div class="w-20 h-full pointer-events-none"></div>
       
-      <!-- Drag Handle -->
-      <div 
-        data-tauri-drag-region 
-        class="flex-1 h-full flex items-center justify-center pointer-events-auto select-none cursor-default"
-      >
-        <div class="flex items-center space-x-2 pointer-events-none">
+      <!-- Drag Handle Label -->
+      <div data-tauri-drag-region class="flex-1 h-full flex items-center justify-center pointer-events-none">
+        <div class="flex items-center space-x-2">
           <span class="text-[10px] font-bold tracking-[0.2em] text-slate-400 uppercase">Sonium Agent</span>
           <span class="text-[10px] text-slate-600 font-medium">{{ APP_VERSION }}</span>
         </div>
       </div>
       
-      <div class="w-20 h-full"></div>
+      <div data-tauri-drag-region class="w-20 h-full pointer-events-none"></div>
     </div>
 
     <div class="flex-1 overflow-y-auto p-6 space-y-6 custom-scrollbar">
@@ -221,47 +236,101 @@ onMounted(async () => {
           </button>
         </div>
 
-        <div v-for="instance in instances" :key="instance.id" 
-             class="group flex items-center justify-between p-4 bg-white/[0.03] hover:bg-white/[0.06] rounded-2xl border border-white/5 hover:border-indigo-500/30 transition-all duration-300">
-          <div class="flex items-center space-x-4">
-            <button 
-              @click="toggleInstance(instance)"
-              class="relative inline-flex h-6 w-11 items-center rounded-full transition-all duration-300 focus:outline-none shrink-0"
-              :class="instance.enabled ? 'bg-emerald-500 shadow-lg shadow-emerald-500/20' : 'bg-slate-700'"
-            >
-              <span 
-                class="inline-block h-4 w-4 transform rounded-full bg-white transition-transform duration-300 shadow-sm"
-                :class="instance.enabled ? 'translate-x-6' : 'translate-x-1'"
-              />
-            </button>
-            <div>
-              <div class="flex items-center space-x-2">
-                <h3 class="font-bold text-slate-200 group-hover:text-white transition-colors">{{ instance.name }}</h3>
-                <div 
-                  v-if="instance.enabled"
-                  class="flex items-center"
-                >
-                  <span 
-                    class="w-1.5 h-1.5 rounded-full mr-1.5"
-                    :class="healthState[instance.id]?.connected ? 'bg-emerald-500 animate-pulse' : 'bg-red-500'"
-                  ></span>
-                  <span class="text-[9px] font-bold uppercase tracking-widest" :class="healthState[instance.id]?.connected ? 'text-emerald-500/70' : 'text-red-500/70'">
-                    {{ healthState[instance.id]?.connected ? 'Connected' : 'Offline' }}
-                  </span>
+        <div v-for="instance in instances" :key="instance.id" class="space-y-2">
+          <div 
+               class="group flex items-center justify-between p-4 bg-white/[0.03] hover:bg-white/[0.06] rounded-2xl border border-white/5 hover:border-indigo-500/30 transition-all duration-300">
+            <div class="flex items-center space-x-4">
+              <button 
+                @click="toggleInstance(instance)"
+                class="relative inline-flex h-6 w-11 items-center rounded-full transition-all duration-300 focus:outline-none shrink-0"
+                :class="instance.enabled ? 'bg-emerald-500 shadow-lg shadow-emerald-500/20' : 'bg-slate-700'"
+              >
+                <span 
+                  class="inline-block h-4 w-4 transform rounded-full bg-white transition-transform duration-300 shadow-sm"
+                  :class="instance.enabled ? 'translate-x-6' : 'translate-x-1'"
+                />
+              </button>
+              <div>
+                <div class="flex items-center space-x-2">
+                  <h3 class="font-bold text-slate-200 group-hover:text-white transition-colors">{{ instance.name }}</h3>
+                  <div 
+                    v-if="instance.enabled"
+                    class="flex items-center"
+                  >
+                    <span 
+                      class="w-1.5 h-1.5 rounded-full mr-1.5"
+                      :class="healthState[instance.id]?.connected ? 'bg-emerald-500 animate-pulse' : 'bg-red-500'"
+                    ></span>
+                    <span class="text-[9px] font-bold uppercase tracking-widest" :class="healthState[instance.id]?.connected ? 'text-emerald-500/70' : 'text-red-500/70'">
+                      {{ healthState[instance.id]?.connected ? 'Connected' : 'Offline' }}
+                    </span>
+                  </div>
+                </div>
+                <div class="flex items-center space-x-2 mt-0.5">
+                  <span class="text-[10px] font-mono text-slate-500 bg-white/5 px-1.5 py-0.5 rounded">{{ instance.server_host }}:{{ instance.server_port }}</span>
+                  <span class="text-[10px] text-slate-600">•</span>
+                  <span class="text-[10px] text-slate-500 truncate max-w-[120px]">{{ instance.device || 'Default Device' }}</span>
                 </div>
               </div>
-              <div class="flex items-center space-x-2 mt-0.5">
-                <span class="text-[10px] font-mono text-slate-500 bg-white/5 px-1.5 py-0.5 rounded">{{ instance.server_host }}:{{ instance.server_port }}</span>
-                <span class="text-[10px] text-slate-600">•</span>
-                <span class="text-[10px] text-slate-500 truncate max-w-[120px]">{{ instance.device || 'Default Device' }}</span>
+            </div>
+            
+            <div class="flex items-center space-x-1">
+              <button @click="editInstance(instance)" class="p-2.5 text-slate-500 hover:text-white bg-white/0 hover:bg-white/5 rounded-xl transition-all active:scale-90">
+                <svg xmlns="http://www.w3.org/2000/svg" class="h-5 w-5" viewBox="0 0 20 20" fill="currentColor">
+                  <path d="M13.586 3.586a2 2 0 112.828 2.828l-.793.793-2.828-2.828.793-.793zM11.379 5.793L3 14.172V17h2.828l8.38-8.379-2.83-2.828z" />
+                </svg>
+              </button>
+            </div>
+          </div>
+
+          <!-- Diagnostics & Logs Panel -->
+          <div v-if="instance.enabled && healthState[instance.id]?.connected" 
+               class="mx-2 overflow-hidden bg-slate-950/40 rounded-xl border border-white/5 animate-in fade-in slide-in-from-top-2 duration-300">
+            <!-- Stats Grid -->
+            <div class="p-4 grid grid-cols-3 gap-4 border-b border-white/5">
+              <div class="space-y-1">
+                <span class="text-[9px] font-black text-slate-500 uppercase tracking-widest block">Buffer Depth</span>
+                <div class="flex items-baseline space-x-1">
+                  <span class="text-lg font-mono font-bold text-blue-400">{{ healthState[instance.id]?.report?.buffer_depth_ms || 0 }}</span>
+                  <span class="text-[9px] font-bold text-slate-600 uppercase">ms</span>
+                </div>
+              </div>
+              <div class="space-y-1">
+                <span class="text-[9px] font-black text-slate-500 uppercase tracking-widest block">Jitter / Latency</span>
+                <div class="flex items-center space-x-2">
+                  <span class="text-xs font-mono font-bold text-slate-300">{{ healthState[instance.id]?.report?.jitter_ms || 0 }}ms</span>
+                  <span class="text-[10px] text-slate-600">/</span>
+                  <span class="text-xs font-mono font-bold text-slate-300">{{ healthState[instance.id]?.report?.latency_ms || 0 }}ms</span>
+                </div>
+              </div>
+              <div class="space-y-1">
+                <span class="text-[9px] font-black text-slate-500 uppercase tracking-widest block">Errors</span>
+                <div class="flex items-center space-x-3">
+                  <div class="flex items-center space-x-1" :class="(healthState[instance.id]?.report?.underrun_count || 0) > 0 ? 'text-amber-500' : 'text-slate-600'">
+                    <span class="text-[10px] font-bold">{{ healthState[instance.id]?.report?.underrun_count || 0 }}</span>
+                    <span class="text-[8px] font-black uppercase">Drops</span>
+                  </div>
+                  <div class="flex items-center space-x-1" :class="(healthState[instance.id]?.report?.stale_drop_count || 0) > 0 ? 'text-red-500' : 'text-slate-600'">
+                    <span class="text-[10px] font-bold">{{ healthState[instance.id]?.report?.stale_drop_count || 0 }}</span>
+                    <span class="text-[8px] font-black uppercase">Stale</span>
+                  </div>
+                </div>
+              </div>
+            </div>
+            <!-- Recent Activity Log -->
+            <div class="px-4 py-2 bg-black/20">
+              <span class="text-[8px] font-black text-slate-600 uppercase tracking-[0.2em] mb-1 block">Activity Log</span>
+              <div class="space-y-1 min-h-[40px]">
+                <div v-for="(log, idx) in healthState[instance.id]?.logs" :key="idx" 
+                     class="text-[10px] font-mono text-slate-400 border-l border-white/10 pl-2 leading-tight">
+                  {{ log }}
+                </div>
+                <div v-if="!healthState[instance.id]?.logs?.length" class="text-[10px] font-mono text-slate-700 italic">
+                  Waiting for events...
+                </div>
               </div>
             </div>
           </div>
-          <button @click="editInstance(instance)" class="p-2.5 text-slate-500 hover:text-white bg-white/0 hover:bg-white/5 rounded-xl transition-all active:scale-90">
-            <svg xmlns="http://www.w3.org/2000/svg" class="h-5 w-5" viewBox="0 0 20 20" fill="currentColor">
-              <path d="M13.586 3.586a2 2 0 112.828 2.828l-.793.793-2.828-2.828.793-.793zM11.379 5.793L3 14.172V17h2.828l8.38-8.379-2.83-2.828z" />
-            </svg>
-          </button>
         </div>
 
         <button v-if="instances.length > 0" @click="addInstance" 

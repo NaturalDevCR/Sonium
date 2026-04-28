@@ -77,25 +77,97 @@ async fn connect_and_run(
     let mut eq_bands: Vec<EqBand> = vec![];
     let mut eq_enabled = false;
     let mut eq_processor = None;
+    let mut server_buffer_ms: i32 = cfg.latency_ms as i32 + 500; // Default buffer depth
+    let mut server_latency_ms: i32 = 0;
 
     let mut hdr_buf = [0u8; HEADER_SIZE];
     let mut pending_time: Option<(u16, i64)> = None; // (msg_id, sent_us)
-
-    // Start periodic clock sync
-    let mut sync_interval = tokio::time::interval(Duration::from_secs(1));
+    
+    // Start periodic tasks
+    let mut audio_tick = tokio::time::interval(tokio::time::Duration::from_millis(20));
+    let mut sync_tick = tokio::time::interval(tokio::time::Duration::from_secs(1));
+    let mut health_tick = tokio::time::interval(tokio::time::Duration::from_secs(2));
     let mut sync_seq: u16 = 0;
-
-    // Start periodic health reporting
-    let mut health_interval = tokio::time::interval(Duration::from_secs(2));
 
     loop {
         tokio::select! {
+            // Audio pump: ensure SyncBuffer is drained even if network is quiet
+            _ = audio_tick.tick() => {
+                if let (Some(pl), Some(buf)) = (player.as_mut(), sync_buf.as_mut()) {
+                    let now_server = time_provider.to_server_time(now_us());
+                    while let Some(chunk) = buf.pop_ready(now_server) {
+                        if let Err(e) = pl.write(&chunk.samples) {
+                            warn!("Audio pump write error: {e}");
+                        }
+                    }
+                }
+            }
+
+            // Sync clock with server
+            _ = sync_tick.tick() => {
+                sync_seq = sync_seq.wrapping_add(1);
+                let msg = Message::Time(TimeMsg::request(sync_seq)).encode();
+                if let Err(e) = stream.write_all(&msg).await {
+                    warn!("Failed to send sync request: {e}");
+                    break;
+                }
+                pending_time = Some((sync_seq, now_us()));
+            }
+
+            // Health report
+            _ = health_tick.tick() => {
+                let report_msg = if let Some(buf) = sync_buf.as_mut() {
+                    let now_server = time_provider.to_server_time(now_us());
+                    let mut report = buf.get_report(now_server);
+                    let (u, o) = player.as_ref().map(|p| p.take_health()).unwrap_or((0, 0));
+                    report.underrun_count += u;
+
+                    let jitter = (buf.jitter_us() / 1000) as u32;
+                    sonium_protocol::messages::HealthReport::new(
+                        report.underrun_count,
+                        o, // overrun_count from player
+                        report.stale_drop_count,
+                        report.buffer_depth_ms as u32,
+                        jitter,
+                        (time_provider.offset_us() / 1000) as i32,
+                    )
+                } else {
+                    // Send idle report to keep status "Connected"
+                    sonium_protocol::messages::HealthReport::new(
+                        0, 0, 0, 0, 0,
+                        (time_provider.offset_us() / 1000) as i32,
+                    )
+                };
+
+                let _ = health_tx.send(report_msg.clone()).await;
+
+                let msg = Message::HealthReport(report_msg).encode();
+                if let Err(e) = stream.write_all(&msg).await {
+                    warn!("Failed to send health report: {e}");
+                    break;
+                }
+            }
+
             // Read next message from server
             read_result = stream.read_exact(&mut hdr_buf) => {
-                read_result?;
-                let hdr = MessageHeader::from_bytes(&hdr_buf)?;
+                if let Err(e) = read_result {
+                    warn!("Connection closed or read error: {e}");
+                    break;
+                }
+                
+                let hdr = match MessageHeader::from_bytes(&hdr_buf) {
+                    Ok(h) => h,
+                    Err(e) => {
+                        warn!("Invalid header: {e}");
+                        break;
+                    }
+                };
+
                 let mut payload = vec![0u8; hdr.payload_size as usize];
-                stream.read_exact(&mut payload).await?;
+                if let Err(e) = stream.read_exact(&mut payload).await {
+                    warn!("Error reading payload: {e}");
+                    break;
+                }
 
                 match hdr.msg_type {
                     MessageType::CodecHeader => {
@@ -104,7 +176,7 @@ async fn connect_and_run(
                         let dec = ActiveDecoder::from_codec(&ch.codec, &ch.header_data)?;
                         let fmt = dec.sample_format();
                         let p   = Player::new(fmt, cfg.device.as_deref())?;
-                        let buf = SyncBuffer::new(fmt, cfg.latency_ms.unsigned_abs() + 1000);
+                        let buf = SyncBuffer::new(fmt);
                         eq_processor = build_eq(eq_enabled, &eq_bands, fmt.rate, fmt.channels as usize);
                         decoder  = Some(dec);
                         player   = Some(p);
@@ -117,14 +189,13 @@ async fn connect_and_run(
                         muted    = ss.muted;
                         eq_bands = ss.eq_bands;
                         eq_enabled = ss.eq_enabled;
-                        if let Some(buf) = sync_buf.as_mut() {
-                            buf.set_target_latency_ms(ss.buffer_ms as u32);
-                        }
+                        server_buffer_ms = ss.buffer_ms;
+                        server_latency_ms = ss.latency;
                         if let Some(dec) = decoder.as_ref() {
                             let fmt = dec.sample_format();
                             eq_processor = build_eq(eq_enabled, &eq_bands, fmt.rate, fmt.channels as usize);
                         }
-                        debug!(volume = ss.volume, muted = ss.muted, buffer_ms = ss.buffer_ms, "ServerSettings applied");
+                        debug!(volume = ss.volume, muted = ss.muted, buffer_ms = ss.buffer_ms, latency_ms = ss.latency, "ServerSettings applied");
                     }
 
                     MessageType::WireChunk => {
@@ -138,28 +209,30 @@ async fn connect_and_run(
                             if let Some(ref mut eq) = eq_processor {
                                 eq.apply(&mut samples);
                             }
-                            let playout_us = chunk.timestamp.to_micros()
-                                + cfg.latency_ms as i64 * 1000;
 
-                            let now = now_us();
-                            let now_server = time_provider.to_server_time(now);
+                            // Calculate absolute playout time in server clock
+                            let playout_us = chunk.timestamp.to_micros()
+                                + (server_buffer_ms as i64 * 1000)
+                                + (cfg.latency_ms as i64 * 1000)
+                                + (server_latency_ms as i64 * 1000);
+
+                            let now_server = time_provider.to_server_time(now_us());
                             buf.push(PcmChunk::new(playout_us, samples, dec.sample_format()), now_server);
 
-                            // Drain buffer for any chunks ready to play
+                            // Drain buffer immediately for ready chunks (low latency)
                             while let Some(c) = buf.pop_ready(now_server) {
-                                pl.write(&c.samples)?;
+                                let _ = pl.write(&c.samples);
                             }
                         }
                     }
 
                     MessageType::Time => {
-                        // Server echo: compute clock offset
                         if let Some((expected_id, sent_us)) = pending_time.take() {
                             if hdr.refers_to == expected_id {
                                 let recv_us = now_us();
                                 let time_msg = TimeMsg::decode(&payload)?;
                                 let server_lat_us = time_msg.latency.to_micros();
-                                time_provider.update(sent_us, recv_us, server_lat_us);
+                                time_provider.add_sample(sent_us, recv_us, server_lat_us);
                                 debug!(
                                     offset_ms = time_provider.offset_us() / 1000,
                                     "Clock sync updated"
@@ -169,43 +242,6 @@ async fn connect_and_run(
                     }
 
                     other => debug!("Unhandled message type: {other:?}"),
-                }
-            }
-
-            // Send periodic Time sync request
-            _ = sync_interval.tick() => {
-                let sent_us = now_us();
-                sync_seq = sync_seq.wrapping_add(1);
-                let mut hdr = MessageHeader::new(MessageType::Time, 8);
-                hdr.id = sync_seq;
-                let time_req = Message::Time(TimeMsg::zero()).encode_with_header(hdr);
-                stream.write_all(&time_req).await?;
-                pending_time = Some((sync_seq, sent_us));
-            }
-
-            // Send periodic Health report
-            _ = health_interval.tick() => {
-                let (underruns, overruns, stale, depth, jitter) = if let (Some(pl), Some(buf)) = (player.as_mut(), sync_buf.as_mut()) {
-                    let (u, o) = pl.take_health();
-                    (u, o, buf.take_stale_drops(), (buf.buffer_depth_us() / 1000) as u32, (buf.jitter_us() / 1000) as u32)
-                } else {
-                    (0, 0, 0, 0, 0)
-                };
-
-                let report = HealthReport::new(
-                    underruns,
-                    overruns,
-                    stale,
-                    depth,
-                    jitter,
-                    (time_provider.offset_us() / 1000) as i32,
-                );
-
-                let msg = Message::HealthReport(report.clone()).encode();
-                let _ = stream.write_all(&msg).await;
-
-                if let Some(ref tx) = health_tx {
-                    let _ = tx.send(report);
                 }
             }
         }

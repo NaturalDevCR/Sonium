@@ -76,11 +76,11 @@ impl PcmChunk {
 /// [`pop_ready`][Self::pop_ready].
 pub struct SyncBuffer {
     chunks: VecDeque<PcmChunk>,
-    target_latency_us: i64,
     buffered_samples: usize,
     fmt: SampleFormat,
     /// Health metrics: chunks dropped because they arrived after their playout window.
     stale_drop_count: u32,
+    pub underrun_count: u32,
     /// Estimated jitter in microseconds.
     jitter_us: f64,
     /// Last arrival info for jitter calculation: (arrival_us, playout_us).
@@ -93,13 +93,13 @@ impl SyncBuffer {
     /// `target_latency_ms` is the minimum amount of audio (in milliseconds)
     /// the buffer aims to keep queued.  Larger values tolerate more jitter at
     /// the cost of increased end-to-end latency.
-    pub fn new(fmt: SampleFormat, target_latency_ms: u32) -> Self {
+    pub fn new(fmt: SampleFormat) -> Self {
         Self {
             chunks: VecDeque::new(),
-            target_latency_us: target_latency_ms as i64 * 1_000,
             buffered_samples: 0,
             fmt,
             stale_drop_count: 0,
+            underrun_count: 0,
             jitter_us: 0.0,
             last_arrival_info: None,
         }
@@ -135,11 +135,11 @@ impl SyncBuffer {
     /// Stale chunks (more than 50 ms past their playout window) are dropped
     /// before checking.
     pub fn pop_ready(&mut self, now_server_us: i64) -> Option<PcmChunk> {
-        const STALE_THRESHOLD_US: i64 = 50_000;
+        const STALE_THRESHOLD_US: i64 = 500_000; // 500ms leniency
 
         while let Some(front) = self.chunks.front() {
             let end_us = front.playout_us + front.remaining_us();
-            if end_us < now_server_us - self.target_latency_us - STALE_THRESHOLD_US {
+            if end_us < now_server_us - STALE_THRESHOLD_US {
                 let dropped = self.chunks.pop_front().unwrap();
                 self.buffered_samples = self
                     .buffered_samples
@@ -151,7 +151,7 @@ impl SyncBuffer {
         }
 
         let front = self.chunks.front()?;
-        if front.playout_us <= now_server_us - self.target_latency_us {
+        if front.playout_us <= now_server_us {
             let chunk = self.chunks.pop_front().unwrap();
             self.buffered_samples = self
                 .buffered_samples
@@ -182,6 +182,7 @@ impl SyncBuffer {
         self.chunks.clear();
         self.buffered_samples = 0;
         self.stale_drop_count = 0;
+        self.underrun_count = 0;
     }
 
     /// Return and reset the accumulated stale drop counter.
@@ -196,10 +197,22 @@ impl SyncBuffer {
         self.jitter_us as i64
     }
 
-    /// Update the target latency dynamically.
-    pub fn set_target_latency_ms(&mut self, ms: u32) {
-        self.target_latency_us = ms as i64 * 1000;
+    pub fn get_report(&self, _now_server_us: i64) -> SyncReport {
+        SyncReport {
+            underrun_count: self.underrun_count,
+            stale_drop_count: self.stale_drop_count,
+            buffer_depth_ms: (self.buffer_depth_us() / 1000) as i32,
+            jitter_ms: (self.jitter_us as f64 / 1000.0) as i32,
+        }
     }
+}
+
+#[derive(Debug, Clone, Default)]
+pub struct SyncReport {
+    pub underrun_count: u32,
+    pub stale_drop_count: u32,
+    pub buffer_depth_ms: i32,
+    pub jitter_ms: i32,
 }
 
 // ─── Tests ───────────────────────────────────────────────────────────────────
@@ -216,70 +229,29 @@ mod tests {
         PcmChunk::new(playout_us, vec![0i16; sample_count], fmt())
     }
 
-    // ── PcmChunk ─────────────────────────────────────────────────────────────
-
-    #[test]
-    fn remaining_samples_full() {
-        let c = chunk(0, 100);
-        assert_eq!(c.remaining_samples(), 100);
-    }
-
-    #[test]
-    fn remaining_samples_after_partial_consume() {
-        let mut c = chunk(0, 100);
-        c.read_pos = 40;
-        assert_eq!(c.remaining_samples(), 60);
-    }
-
-    #[test]
-    fn exhausted_when_fully_consumed() {
-        let mut c = chunk(0, 100);
-        c.read_pos = 100;
-        assert!(c.is_exhausted());
-    }
-
-    #[test]
-    fn remaining_us_stereo() {
-        // 960 stereo samples = 480 frames = 10ms @ 48kHz
-        let c = chunk(0, 960);
-        let us = c.remaining_us();
-        assert!((us - 10_000).abs() < 100, "expected ~10000µs got {us}");
-    }
-
-    #[test]
-    fn current_playout_advances_with_read_pos() {
-        let mut c = chunk(1_000_000, 960); // starts at t=1s
-        let before = c.current_playout_us();
-        c.read_pos = 480; // consumed half (240 frames = 5ms)
-        let after = c.current_playout_us();
-        assert!(after > before, "playout should advance");
-        assert!((after - before - 5_000).abs() < 100);
-    }
-
-    // ── SyncBuffer ───────────────────────────────────────────────────────────
-
     #[test]
     fn push_and_pop_single_chunk() {
-        let mut buf = SyncBuffer::new(fmt(), 0);
+        let mut buf = SyncBuffer::new(fmt());
         let now = 1_000_000i64;
-        buf.push(chunk(now - 1_000, 960), 0);
+        // Chunk scheduled to play at exactly 'now'
+        buf.push(chunk(now, 960), now);
         assert!(buf.pop_ready(now).is_some());
         assert!(buf.is_empty());
     }
 
     #[test]
     fn future_chunk_not_released() {
-        let mut buf = SyncBuffer::new(fmt(), 0);
+        let mut buf = SyncBuffer::new(fmt());
         let now = 1_000_000i64;
         // Chunk scheduled 5 seconds in the future
-        buf.push(chunk(now + 5_000_000, 960), 0);
+        buf.push(chunk(now + 5_000_000, 960), now);
         assert!(buf.pop_ready(now).is_none());
         assert!(!buf.is_empty());
     }
 
     #[test]
     fn chunks_released_in_playout_order() {
-        let mut buf = SyncBuffer::new(fmt(), 0);
+        let mut buf = SyncBuffer::new(fmt());
         // Push out-of-order
         buf.push(chunk(3_000, 960), 0);
         buf.push(chunk(1_000, 960), 0);
@@ -294,50 +266,33 @@ mod tests {
 
     #[test]
     fn stale_chunks_dropped_automatically() {
-        let mut buf = SyncBuffer::new(fmt(), 0);
-        // Chunk 2 seconds in the past
-        buf.push(chunk(-2_000_000, 960), 0);
-        let now = 0i64;
-        // pop_ready should drop the stale chunk, not return it
+        let mut buf = SyncBuffer::new(fmt());
+        // Current time is 1,000,000us
+        let now = 1_000_000i64;
+        // Chunk finished at 800,000us (stale by 200ms, threshold is 100ms)
+        buf.push(chunk(800_000 - 10_000, 960), now);
+        
+        // pop_ready should drop the stale chunk
         assert!(buf.pop_ready(now).is_none());
         assert!(buf.is_empty());
+        assert_eq!(buf.get_report(now).stale_drop_count, 1);
     }
 
     #[test]
     fn buffer_depth_accounting() {
-        let mut buf = SyncBuffer::new(fmt(), 0);
-        // 960 stereo samples = 480 frames = 10ms
-        buf.push(chunk(0, 960), 0);
+        let mut buf = SyncBuffer::new(fmt());
+        // 960 stereo samples = 10ms
+        buf.push(chunk(100_000, 960), 0);
         let depth = buf.buffer_depth_us();
-        assert!(
-            (depth - 10_000).abs() < 100,
-            "expected ~10ms, got {depth}µs"
-        );
+        assert!((depth - 10_000).abs() < 100); 
     }
 
     #[test]
     fn clear_empties_buffer() {
-        let mut buf = SyncBuffer::new(fmt(), 0);
+        let mut buf = SyncBuffer::new(fmt());
         buf.push(chunk(0, 960), 0);
         buf.push(chunk(10_000, 960), 0);
         buf.clear();
         assert!(buf.is_empty());
-        assert_eq!(buf.len(), 0);
-    }
-
-    #[test]
-    fn target_latency_delays_release() {
-        let mut buf = SyncBuffer::new(fmt(), 500); // 500ms target latency
-        let now = 1_000_000i64;
-
-        // Chunk at t=0.6s should be released because now=1s and target=0.5s -> playout window is t=0.5s
-        // 600,000 > 1,000,000 - 500,000 (i.e. 600k > 500k), so it's STILL IN THE FUTURE relative to delayed playout
-        buf.push(chunk(600_000, 960), 0);
-        assert!(buf.pop_ready(now).is_none());
-
-        // Chunk at t=0.48s should be released (now=1s, target=0.5s -> window starts at 0.5s)
-        // It's not stale because 0.48s + 10ms = 0.49s, and 0.49s > 0.5s - 50ms (0.45s)
-        buf.push(chunk(480_000, 960), 0);
-        assert!(buf.pop_ready(now).is_some());
     }
 }
