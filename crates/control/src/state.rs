@@ -677,7 +677,12 @@ mod tests {
     use super::*;
 
     fn state() -> Arc<ServerState> {
-        Arc::new(ServerState::new(Arc::new(EventBus::new()), None, vec![], vec![]))
+        Arc::new(ServerState::new(
+            Arc::new(EventBus::new()),
+            None,
+            vec![],
+            vec![],
+        ))
     }
 
     fn addr() -> SocketAddr {
