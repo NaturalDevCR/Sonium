@@ -262,7 +262,7 @@ async fn main() -> anyhow::Result<()> {
                 // Give spawned tasks a moment to clean up
                 tokio::time::sleep(std::time::Duration::from_millis(250)).await;
                 info!("Sonium server stopped cleanly");
-                std::process::exit(0);
+                break;
             }
         }
     }
