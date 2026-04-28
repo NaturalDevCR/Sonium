@@ -133,15 +133,23 @@ onMounted(async () => {
 
 <template>
   <div class="h-screen flex flex-col bg-slate-900/60 backdrop-blur-xl text-slate-100 overflow-hidden border border-white/10 rounded-xl">
-    <div data-tauri-drag-region class="h-10 flex items-center justify-between px-4 bg-white/5 border-b border-white/5 shrink-0 select-none relative z-10">
-      <!-- Traffic lights spacer (macOS) -->
-      <div class="w-16 h-full pointer-events-none"></div>
+    <!-- Header with drag region -->
+    <div class="h-12 flex items-center bg-white/10 border-b border-white/5 shrink-0 relative z-50 pointer-events-none">
+      <!-- Traffic lights spacer (macOS) - pointer-events-none ensures clicks pass to native controls -->
+      <div class="w-20 h-full"></div>
       
-      <div class="flex items-center space-x-2 pointer-events-none">
-        <span class="text-[10px] font-bold tracking-[0.2em] text-slate-400 uppercase">Sonium Agent</span>
-        <span class="text-[10px] text-slate-600 font-medium">v0.1.21</span>
+      <!-- Drag Handle -->
+      <div 
+        data-tauri-drag-region 
+        class="flex-1 h-full flex items-center justify-center pointer-events-auto select-none cursor-default"
+      >
+        <div class="flex items-center space-x-2 pointer-events-none">
+          <span class="text-[10px] font-bold tracking-[0.2em] text-slate-400 uppercase">Sonium Agent</span>
+          <span class="text-[10px] text-slate-600 font-medium">v0.1.22</span>
+        </div>
       </div>
-      <div class="w-16 h-full pointer-events-none"></div>
+      
+      <div class="w-20 h-full"></div>
     </div>
 
     <div class="flex-1 overflow-y-auto p-6 space-y-6 custom-scrollbar">
@@ -310,7 +318,7 @@ onMounted(async () => {
     </div>
     
     <div class="h-8 bg-white/5 flex items-center justify-center px-4 shrink-0">
-      <span class="text-[9px] font-bold text-slate-600 uppercase tracking-[0.3em]">Ready to Stream • v0.1.21</span>
+      <span class="text-[9px] font-bold text-slate-600 uppercase tracking-[0.3em]">Ready to Stream • v0.1.22</span>
     </div>
   </div>
 </template>
