@@ -677,7 +677,7 @@ mod tests {
     use super::*;
 
     fn state() -> Arc<ServerState> {
-        Arc::new(ServerState::new(Arc::new(EventBus::new()), None, vec![]))
+        Arc::new(ServerState::new(Arc::new(EventBus::new()), None, vec![], vec![]))
     }
 
     fn addr() -> SocketAddr {
@@ -821,14 +821,13 @@ mod tests {
             muted: true,
             latency_ms: 50,
             group_id: "default".into(),
-            eq_bands: vec![],
-            eq_enabled: true,
             last_seen: Utc::now(),
         }];
         let s = Arc::new(ServerState::new(
             Arc::new(EventBus::new()),
             None,
             saved_clients,
+            vec![],
         ));
         s.client_connected("pi-1", "pi", "Sonium", "linux", "aarch64", addr(), 2);
         let c = s.get_client("pi-1").unwrap();
