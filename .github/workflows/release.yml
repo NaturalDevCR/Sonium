@@ -135,6 +135,58 @@ jobs:
           name: sonium-${{ matrix.package }}
           path: dist/*
 
+  build-gui:
+    name: Build Desktop Agent (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: macos-14
+            target: aarch64-apple-darwin
+          - os: windows-latest
+            target: x86_64-pc-windows-msvc
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: pnpm/action-setup@v4
+        with:
+          version: 9
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: pnpm
+          cache-dependency-path: client-gui/package.json
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+
+      - name: Install macOS dependencies
+        if: runner.os == 'macOS'
+        run: brew install opus
+
+      - name: Install Windows dependencies
+        if: runner.os == 'Windows'
+        run: |
+          # Vcpkg is usually preinstalled on windows runners, skip for now.
+
+      - name: Install web dependencies
+        run: pnpm install --no-frozen-lockfile
+        working-directory: client-gui
+
+      - name: Build Tauri Desktop Agent
+        uses: tauri-apps/tauri-action@v0
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        with:
+          projectPath: client-gui
+          args: --target ${{ matrix.target }}
+          tagName: ${{ github.event_name == 'workflow_dispatch' && inputs.tag || github.ref_name }}
+          releaseId: ${{ needs.publish.outputs.release_id }}
+
   publish:
     name: Publish GitHub Release
     needs: build-rust

@@ -8,12 +8,13 @@ members = [
     "crates/control",
     "server",
     "client",
+    "client-gui/src-tauri",
 ]
 # fuzz/ is excluded from the normal workspace — run with: cargo +nightly fuzz run <target>
 exclude = ["fuzz"]
 
 [workspace.package]
-version = "0.1.15"
+version = "0.1.16"
 edition = "2021"
 license = "GPL-3.0"
 

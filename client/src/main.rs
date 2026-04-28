@@ -1,9 +1,4 @@
-mod controller;
-mod decoder;
-mod eq;
-mod player;
-mod setup;
-
+use sonium_client_lib::{controller, setup};
 use std::io::Write;
 use std::time::Duration;
 

@@ -1,0 +1,231 @@
+use std::collections::HashMap;
+use std::sync::Arc;
+use tokio::sync::Mutex;
+use tauri::Manager;
+use tauri::tray::{MouseButton, TrayIconBuilder, TrayIconEvent, MouseButtonState};
+use tauri::menu::{Menu, MenuItem, PredefinedMenuItem};
+use sonium_common::config::ClientConfig;
+use sonium_client_lib::controller;
+use cpal::traits::{DeviceTrait, HostTrait};
+
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+pub struct InstanceConfig {
+    pub id: u32,
+    pub name: String,
+    pub server_host: String,
+    pub server_port: u16,
+    pub device: Option<String>,
+    pub latency_ms: i32,
+    pub enabled: bool,
+}
+
+// Global state to track running tasks
+struct AppState {
+    running_instances: Arc<Mutex<HashMap<u32, tauri::async_runtime::JoinHandle<()>>>>,
+}
+
+fn config_path(app_handle: &tauri::AppHandle) -> std::path::PathBuf {
+    let dir = app_handle.path().app_config_dir().unwrap_or_else(|_| std::path::PathBuf::from("."));
+    if !dir.exists() {
+        let _ = std::fs::create_dir_all(&dir);
+    }
+    dir.join("instances.json")
+}
+
+#[tauri::command]
+async fn get_instances(app: tauri::AppHandle) -> Result<Vec<InstanceConfig>, String> {
+    let path = config_path(&app);
+    if path.exists() {
+        let content = std::fs::read_to_string(path).map_err(|e| e.to_string())?;
+        let instances = serde_json::from_str(&content).unwrap_or_default();
+        Ok(instances)
+    } else {
+        Ok(Vec::new())
+    }
+}
+
+#[tauri::command]
+async fn save_instances(state: tauri::State<'_, AppState>, app: tauri::AppHandle, instances: Vec<InstanceConfig>) -> Result<(), String> {
+    let path = config_path(&app);
+    let content = serde_json::to_string_pretty(&instances).map_err(|e| e.to_string())?;
+    std::fs::write(path, content).map_err(|e| e.to_string())?;
+    
+    // Sync running state
+    let mut running = state.running_instances.lock().await;
+    
+    // First, stop any instances that are deleted or disabled
+    let current_ids: Vec<u32> = instances.iter().filter(|i| i.enabled).map(|i| i.id).collect();
+    let mut to_remove = Vec::new();
+    for id in running.keys() {
+        if !current_ids.contains(id) {
+            to_remove.push(*id);
+        }
+    }
+    for id in to_remove {
+        if let Some(handle) = running.remove(&id) {
+            handle.abort();
+        }
+    }
+    
+    // Then, start or restart any enabled instances
+    // For simplicity we just restart them all to apply new config
+    for config in instances {
+        if config.enabled {
+            if let Some(handle) = running.remove(&config.id) {
+                handle.abort();
+            }
+            
+            let cfg = ClientConfig {
+                server_host: config.server_host.clone(),
+                server_port: config.server_port,
+                device: config.device.clone(),
+                instance: config.id,
+                client_name: Some(config.name.clone()),
+                latency_ms: config.latency_ms,
+                ..Default::default()
+            };
+            
+            let server_addr = format!("{}:{}", cfg.server_host, cfg.server_port);
+            
+            let handle = tauri::async_runtime::spawn(async move {
+                let _ = controller::run(server_addr, cfg).await;
+            });
+            
+            running.insert(config.id, handle);
+        }
+    }
+
+    Ok(())
+}
+
+#[tauri::command]
+async fn get_audio_devices() -> Result<Vec<String>, String> {
+    let host = cpal::default_host();
+    let devices = host.output_devices().map_err(|e| e.to_string())?;
+    
+    let mut names = Vec::new();
+    for dev in devices {
+        if let Ok(name) = dev.name() {
+            if !names.contains(&name) {
+                names.push(name);
+            }
+        }
+    }
+    Ok(names)
+}
+
+#[tauri::command]
+async fn get_default_audio_device() -> Result<String, String> {
+    let host = cpal::default_host();
+    let dev = host.default_output_device().ok_or("No default device")?;
+    dev.name().map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+async fn start_instance(state: tauri::State<'_, AppState>, config: InstanceConfig) -> Result<(), String> {
+    let mut instances = state.running_instances.lock().await;
+    
+    // Stop if already running
+    if let Some(handle) = instances.remove(&config.id) {
+        handle.abort();
+    }
+    
+    if !config.enabled {
+        return Ok(());
+    }
+
+    let cfg = ClientConfig {
+        server_host: config.server_host.clone(),
+        server_port: config.server_port,
+        device: config.device,
+        instance: config.id,
+        client_name: Some(config.name),
+        latency_ms: config.latency_ms,
+        ..Default::default()
+    };
+    
+    let server_addr = format!("{}:{}", cfg.server_host, cfg.server_port);
+    
+    let handle = tauri::async_runtime::spawn(async move {
+        let _ = controller::run(server_addr, cfg).await;
+    });
+    
+    instances.insert(config.id, handle);
+    Ok(())
+}
+
+#[tauri::command]
+async fn stop_instance(state: tauri::State<'_, AppState>, id: u32) -> Result<(), String> {
+    let mut instances = state.running_instances.lock().await;
+    if let Some(handle) = instances.remove(&id) {
+        handle.abort();
+    }
+    Ok(())
+}
+
+#[cfg_attr(mobile, tauri::mobile_entry_point)]
+pub fn run() {
+    tauri::Builder::default()
+        .plugin(tauri_plugin_autostart::init(tauri_plugin_autostart::MacosLauncher::LaunchAgent, Some(vec!["--hidden"])))
+        .plugin(tauri_plugin_opener::init())
+        .manage(AppState {
+            running_instances: Arc::new(Mutex::new(HashMap::new())),
+        })
+        .invoke_handler(tauri::generate_handler![
+            get_instances,
+            save_instances,
+            get_audio_devices,
+            get_default_audio_device,
+            start_instance,
+            stop_instance
+        ])
+        .setup(|app| {
+            #[cfg(target_os = "macos")]
+            app.set_activation_policy(tauri::ActivationPolicy::Accessory);
+            
+            let app_handle = app.handle().clone();
+            tauri::async_runtime::spawn(async move {
+                if let Ok(instances) = get_instances(app_handle.clone()).await {
+                    let state = app_handle.state::<AppState>();
+                    let _ = save_instances(state, app_handle.clone(), instances).await;
+                }
+            });
+
+            let quit_i = MenuItem::with_id(app, "quit", "Quit", true, None::<&str>)?;
+            let settings_i = MenuItem::with_id(app, "settings", "Settings...", true, None::<&str>)?;
+            let menu = Menu::with_items(app, &[&settings_i, &PredefinedMenuItem::separator(app)?, &quit_i])?;
+
+            let _tray = TrayIconBuilder::new()
+                .menu(&menu)
+                .on_menu_event(|app, event| match event.id.as_ref() {
+                    "quit" => {
+                        app.exit(0);
+                    }
+                    "settings" => {
+                        if let Some(window) = app.get_webview_window("main") {
+                            let _ = window.show();
+                            let _ = window.set_focus();
+                        }
+                    }
+                    _ => {}
+                })
+                .on_tray_icon_event(|tray, event| match event {
+                    TrayIconEvent::Click {
+                        button: MouseButton::Left,
+                        button_state: MouseButtonState::Up,
+                        ..
+                    } => {
+                        if let Some(window) = tray.app_handle().get_webview_window("main") {
+                            let _ = window.show();
+                            let _ = window.set_focus();
+                        }
+                    }
+                    _ => {}
+                })
+                .build(app)?;
+
+            Ok(())
+        })
+        .run(tauri::generate_context!())
+        .expect("error while running tauri application");
+}

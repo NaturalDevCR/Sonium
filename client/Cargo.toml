@@ -8,6 +8,10 @@ license.workspace = true
 name = "sonium-client"
 path = "src/main.rs"
 
+[lib]
+name = "sonium_client_lib"
+path = "src/lib.rs"
+
 [dependencies]
 sonium-common   = { path = "../crates/common" }
 sonium-protocol = { path = "../crates/protocol" }

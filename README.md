@@ -22,14 +22,21 @@ music source -> sonium-server -> LAN -> sonium-client -> speaker
 
 ## Install
 
-Linux:
+### Linux
+
+Use the automated installation script:
 
 ```bash
 curl -fsSL https://github.com/NaturalDevCR/Sonium/releases/latest/download/install.sh | sudo bash
 ```
 
-macOS and Windows users can download release packages from
-[GitHub Releases](https://github.com/NaturalDevCR/Sonium/releases).
+### macOS & Windows
+
+We provide a lightweight native Desktop Agent (`.dmg` for macOS, `.exe` for Windows) that runs in the system tray. This app allows you to configure Sonium instances, select devices, and manage automatic background startup without relying on command line tools.
+
+1. Head to the [Releases](https://github.com/NaturalDevCR/Sonium/releases) page.
+2. Download the `.dmg` file for macOS or `.exe` for Windows.
+3. Install and run it, and you'll find the Sonium icon in your system tray!
 
 Docker can run the server:
 
