@@ -43,17 +43,12 @@ function isActive(name: string) {
     <aside class="hidden lg:flex flex-col w-52 shrink-0 sidebar-panel min-h-screen">
 
       <!-- Logo -->
-      <div class="px-4 py-5 border-b" style="border-color: var(--border);">
-        <div class="flex items-center gap-3">
-          <img src="/sonium-logo.png" alt="" class="h-8 w-8 object-contain shrink-0" />
-          <div>
-            <p class="sidebar-brand">SONIUM</p>
-            <p class="sidebar-sub">
-              Audio Server <span v-if="version" class="opacity-60 ml-1">v{{ version }}</span>
-            </p>
-          </div>
+        <div class="flex flex-col items-center gap-2 py-2">
+          <img src="/sonium-logo.png" alt="Sonium" class="h-10 w-10 object-contain shrink-0" />
+          <p class="sidebar-sub text-center">
+            Server <span v-if="version" class="opacity-60 ml-1">v{{ version }}</span>
+          </p>
         </div>
-      </div>
 
       <!-- Nav -->
       <nav class="flex-1 px-3 py-4 space-y-0.5 overflow-y-auto">

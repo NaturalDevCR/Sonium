@@ -4,6 +4,7 @@ import { useServerStore } from '@/stores/server';
 import { useAuthStore }   from '@/stores/auth';
 import { api }            from '@/lib/api';
 import StreamBadge        from '@/components/StreamBadge.vue';
+import { parse, stringify } from 'smol-toml';
 
 const store = useServerStore();
 const auth  = useAuthStore();
@@ -326,6 +327,8 @@ const addSilence     = ref(false);
 const showToml   = ref(true);
 const addInfo    = ref('');
 const saving     = ref(false);
+const isEditMode = ref(false);
+const editIdOriginal = ref('');
 
 // Raw URI — stays in sync with computed, can be manually overridden.
 const rawUri         = ref('');
@@ -399,7 +402,36 @@ function closeDialog() {
   addSilence.value = false;
   metaSources.value = [];
   uriOverridden.value = false;
+  isEditMode.value = false;
+  editIdOriginal.value = '';
   selectType(sourceTypes[0]);
+}
+
+function editStream(s: any) {
+  isEditMode.value = true;
+  editIdOriginal.value = s.id;
+  addId.value = s.id;
+  addName.value = s.display_name || '';
+  addCodec.value = s.codec || 'opus';
+  addBufMs.value = s.buffer_ms || 1000;
+  addIdleEnabled.value = !!s.idle_timeout_ms;
+  addIdleMs.value = s.idle_timeout_ms || 3000;
+  addSilence.value = !!s.silence_on_idle;
+  
+  // Meta handling
+  if (s.source.startsWith('meta://')) {
+    const list = s.source.replace('meta://', '').split(',');
+    metaSources.value = list.filter(x => x);
+    selectType(sourceTypes.find(t => t.id === 'meta')!);
+    uriOverridden.value = false;
+  } else {
+    // Try to find matching source type for others if they are simple
+    // For now, if it's not meta, we use raw URI mode to be safe
+    rawUri.value = s.source;
+    uriOverridden.value = true;
+  }
+  
+  showAdd.value = true;
 }
 
 async function submitAdd() {
@@ -407,10 +439,42 @@ async function submitAdd() {
   saving.value  = true;
   addInfo.value = '';
   try {
-    const current = await api.configRaw().catch(() => '');
-    const next    = `${current.trimEnd()}\n\n${tomlSnippet.value}\n`;
-    await api.saveConfigRaw(next);
-    addInfo.value = '✓ Saved to sonium.toml — restart the server to activate the stream.';
+    const raw = await api.configRaw().catch(() => '');
+    let config: any = parse(raw);
+    
+    if (!config.streams) config.streams = [];
+    
+    const streamData: any = {
+      id: addId.value.trim(),
+      source: effectiveSource.value,
+      codec: addCodec.value,
+      buffer_ms: addBufMs.value,
+    };
+    if (addName.value.trim()) streamData.display_name = addName.value.trim();
+    if (addIdleEnabled.value) {
+      streamData.idle_timeout_ms = addIdleMs.value;
+      if (addSilence.value) streamData.silence_on_idle = true;
+    }
+
+    if (isEditMode.value) {
+      const idx = config.streams.findIndex((st: any) => st.id === editIdOriginal.value);
+      if (idx !== -1) {
+        config.streams[idx] = streamData;
+      } else {
+        config.streams.push(streamData);
+      }
+    } else {
+      config.streams.push(streamData);
+    }
+
+    await api.saveConfigRaw(stringify(config));
+    addInfo.value = isEditMode.value ? '✓ Stream updated successfully!' : '✓ Stream added successfully!';
+    
+    // Refresh the store and close after a delay
+    setTimeout(() => {
+      store.loadAll();
+      closeDialog();
+    }, 1200);
   } catch (e) {
     addInfo.value = `Could not save: ${String(e)}`;
   } finally {
@@ -460,7 +524,14 @@ async function submitAdd() {
             </p>
           </div>
         </div>
-        <StreamBadge :status="s.status" :codec="s.codec" />
+        <div class="flex items-center gap-4">
+          <StreamBadge :status="s.status" :codec="s.codec" />
+          <button v-if="auth.isAdmin" @click="editStream(s)" 
+                  class="p-2 rounded-lg text-slate-500 hover:text-white hover:bg-white/5 transition-colors"
+                  title="Edit stream">
+            <span class="mdi mdi-pencil-outline"></span>
+          </button>
+        </div>
       </div>
     </div>
 
@@ -473,8 +544,8 @@ async function submitAdd() {
           <!-- Dialog header -->
           <div class="dialog-header">
             <div>
-              <h2 class="dialog-title">Add stream</h2>
-              <p class="dialog-sub">Choose a source type and configure it</p>
+              <h2 class="dialog-title">{{ isEditMode ? 'Edit' : 'Add' }} stream</h2>
+              <p class="dialog-sub">{{ isEditMode ? 'Modify stream configuration' : 'Choose a source type and configure it' }}</p>
             </div>
             <button @click="closeDialog" class="dialog-close">
               <span class="mdi mdi-close text-lg"></span>
