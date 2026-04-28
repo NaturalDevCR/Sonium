@@ -37,7 +37,7 @@ async function refreshLogs() {
   }
 }
 
-const clients = computed(() => server.clients.filter(c => c.online));
+const clients = computed(() => server.clients.filter(c => c.status === 'connected'));
 
 const stats = computed(() => {
   let u = 0, o = 0, s = 0;
@@ -181,8 +181,8 @@ function formatOffset(ms: number) {
                   </span>
                 </td>
                 <td class="px-4 py-4 text-right">
-                  <span class="text-sm font-mono" :class="Math.abs(client.health?.clock_offset_ms ?? 0) > 100 ? 'text-red-400' : 'text-slate-300'">
-                    {{ formatOffset(client.health?.clock_offset_ms ?? 0) }}
+                  <span class="text-sm font-mono" :class="Math.abs(client.health?.latency_ms ?? 0) > 100 ? 'text-red-400' : 'text-slate-300'">
+                    {{ formatOffset(client.health?.latency_ms ?? 0) }}
                   </span>
                 </td>
               </tr>
