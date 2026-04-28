@@ -1,6 +1,6 @@
+use crate::wire::{WireRead, WireWrite};
 use serde::{Deserialize, Serialize};
 use sonium_common::error::Result;
-use crate::wire::{WireRead, WireWrite};
 
 /// Real-time health metrics from a client playback session.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]

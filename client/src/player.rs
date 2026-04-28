@@ -53,7 +53,16 @@ impl Player {
         let device_owned = device_name.map(String::from);
         thread::Builder::new()
             .name("sonium-audio".into())
-            .spawn(move || audio_thread(ring_clone, health_clone, fmt, device_owned, init_tx, park_rx))
+            .spawn(move || {
+                audio_thread(
+                    ring_clone,
+                    health_clone,
+                    fmt,
+                    device_owned,
+                    init_tx,
+                    park_rx,
+                )
+            })
             .map_err(|e| SoniumError::Audio(format!("spawn: {e}")))?;
 
         init_rx
@@ -153,7 +162,8 @@ fn audio_thread(
             Err(mpsc::RecvTimeoutError::Timeout) => {
                 if current_stream.is_none() {
                     // Device was lost — attempt to re-open
-                    match try_open_stream(ring.clone(), health.clone(), fmt, device_name.as_deref()) {
+                    match try_open_stream(ring.clone(), health.clone(), fmt, device_name.as_deref())
+                    {
                         Ok(s) => {
                             info!("Audio device recovered — stream re-opened");
                             current_stream = Some(s);
