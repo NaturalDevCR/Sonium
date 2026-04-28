@@ -103,7 +103,7 @@ function fmtUptime(s: number) {
         <div class="flex items-center gap-3">
           <img src="/sonium-logo.png" alt="Sonium" class="h-8 w-8 object-contain" />
           <div>
-            <p class="ctrl-brand">SONIUM</p>
+            <p class="ctrl-brand">SONIUM <span class="version-tag">v0.1.14</span></p>
             <p class="ctrl-tagline">
               {{ store.connectedClients.length }} client{{ store.connectedClients.length !== 1 ? 's' : '' }} online
               <span v-if="store.uptime" class="ml-2 opacity-60">· up {{ fmtUptime(store.uptime) }}</span>
@@ -374,6 +374,14 @@ function fmtUptime(s: number) {
   font-size: 11px;
   color: var(--text-muted);
   margin-top: 1px;
+}
+.version-tag {
+  font-size: 9px;
+  opacity: 0.4;
+  font-weight: 400;
+  letter-spacing: 0;
+  vertical-align: middle;
+  margin-left: 4px;
 }
 
 .ctrl-icon-btn {

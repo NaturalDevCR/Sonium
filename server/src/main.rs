@@ -229,6 +229,9 @@ async fn main() -> anyhow::Result<()> {
     info!("Listening for audio clients on {addr}");
 
     // ── Accept loop with graceful shutdown ─────────────────────────────────
+    let shutdown_signal = shutdown_signal();
+    tokio::pin!(shutdown_signal);
+
     loop {
         tokio::select! {
             accept = listener.accept() => {
@@ -253,13 +256,13 @@ async fn main() -> anyhow::Result<()> {
                 });
             }
 
-            _ = shutdown_signal() => {
+            _ = &mut shutdown_signal => {
                 info!("Shutdown signal received — stopping server");
                 shutdown.cancel();
                 // Give spawned tasks a moment to clean up
                 tokio::time::sleep(std::time::Duration::from_millis(250)).await;
                 info!("Sonium server stopped cleanly");
-                break;
+                std::process::exit(0);
             }
         }
     }
