@@ -184,25 +184,27 @@ async fn connect_and_run(
 
             // Send periodic Health report
             _ = health_interval.tick() => {
-                if let (Some(pl), Some(buf)) = (player.as_mut(), sync_buf.as_mut()) {
-                    let (underruns, overruns) = pl.take_health();
-                    let stale = buf.take_stale_drops();
-                    let depth = (buf.buffer_depth_us() / 1000) as u32;
+                let (underruns, overruns, stale, depth, jitter) = if let (Some(pl), Some(buf)) = (player.as_mut(), sync_buf.as_mut()) {
+                    let (u, o) = pl.take_health();
+                    (u, o, buf.take_stale_drops(), (buf.buffer_depth_us() / 1000) as u32, (buf.jitter_us() / 1000) as u32)
+                } else {
+                    (0, 0, 0, 0, 0)
+                };
 
-                    let report = HealthReport::new(
-                        underruns,
-                        overruns,
-                        stale,
-                        depth,
-                        (buf.jitter_us() / 1000) as u32,
-                        (time_provider.offset_us() / 1000) as i32,
-                    );
-                    let msg = Message::HealthReport(report.clone()).encode();
-                    let _ = stream.write_all(&msg).await;
+                let report = HealthReport::new(
+                    underruns,
+                    overruns,
+                    stale,
+                    depth,
+                    jitter,
+                    (time_provider.offset_us() / 1000) as i32,
+                );
 
-                    if let Some(ref tx) = health_tx {
-                        let _ = tx.send(report);
-                    }
+                let msg = Message::HealthReport(report.clone()).encode();
+                let _ = stream.write_all(&msg).await;
+
+                if let Some(ref tx) = health_tx {
+                    let _ = tx.send(report);
                 }
             }
         }

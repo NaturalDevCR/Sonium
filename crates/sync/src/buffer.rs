@@ -139,7 +139,7 @@ impl SyncBuffer {
 
         while let Some(front) = self.chunks.front() {
             let end_us = front.playout_us + front.remaining_us();
-            if end_us < now_server_us - STALE_THRESHOLD_US {
+            if end_us < now_server_us - self.target_latency_us - STALE_THRESHOLD_US {
                 let dropped = self.chunks.pop_front().unwrap();
                 self.buffered_samples = self
                     .buffered_samples
@@ -151,7 +151,7 @@ impl SyncBuffer {
         }
 
         let front = self.chunks.front()?;
-        if front.playout_us <= now_server_us + self.target_latency_us {
+        if front.playout_us <= now_server_us - self.target_latency_us {
             let chunk = self.chunks.pop_front().unwrap();
             self.buffered_samples = self
                 .buffered_samples
@@ -328,10 +328,16 @@ mod tests {
     #[test]
     fn target_latency_delays_release() {
         let mut buf = SyncBuffer::new(fmt(), 500); // 500ms target latency
-        let now = 0i64;
-        // Chunk at t=0 should not be released because target_latency=500ms means
-        // we only release chunks at playout_us <= now + 500_000
-        buf.push(chunk(600_000, 960), 0); // at t=0.6s, beyond now+500ms
+        let now = 1_000_000i64;
+
+        // Chunk at t=0.6s should be released because now=1s and target=0.5s -> playout window is t=0.5s
+        // 600,000 > 1,000,000 - 500,000 (i.e. 600k > 500k), so it's STILL IN THE FUTURE relative to delayed playout
+        buf.push(chunk(600_000, 960), 0);
         assert!(buf.pop_ready(now).is_none());
+
+        // Chunk at t=0.48s should be released (now=1s, target=0.5s -> window starts at 0.5s)
+        // It's not stale because 0.48s + 10ms = 0.49s, and 0.49s > 0.5s - 50ms (0.45s)
+        buf.push(chunk(480_000, 960), 0);
+        assert!(buf.pop_ready(now).is_some());
     }
 }

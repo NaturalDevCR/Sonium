@@ -9,6 +9,12 @@ use tauri::tray::{MouseButton, MouseButtonState, TrayIconBuilder, TrayIconEvent}
 use tauri::{Emitter, Manager};
 use tokio::sync::{mpsc, Mutex};
 
+#[derive(Clone, serde::Serialize)]
+struct HealthEvent {
+    id: u32,
+    report: HealthReport,
+}
+
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct InstanceConfig {
     pub id: u32,
@@ -156,7 +162,13 @@ async fn save_instances(
             // Monitor health for this instance
             tauri::async_runtime::spawn(async move {
                 while let Some(report) = health_rx.recv().await {
-                    let _ = app_handle.emit(&format!("health:{}", instance_id), report);
+                    let _ = app_handle.emit(
+                        "client-health",
+                        HealthEvent {
+                            id: instance_id,
+                            report,
+                        },
+                    );
                 }
             });
 
@@ -229,7 +241,13 @@ async fn start_instance(
     // Monitor health for this instance
     tauri::async_runtime::spawn(async move {
         while let Some(report) = health_rx.recv().await {
-            let _ = app_handle.emit(&format!("health:{}", instance_id), report);
+            let _ = app_handle.emit(
+                "client-health",
+                HealthEvent {
+                    id: instance_id,
+                    report,
+                },
+            );
         }
     });
 

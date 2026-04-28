@@ -23,7 +23,7 @@ const localIp = ref('');
 const scanning = ref(false);
 
 const healthState = ref<Record<number, { lastSeen: number, connected: boolean }>>({});
-const APP_VERSION = 'v0.1.33';
+const APP_VERSION = 'v0.1.34';
 
 const localSubnet = computed(() => {
   if (!localIp.value) return '';
@@ -134,15 +134,12 @@ onMounted(async () => {
   await checkAutostart();
 
   // Listen for health updates from all instances
-  await listen('health:*', (event) => {
-    // Event names are formatted as health:ID
-    const id = parseInt(event.event.split(':')[1]);
-    if (!isNaN(id)) {
-      healthState.value[id] = {
-        lastSeen: Date.now(),
-        connected: true
-      };
-    }
+  await listen('client-health', (event: { payload: { id: number, report: any } }) => {
+    const { id } = event.payload;
+    healthState.value[id] = {
+      lastSeen: Date.now(),
+      connected: true
+    };
   });
 
   // Periodically check for stale connections
