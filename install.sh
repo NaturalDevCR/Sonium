@@ -27,7 +27,7 @@ else
   TTY_PATH="/dev/null"
 fi
 
-SCRIPT_VERSION="v0.1.14"
+SCRIPT_VERSION="v0.1.15"
 
 while [[ $# -gt 0 ]]; do
   case "$1" in
@@ -188,14 +188,19 @@ if [[ "${INTERACTIVE}" == "true" ]]; then
   echo "  2) Server only"
   echo "  3) Client only"
   echo "  4) Uninstall"
-  read -p "Selection [1-4]: " -n 1 -r < "$TTY_PATH"
-  echo
-  case "$REPLY" in
-    2) INSTALL_CLIENT=false ;;
-    3) INSTALL_SERVER=false ;;
-    4) do_uninstall ;;
-    *) ;;
-  esac
+  while true; do
+    if ! read -p "Selection [1-4] (default 1): " -n 1 -r < "$TTY_PATH"; then
+      break # EOF
+    fi
+    echo
+    case "$REPLY" in
+      1|"") break ;;
+      2) INSTALL_CLIENT=false; break ;;
+      3) INSTALL_SERVER=false; break ;;
+      4) do_uninstall; break ;;
+      *) echo "Invalid option." ;;
+    esac
+  done
 fi
 
 check_dependencies
