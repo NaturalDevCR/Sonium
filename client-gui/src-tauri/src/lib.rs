@@ -1,11 +1,11 @@
 use cpal::traits::{DeviceTrait, HostTrait};
 use sonium_client_lib::controller;
 use sonium_common::config::ClientConfig;
+use sonium_protocol::messages::HealthReport;
 use std::collections::HashMap;
 use std::sync::Arc;
 use tauri::menu::{Menu, MenuItem, PredefinedMenuItem};
 use tauri::tray::{MouseButton, MouseButtonState, TrayIconBuilder, TrayIconEvent};
-use sonium_protocol::messages::HealthReport;
 use tauri::{Emitter, Manager};
 use tokio::sync::{mpsc, Mutex};
 
