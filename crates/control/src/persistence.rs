@@ -76,7 +76,13 @@ impl PersistenceStore {
 
     /// Load persisted state from disk.  Returns an empty state if the file
     /// does not exist yet (first run) or is unreadable.
-    pub fn load(&self) -> (Vec<PersistedGroup>, Vec<PersistedClient>, Vec<PersistedStream>) {
+    pub fn load(
+        &self,
+    ) -> (
+        Vec<PersistedGroup>,
+        Vec<PersistedClient>,
+        Vec<PersistedStream>,
+    ) {
         if !self.path.exists() {
             return (Vec::new(), Vec::new(), Vec::new());
         }
@@ -98,7 +104,13 @@ impl PersistenceStore {
         }
     }
 
-    fn try_load(&self) -> anyhow::Result<(Vec<PersistedGroup>, Vec<PersistedClient>, Vec<PersistedStream>)> {
+    fn try_load(
+        &self,
+    ) -> anyhow::Result<(
+        Vec<PersistedGroup>,
+        Vec<PersistedClient>,
+        Vec<PersistedStream>,
+    )> {
         let raw = std::fs::read_to_string(&self.path)?;
         let file: StateFile = serde_json::from_str(&raw)?;
         Ok((file.groups, file.clients, file.streams))

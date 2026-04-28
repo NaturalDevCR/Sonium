@@ -26,13 +26,23 @@ fn test_auth() -> (Arc<UserStore>, String) {
 }
 
 fn make_app() -> (axum::Router, String) {
-    let state = Arc::new(ServerState::new(Arc::new(EventBus::new()), None, vec![], vec![]));
+    let state = Arc::new(ServerState::new(
+        Arc::new(EventBus::new()),
+        None,
+        vec![],
+        vec![],
+    ));
     let (auth, token) = test_auth();
     (api::router(state).layer(axum::Extension(auth)), token)
 }
 
 fn make_app_with_state() -> (axum::Router, Arc<ServerState>, String) {
-    let state = Arc::new(ServerState::new(Arc::new(EventBus::new()), None, vec![], vec![]));
+    let state = Arc::new(ServerState::new(
+        Arc::new(EventBus::new()),
+        None,
+        vec![],
+        vec![],
+    ));
     let (auth, token) = test_auth();
     (
         api::router(state.clone()).layer(axum::Extension(auth)),
@@ -309,7 +319,12 @@ async fn ws_events_endpoint_upgrades() {
     use tokio_tungstenite::connect_async;
     use tokio_tungstenite::tungstenite::Message;
 
-    let state = Arc::new(ServerState::new(Arc::new(EventBus::new()), None, vec![], vec![]));
+    let state = Arc::new(ServerState::new(
+        Arc::new(EventBus::new()),
+        None,
+        vec![],
+        vec![],
+    ));
     let (auth, token) = test_auth();
     let app = api::router(state).layer(axum::Extension(auth));
     let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();

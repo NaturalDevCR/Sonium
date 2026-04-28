@@ -274,18 +274,17 @@ impl ServerState {
         // Restore settings from the last persisted snapshot for this client ID.
         let saved = self.saved_clients.iter().find(|c| c.id == id);
 
-        let (volume, muted, latency_ms, group_id, display_name) =
-            if let Some(s) = saved {
-                (
-                    s.volume,
-                    s.muted,
-                    s.latency_ms,
-                    s.group_id.clone(),
-                    s.display_name.clone(),
-                )
-            } else {
-                (100, false, 0, "default".into(), None)
-            };
+        let (volume, muted, latency_ms, group_id, display_name) = if let Some(s) = saved {
+            (
+                s.volume,
+                s.muted,
+                s.latency_ms,
+                s.group_id.clone(),
+                s.display_name.clone(),
+            )
+        } else {
+            (100, false, 0, "default".into(), None)
+        };
 
         let info = ClientInfo {
             id: id.clone(),
