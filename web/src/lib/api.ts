@@ -58,8 +58,6 @@ export interface Client {
   status:           'connected' | 'disconnected';
   connected_at:     string;
   protocol_version: number;
-  eq_bands?:        EqBand[];
-  eq_enabled?:      boolean;
 }
 
 export interface Group {
@@ -85,6 +83,8 @@ export interface Stream {
   format:       string;
   source:       string;
   status:       'playing' | 'idle' | 'error';
+  eq_bands?:    EqBand[];
+  eq_enabled?:  boolean;
 }
 
 export interface ScanResult {
@@ -152,7 +152,7 @@ export type Event =
   | { type: 'stream_status';       stream_id: string; status: string }
   | { type: 'heartbeat';           uptime_s: number }
   | { type: 'stream_level';        stream_id: string; rms_db: number }
-  | { type: 'eq_changed';          client_id: string; eq_bands: EqBand[]; enabled: boolean };
+  | { type: 'stream_eq_changed';   stream_id: string; eq_bands: EqBand[]; enabled: boolean };
 
 // ── HTTP helpers ──────────────────────────────────────────────────────────
 
@@ -257,7 +257,7 @@ export const api = {
     patch(`/clients/${id}/name`, { display_name }),
 
   setEq:       (id: string, bands: EqBand[], enabled: boolean) =>
-    patch(`/clients/${id}/eq`, { bands, enabled }),
+    patch(`/streams/${id}/eq`, { bands, enabled }),
 
   deleteClient: (id: string) => del(`/clients/${id}`),
 

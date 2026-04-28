@@ -132,10 +132,15 @@ async fn main() -> anyhow::Result<()> {
 
     // State persistence: load from sonium-state.json.
     let persistence = Arc::new(PersistenceStore::new(&config_dir));
-    let (saved_groups, saved_clients) = persistence.load();
+    let (saved_groups, saved_clients, saved_streams) = persistence.load();
 
     let events = Arc::new(EventBus::new());
-    let state = Arc::new(ServerState::new(events, Some(persistence), saved_clients));
+    let state = Arc::new(ServerState::new(
+        events,
+        Some(persistence),
+        saved_clients,
+        saved_streams,
+    ));
     let registry = new_registry();
 
     // Restore persisted groups before any clients connect.

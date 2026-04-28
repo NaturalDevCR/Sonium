@@ -44,7 +44,7 @@ pub fn router(state: AppState) -> Router {
         .route("/clients/:id/latency", patch(patch_latency))
         .route("/clients/:id/group", patch(patch_client_group))
         .route("/clients/:id/name", patch(patch_client_name))
-        .route("/clients/:id/eq", patch(patch_client_eq))
+        .route("/streams/:id/eq", patch(patch_stream_eq))
         .route("/clients/:id", delete(delete_client))
         .route("/groups", post(post_group))
         .route("/groups/:id", delete(delete_group))
@@ -213,7 +213,7 @@ struct EqBody {
     enabled: bool,
 }
 
-async fn patch_client_eq(
+async fn patch_stream_eq(
     State(s): State<AppState>,
     Path(id): Path<String>,
     Json(body): Json<EqBody>,

@@ -73,8 +73,8 @@ pub enum Event {
         rms_db: f32,
     },
     /// Emitted when the operator changes a client's EQ bands.
-    EqChanged {
-        client_id: String,
+    StreamEqChanged {
+        stream_id: String,
         eq_bands: Vec<EqBand>,
         enabled: bool,
     },

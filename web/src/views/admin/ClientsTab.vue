@@ -20,9 +20,24 @@ const sortedClients = computed(() =>
   })
 );
 
+const clientsWithStreams = computed(() =>
+  sortedClients.value.map(client => ({
+    client,
+    stream: getStreamForClient(client.id)
+  }))
+);
+
 // ── Volume ────────────────────────────────────────────────────────────────
 const debounceTimers: Record<string, ReturnType<typeof setTimeout>> = {};
 const eqDebounceTimers: Record<string, ReturnType<typeof setTimeout>> = {};
+
+function getStreamForClient(clientId: string) {
+  const client = store.clients.find(c => c.id === clientId);
+  if (!client) return null;
+  const group = store.groups.find(g => g.id === client.group_id);
+  if (!group) return null;
+  return store.streams.find(s => s.id === group.stream_id);
+}
 
 function setVolume(clientId: string, volume: number, muted: boolean) {
   clearTimeout(debounceTimers[clientId]);
@@ -34,14 +49,14 @@ function setVolume(clientId: string, volume: number, muted: boolean) {
   }, 120);
 }
 
-function setEq(clientId: string, bands: EqBand[], enabled: boolean) {
-  store.clients = store.clients.map(c =>
-    c.id === clientId ? { ...c, eq_bands: bands, eq_enabled: enabled } : c,
+function setStreamEq(streamId: string, bands: EqBand[], enabled: boolean) {
+  store.streams = store.streams.map(s =>
+    s.id === streamId ? { ...s, eq_bands: bands, eq_enabled: enabled } : s,
   );
 
-  clearTimeout(eqDebounceTimers[clientId]);
-  eqDebounceTimers[clientId] = setTimeout(() => {
-    api.setEq(clientId, bands, enabled);
+  clearTimeout(eqDebounceTimers[streamId]);
+  eqDebounceTimers[streamId] = setTimeout(() => {
+    api.setEq(streamId, bands, enabled);
   }, 180);
 }
 
@@ -142,7 +157,7 @@ function groupName(groupId: string) {
 
     <div v-else class="space-y-2.5">
       <div
-        v-for="c in sortedClients" :key="c.id"
+        v-for="{ client: c, stream } in clientsWithStreams" :key="c.id"
         class="client-card"
         :class="{ 'client-offline': c.status !== 'connected' }"
       >
@@ -201,13 +216,18 @@ function groupName(groupId: string) {
           </div>
         </div>
 
-        <EqControl
-          :client-id="c.id"
-          :model-value="c.eq_bands"
-          :enabled="c.eq_enabled ?? false"
-          @update:model-value="setEq(c.id, $event, c.eq_enabled ?? false)"
-          @update:enabled="setEq(c.id, c.eq_bands ?? [], $event)"
-        />
+        <div v-if="stream" class="mt-4">
+          <p class="text-xs font-semibold mb-2" style="color: var(--text-muted); opacity: 0.8; text-transform: uppercase; letter-spacing: 0.05em;">
+            Stream EQ ({{ stream.display_name || stream.id }})
+          </p>
+          <EqControl
+            :stream-id="stream.id"
+            :model-value="stream.eq_bands"
+            :enabled="stream.eq_enabled ?? false"
+            @update:model-value="setStreamEq(stream.id, $event, stream.eq_enabled ?? false)"
+            @update:enabled="setStreamEq(stream.id, stream.eq_bands ?? [], $event)"
+          />
+        </div>
 
         <!-- Latency + group assignment -->
         <div class="flex items-center gap-3 flex-wrap mt-2">

@@ -3,8 +3,10 @@ import { ref, computed, onMounted } from 'vue';
 import { useServerStore } from '@/stores/server';
 import { useAuthStore }   from '@/stores/auth';
 import { api }            from '@/lib/api';
+import type { EqBand }    from '@/lib/api';
 import StreamBadge        from '@/components/StreamBadge.vue';
 import VolumeControl      from '@/components/VolumeControl.vue';
+import EqControl          from '@/components/EqControl.vue';
 
 const store = useServerStore();
 const auth  = useAuthStore();
@@ -65,6 +67,19 @@ function setVolume(clientId: string, volume: number, muted: boolean) {
       c.id === clientId ? { ...c, volume, muted } : c,
     );
   }, 120);
+}
+
+const eqDebounceTimers: Record<string, ReturnType<typeof setTimeout>> = {};
+
+function setStreamEq(streamId: string, bands: EqBand[], enabled: boolean) {
+  store.streams = store.streams.map(s =>
+    s.id === streamId ? { ...s, eq_bands: bands, eq_enabled: enabled } : s,
+  );
+
+  clearTimeout(eqDebounceTimers[streamId]);
+  eqDebounceTimers[streamId] = setTimeout(() => {
+    api.setEq(streamId, bands, enabled);
+  }, 180);
 }
 
 // ── Grouped view ──────────────────────────────────────────────────────────
@@ -172,6 +187,20 @@ const ungroupedClients = computed(() =>
             <span class="mdi mdi-delete-outline text-base"></span>
           </button>
         </div>
+      </div>
+
+      <!-- Stream EQ -->
+      <div v-if="stream" class="px-5 py-4 border-b" style="border-color: var(--border);">
+        <p class="text-xs font-semibold mb-3" style="color: var(--text-muted); opacity: 0.8; text-transform: uppercase; letter-spacing: 0.05em;">
+          Group EQ ({{ stream.display_name || stream.id }})
+        </p>
+        <EqControl
+          :stream-id="stream.id"
+          :model-value="stream.eq_bands"
+          :enabled="stream.eq_enabled ?? false"
+          @update:model-value="setStreamEq(stream.id, $event, stream.eq_enabled ?? false)"
+          @update:enabled="setStreamEq(stream.id, stream.eq_bands ?? [], $event)"
+        />
       </div>
 
       <!-- Clients -->

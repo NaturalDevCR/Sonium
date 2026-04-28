@@ -126,9 +126,11 @@ export const useServerStore = defineStore('server', () => {
         streamLevels.value = { ...streamLevels.value, [event.stream_id]: event.rms_db };
         break;
 
-      case 'eq_changed':
-        clients.value = clients.value.map((c) =>
-          c.id === event.client_id ? { ...c, eq_bands: event.eq_bands } : c,
+      case 'stream_eq_changed':
+        streams.value = streams.value.map((s) =>
+          s.id === event.stream_id
+            ? { ...s, eq_bands: event.eq_bands, eq_enabled: event.enabled }
+            : s,
         );
         break;
     }

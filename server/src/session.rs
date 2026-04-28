@@ -117,11 +117,7 @@ async fn session_loop(
     let init_vol = state.get_volume(client_id).unwrap_or((100, false));
     let init_client = state.get_client(client_id);
     let init_latency = init_client.as_ref().map(|c| c.latency_ms).unwrap_or(0);
-    let init_eq_bands = init_client
-        .as_ref()
-        .map(|c| c.eq_bands.clone())
-        .unwrap_or_default();
-    let init_eq_enabled = init_client.as_ref().map(|c| c.eq_enabled).unwrap_or(true);
+    let (init_eq_bands, init_eq_enabled) = state.get_stream_eq(&stream_id).unwrap_or_default();
 
     // Send initial ServerSettings.
     send_server_settings(
@@ -228,8 +224,7 @@ async fn session_loop(
                     {
                         let c = state.get_client(client_id);
                         let lat = c.as_ref().map(|c| c.latency_ms).unwrap_or(0);
-                        let eq  = c.as_ref().map(|c| c.eq_bands.clone()).unwrap_or_default();
-                        let en  = c.as_ref().map(|c| c.eq_enabled).unwrap_or(true);
+                        let (eq, en) = state.get_stream_eq(&stream_id).unwrap_or_default();
                         send_server_settings(stream, buffer_ms, volume, muted, lat, eq, en).await?;
                         debug!(%peer, volume, muted, "Volume settings pushed to client");
                     }
@@ -237,21 +232,20 @@ async fn session_loop(
                     Ok(Event::LatencyChanged { client_id: cid, latency_ms })
                         if cid == client_id =>
                     {
-                        let c = state.get_client(client_id);
                         let (vol, muted) = state.get_volume(client_id).unwrap_or((100, false));
-                        let eq = c.as_ref().map(|c| c.eq_bands.clone()).unwrap_or_default();
-                        let en = c.as_ref().map(|c| c.eq_enabled).unwrap_or(true);
+                        let (eq, en) = state.get_stream_eq(&stream_id).unwrap_or_default();
                         send_server_settings(stream, buffer_ms, vol, muted, latency_ms, eq, en).await?;
                         debug!(%peer, latency_ms, "Latency settings pushed to client");
                     }
 
-                    Ok(Event::EqChanged { client_id: cid, eq_bands, enabled })
-                        if cid == client_id =>
+                    Ok(Event::StreamEqChanged { stream_id: sid, eq_bands, enabled })
+                        if sid == stream_id =>
                     {
                         let (vol, muted) = state.get_volume(client_id).unwrap_or((100, false));
-                        let lat = state.get_client(client_id).map(|c| c.latency_ms).unwrap_or(0);
+                        let c = state.get_client(client_id);
+                        let lat = c.as_ref().map(|c| c.latency_ms).unwrap_or(0);
                         send_server_settings(stream, buffer_ms, vol, muted, lat, eq_bands, enabled).await?;
-                        debug!(%peer, "EQ settings pushed to client");
+                        debug!(%peer, stream_id, "Stream EQ settings pushed to client");
                     }
 
                     Err(broadcast::error::RecvError::Lagged(n)) => {

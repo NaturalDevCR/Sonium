@@ -34,10 +34,15 @@ pub struct PersistedClient {
     pub latency_ms: i32,
     pub group_id: String,
     pub last_seen: DateTime<Utc>,
-    /// Per-client EQ bands (empty = flat).
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct PersistedStream {
+    pub id: String,
+    /// Per-stream EQ bands (empty = flat).
     #[serde(default)]
     pub eq_bands: Vec<EqBand>,
-    /// Whether the EQ is enabled for this client.
+    /// Whether the EQ is enabled for this stream.
     #[serde(default)]
     pub eq_enabled: bool,
 }
@@ -47,6 +52,8 @@ struct StateFile {
     version: u32,
     groups: Vec<PersistedGroup>,
     clients: Vec<PersistedClient>,
+    #[serde(default)]
+    streams: Vec<PersistedStream>,
 }
 
 // ── PersistenceStore ──────────────────────────────────────────────────────
@@ -69,39 +76,46 @@ impl PersistenceStore {
 
     /// Load persisted state from disk.  Returns an empty state if the file
     /// does not exist yet (first run) or is unreadable.
-    pub fn load(&self) -> (Vec<PersistedGroup>, Vec<PersistedClient>) {
+    pub fn load(&self) -> (Vec<PersistedGroup>, Vec<PersistedClient>, Vec<PersistedStream>) {
         if !self.path.exists() {
-            return (Vec::new(), Vec::new());
+            return (Vec::new(), Vec::new(), Vec::new());
         }
         match self.try_load() {
-            Ok((groups, clients)) => {
+            Ok((groups, clients, streams)) => {
                 info!(
                     path = %self.path.display(),
                     groups = groups.len(),
                     clients = clients.len(),
+                    streams = streams.len(),
                     "Loaded persisted state"
                 );
-                (groups, clients)
+                (groups, clients, streams)
             }
             Err(e) => {
                 warn!(path = %self.path.display(), "Failed to load state file: {e} — starting fresh");
-                (Vec::new(), Vec::new())
+                (Vec::new(), Vec::new(), Vec::new())
             }
         }
     }
 
-    fn try_load(&self) -> anyhow::Result<(Vec<PersistedGroup>, Vec<PersistedClient>)> {
+    fn try_load(&self) -> anyhow::Result<(Vec<PersistedGroup>, Vec<PersistedClient>, Vec<PersistedStream>)> {
         let raw = std::fs::read_to_string(&self.path)?;
         let file: StateFile = serde_json::from_str(&raw)?;
-        Ok((file.groups, file.clients))
+        Ok((file.groups, file.clients, file.streams))
     }
 
-    /// Persist the current groups and clients to disk.
-    pub fn save(&self, groups: &[PersistedGroup], clients: &[PersistedClient]) {
+    /// Persist the current groups, clients and streams to disk.
+    pub fn save(
+        &self,
+        groups: &[PersistedGroup],
+        clients: &[PersistedClient],
+        streams: &[PersistedStream],
+    ) {
         let file = StateFile {
             version: CURRENT_VERSION,
             groups: groups.to_vec(),
             clients: clients.to_vec(),
+            streams: streams.to_vec(),
         };
         match serde_json::to_string_pretty(&file) {
             Ok(json) => {

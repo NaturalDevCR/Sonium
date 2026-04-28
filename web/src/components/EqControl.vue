@@ -98,7 +98,7 @@ import type { EqBand, FilterType } from '@/lib/api';
 import { useServerStore } from '@/stores/server';
 
 const props = defineProps<{
-  clientId: string;
+  streamId: string;
   modelValue: EqBand[] | undefined;
   enabled: boolean;
 }>();
@@ -146,7 +146,10 @@ watch(() => props.modelValue, () => {
 
 onMounted(() => {
   initBands();
-  startAnimation();
+  setTimeout(() => {
+    recalculateCurve();
+    startAnimation();
+  }, 100); // Wait for layout
 });
 
 onUnmounted(() => {
@@ -157,6 +160,7 @@ onUnmounted(() => {
 
 const update = () => {
   emit('update:modelValue', bands.value.map(b => ({ ...b })));
+  recalculateCurve();
   draw();
 };
 
@@ -248,17 +252,46 @@ const getNodeStyle = (band: EqBand) => {
 
 // ── Drawing Logic ─────────────────────────────────────────────────────────
 
+// Pre-calculate curve points to avoid heavy math in draw loop
+const curvePoints = ref<{x: number, y: number}[]>([]);
+const sampleRate = 44100;
+
+const recalculateCurve = () => {
+  if (!plotContainer.value) return;
+  const width = plotContainer.value.clientWidth;
+  const height = plotContainer.value.clientHeight;
+  const points: {x: number, y: number}[] = [];
+  
+  for (let x = 0; x <= width; x += 3) { // Increased step to 3 for better performance
+    const ratio = x / width;
+    const minF = Math.log10(20);
+    const maxF = Math.log10(20000);
+    const f = Math.pow(10, minF + ratio * (maxF - minF));
+    
+    let totalGain = 0;
+    bands.value.forEach(b => {
+      totalGain += getMagnitude(f, sampleRate, b);
+    });
+    
+    points.push({ x, y: gainToY(totalGain, height) });
+  }
+  curvePoints.value = points;
+};
+
 let animationId: number | null = null;
 const rmsHistory = ref<number[]>(new Array(40).fill(-90));
 
 const startAnimation = () => {
-  const loop = () => {
-    // Update RMS history for "RTA" simulation
-    const currentRms = getClientRms();
-    rmsHistory.value.push(currentRms);
-    if (rmsHistory.value.length > 40) rmsHistory.value.shift();
-    
-    draw();
+  let lastRtaUpdate = 0;
+  const loop = (timestamp: number) => {
+    // Throttled RTA update (30fps is enough for visualizer)
+    if (timestamp - lastRtaUpdate > 33) {
+      const currentRms = getStreamRms();
+      rmsHistory.value.push(currentRms);
+      if (rmsHistory.value.length > 40) rmsHistory.value.shift();
+      lastRtaUpdate = timestamp;
+      draw();
+    }
     animationId = requestAnimationFrame(loop);
   };
   animationId = requestAnimationFrame(loop);
@@ -268,12 +301,8 @@ const stopAnimation = () => {
   if (animationId) cancelAnimationFrame(animationId);
 };
 
-const getClientRms = () => {
-  const client = store.clients.find(c => c.id === props.clientId);
-  if (!client) return -90;
-  const streamId = store.groups.find(g => g.id === client.group_id)?.stream_id;
-  if (!streamId) return -90;
-  return store.streamLevels[streamId] || -90;
+const getStreamRms = () => {
+  return store.streamLevels[props.streamId] || -90;
 };
 
 // Biquad Magnitude Response calculation
@@ -392,39 +421,29 @@ const draw = () => {
   }
 
   // ── 3. Draw Combined Curve ──────────────────────────────────────────────
-  ctx.beginPath();
-  ctx.lineWidth = 3;
-  ctx.lineJoin = 'round';
-  ctx.strokeStyle = props.enabled ? '#38bdf8' : '#666';
-  
-  const sampleRate = 44100;
-  for (let x = 0; x <= width; x += 2) {
-    const ratio = x / width;
-    const minF = Math.log10(20);
-    const maxF = Math.log10(20000);
-    const f = Math.pow(10, minF + ratio * (maxF - minF));
+  if (curvePoints.value.length > 0) {
+    ctx.beginPath();
+    ctx.lineWidth = 3;
+    ctx.lineJoin = 'round';
+    ctx.strokeStyle = props.enabled ? '#38bdf8' : '#666';
     
-    let totalGain = 0;
-    bands.value.forEach(b => {
-      totalGain += getMagnitude(f, sampleRate, b);
+    curvePoints.value.forEach((p, i) => {
+      if (i === 0) ctx.moveTo(p.x, p.y);
+      else ctx.lineTo(p.x, p.y);
     });
-    
-    const y = gainToY(totalGain, height);
-    if (x === 0) ctx.moveTo(x, y);
-    else ctx.lineTo(x, y);
-  }
-  ctx.stroke();
+    ctx.stroke();
 
-  // Fill area under curve
-  const gradient = ctx.createLinearGradient(0, 0, 0, height);
-  gradient.addColorStop(0, 'rgba(56, 189, 248, 0.2)');
-  gradient.addColorStop(0.5, 'rgba(56, 189, 248, 0.05)');
-  gradient.addColorStop(1, 'rgba(56, 189, 248, 0)');
-  ctx.fillStyle = gradient;
-  ctx.lineTo(width, height);
-  ctx.lineTo(0, height);
-  ctx.closePath();
-  if (props.enabled) ctx.fill();
+    // Fill area under curve
+    const gradient = ctx.createLinearGradient(0, 0, 0, height);
+    gradient.addColorStop(0, 'rgba(56, 189, 248, 0.2)');
+    gradient.addColorStop(0.5, 'rgba(56, 189, 248, 0.05)');
+    gradient.addColorStop(1, 'rgba(56, 189, 248, 0)');
+    ctx.fillStyle = gradient;
+    ctx.lineTo(curvePoints.value[curvePoints.value.length - 1].x, height);
+    ctx.lineTo(0, height);
+    ctx.closePath();
+    if (props.enabled) ctx.fill();
+  }
 };
 
 </script>

@@ -15,7 +15,7 @@ use std::collections::HashMap;
 use std::net::SocketAddr;
 use std::sync::Arc;
 
-use crate::persistence::{PersistedClient, PersistedGroup, PersistenceStore};
+use crate::persistence::{PersistedClient, PersistedGroup, PersistedStream, PersistenceStore};
 use crate::ws::EventBus;
 use sonium_protocol::messages::EqBand;
 
@@ -63,12 +63,6 @@ pub struct ClientInfo {
     /// Optional operator-assigned display name (shown instead of hostname).
     #[serde(default)]
     pub display_name: Option<String>,
-    /// Per-client EQ bands (empty = flat).
-    #[serde(default)]
-    pub eq_bands: Vec<EqBand>,
-    /// Whether the EQ is enabled for this client.
-    #[serde(default)]
-    pub eq_enabled: bool,
 }
 
 impl ClientInfo {
@@ -108,6 +102,12 @@ pub struct StreamInfo {
     pub format: String,
     pub source: String,
     pub status: StreamStatus,
+    /// Per-stream EQ bands (empty = flat).
+    #[serde(default)]
+    pub eq_bands: Vec<EqBand>,
+    /// Whether the EQ is enabled for this stream.
+    #[serde(default)]
+    pub eq_enabled: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -131,6 +131,8 @@ pub struct ServerState {
     persistence: Option<Arc<PersistenceStore>>,
     /// Snapshot loaded at startup; used to restore per-client settings on reconnect.
     saved_clients: Vec<PersistedClient>,
+    /// Snapshot of stream settings loaded at startup.
+    saved_streams: Vec<PersistedStream>,
 }
 
 impl ServerState {
@@ -138,6 +140,7 @@ impl ServerState {
         events: Arc<EventBus>,
         persistence: Option<Arc<PersistenceStore>>,
         saved_clients: Vec<PersistedClient>,
+        saved_streams: Vec<PersistedStream>,
     ) -> Self {
         let mut groups = HashMap::new();
         let default_grp = Group {
@@ -149,17 +152,37 @@ impl ServerState {
         groups.insert("default".into(), default_grp);
 
         let mut streams = HashMap::new();
-        streams.insert(
-            "default".into(),
-            StreamInfo {
-                id: "default".into(),
-                display_name: None,
-                codec: "opus".into(),
-                format: "48000Hz/16bit/2ch".into(),
-                source: "-".into(),
-                status: StreamStatus::Idle,
-            },
-        );
+        for ps in &saved_streams {
+            streams.insert(
+                ps.id.clone(),
+                StreamInfo {
+                    id: ps.id.clone(),
+                    display_name: None, // No display_name in PersistedStream yet
+                    codec: "Unknown".into(),
+                    format: "Unknown".into(),
+                    source: "Unknown".into(),
+                    status: StreamStatus::Idle,
+                    eq_bands: ps.eq_bands.clone(),
+                    eq_enabled: ps.eq_enabled,
+                },
+            );
+        }
+
+        if !streams.contains_key("default") {
+            streams.insert(
+                "default".into(),
+                StreamInfo {
+                    id: "default".into(),
+                    display_name: Some("Default Stream".into()),
+                    codec: "Unknown".into(),
+                    format: "Unknown".into(),
+                    source: "Unknown".into(),
+                    status: StreamStatus::Idle,
+                    eq_bands: vec![],
+                    eq_enabled: true,
+                },
+            );
+        }
 
         Self {
             clients: RwLock::new(HashMap::new()),
@@ -169,6 +192,7 @@ impl ServerState {
             start_time: Utc::now(),
             persistence,
             saved_clients,
+            saved_streams,
         }
     }
 
@@ -213,12 +237,21 @@ impl ServerState {
                 muted: c.muted,
                 latency_ms: c.latency_ms,
                 group_id: c.group_id.clone(),
-                eq_bands: c.eq_bands.clone(),
-                eq_enabled: c.eq_enabled,
                 last_seen: Utc::now(),
             })
             .collect();
-        store.save(&groups, &clients);
+        let streams: Vec<PersistedStream> = self
+            .streams
+            .read()
+            .values()
+            .map(|s| PersistedStream {
+                id: s.id.clone(),
+                eq_bands: s.eq_bands.clone(),
+                eq_enabled: s.eq_enabled,
+            })
+            .collect();
+
+        store.save(&groups, &clients, &streams);
     }
 
     // ── Client CRUD ───────────────────────────────────────────────────────
@@ -241,7 +274,7 @@ impl ServerState {
         // Restore settings from the last persisted snapshot for this client ID.
         let saved = self.saved_clients.iter().find(|c| c.id == id);
 
-        let (volume, muted, latency_ms, group_id, display_name, eq_bands, eq_enabled) =
+        let (volume, muted, latency_ms, group_id, display_name) =
             if let Some(s) = saved {
                 (
                     s.volume,
@@ -249,11 +282,9 @@ impl ServerState {
                     s.latency_ms,
                     s.group_id.clone(),
                     s.display_name.clone(),
-                    s.eq_bands.clone(),
-                    s.eq_enabled,
                 )
             } else {
-                (100, false, 0, "default".into(), None, vec![], false)
+                (100, false, 0, "default".into(), None)
             };
 
         let info = ClientInfo {
@@ -271,8 +302,6 @@ impl ServerState {
             connected_at: Utc::now(),
             protocol_version,
             display_name,
-            eq_bands,
-            eq_enabled,
         };
 
         // Place into the correct group (restored or default).
@@ -365,18 +394,18 @@ impl ServerState {
         }
     }
 
-    /// Update the EQ bands for a client and push to connected sessions.
-    pub fn set_eq(&self, client_id: &str, eq_bands: Vec<EqBand>, enabled: bool) -> bool {
-        let mut clients = self.clients.write();
-        if let Some(c) = clients.get_mut(client_id) {
-            c.eq_bands = eq_bands.clone();
-            c.eq_enabled = enabled;
-            self.events.emit(crate::ws::Event::EqChanged {
-                client_id: client_id.into(),
+    /// Update the EQ bands for a stream and push to connected sessions.
+    pub fn set_eq(&self, stream_id: &str, eq_bands: Vec<EqBand>, enabled: bool) -> bool {
+        let mut streams = self.streams.write();
+        if let Some(s) = streams.get_mut(stream_id) {
+            s.eq_bands = eq_bands.clone();
+            s.eq_enabled = enabled;
+            self.events.emit(crate::ws::Event::StreamEqChanged {
+                stream_id: stream_id.into(),
                 eq_bands,
                 enabled,
             });
-            drop(clients);
+            drop(streams);
             self.persist();
             true
         } else {
@@ -384,12 +413,12 @@ impl ServerState {
         }
     }
 
-    /// Read the EQ bands for a client.
-    pub fn get_eq(&self, client_id: &str) -> Option<Vec<EqBand>> {
-        self.clients
+    /// Read the EQ bands for a stream.
+    pub fn get_stream_eq(&self, stream_id: &str) -> Option<(Vec<EqBand>, bool)> {
+        self.streams
             .read()
-            .get(client_id)
-            .map(|c| c.eq_bands.clone())
+            .get(stream_id)
+            .map(|s| (s.eq_bands.clone(), s.eq_enabled))
     }
 
     /// Set an operator-assigned display name for a client.
@@ -603,13 +632,25 @@ impl ServerState {
                 stream.format = format.clone();
                 stream.source = source.clone();
             })
-            .or_insert_with(|| StreamInfo {
-                id: id.clone(),
-                display_name,
-                codec,
-                format,
-                source,
-                status: StreamStatus::Idle,
+            .or_insert_with(|| {
+                // Restore EQ settings if this stream was previously saved.
+                let (eq_bands, eq_enabled) = self
+                    .saved_streams
+                    .iter()
+                    .find(|s| s.id == id)
+                    .map(|s| (s.eq_bands.clone(), s.eq_enabled))
+                    .unwrap_or_default();
+
+                StreamInfo {
+                    id: id.clone(),
+                    display_name,
+                    codec,
+                    format,
+                    source,
+                    status: StreamStatus::Idle,
+                    eq_bands,
+                    eq_enabled,
+                }
             });
     }
 

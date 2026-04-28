@@ -26,13 +26,13 @@ fn test_auth() -> (Arc<UserStore>, String) {
 }
 
 fn make_app() -> (axum::Router, String) {
-    let state = Arc::new(ServerState::new(Arc::new(EventBus::new()), None, vec![]));
+    let state = Arc::new(ServerState::new(Arc::new(EventBus::new()), None, vec![], vec![]));
     let (auth, token) = test_auth();
     (api::router(state).layer(axum::Extension(auth)), token)
 }
 
 fn make_app_with_state() -> (axum::Router, Arc<ServerState>, String) {
-    let state = Arc::new(ServerState::new(Arc::new(EventBus::new()), None, vec![]));
+    let state = Arc::new(ServerState::new(Arc::new(EventBus::new()), None, vec![], vec![]));
     let (auth, token) = test_auth();
     (
         api::router(state.clone()).layer(axum::Extension(auth)),
@@ -185,31 +185,30 @@ async fn patch_volume_connected_client_is_204() {
 }
 
 #[tokio::test]
-async fn patch_eq_connected_client_is_204() {
+async fn patch_eq_stream_is_204() {
     let (app, state, token) = make_app_with_state();
-    let addr: SocketAddr = "127.0.0.1:9002".parse().unwrap();
-    state.client_connected("eq-test", "host", "Test", "linux", "x86_64", addr, 2);
+    // Default stream "default" exists by default.
 
     let bands = json!([
-        {"freq_hz": 100, "gain_db": 3.0, "q": 0.9},
-        {"freq_hz": 1000, "gain_db": -1.5, "q": 0.9},
-        {"freq_hz": 10000, "gain_db": 2.0, "q": 0.9}
+        {"filter_type": "peaking", "freq_hz": 100, "gain_db": 3.0, "q": 0.9},
+        {"filter_type": "peaking", "freq_hz": 1000, "gain_db": -1.5, "q": 0.9},
+        {"filter_type": "peaking", "freq_hz": 10000, "gain_db": 2.0, "q": 0.9}
     ]);
     let res = app
         .oneshot(patch_json(
-            "/clients/eq-test/eq",
-            json!({"bands": bands}),
+            "/streams/default/eq",
+            json!({"bands": bands, "enabled": true}),
             &token,
         ))
         .await
         .unwrap();
     assert_eq!(res.status(), StatusCode::NO_CONTENT);
 
-    let updated = state.all_clients();
-    let c = updated.iter().find(|c| c.id == "eq-test").unwrap();
-    assert_eq!(c.eq_bands.len(), 3);
-    assert_eq!(c.eq_bands[0].freq_hz, 100);
-    assert_eq!(c.eq_bands[0].gain_db, 3.0);
+    let (eq_bands, eq_enabled) = state.get_stream_eq("default").unwrap();
+    assert_eq!(eq_bands.len(), 3);
+    assert_eq!(eq_bands[0].freq_hz, 100);
+    assert_eq!(eq_bands[0].gain_db, 3.0);
+    assert!(eq_enabled);
 }
 
 // ── /groups ───────────────────────────────────────────────────────────────
@@ -310,7 +309,7 @@ async fn ws_events_endpoint_upgrades() {
     use tokio_tungstenite::connect_async;
     use tokio_tungstenite::tungstenite::Message;
 
-    let state = Arc::new(ServerState::new(Arc::new(EventBus::new()), None, vec![]));
+    let state = Arc::new(ServerState::new(Arc::new(EventBus::new()), None, vec![], vec![]));
     let (auth, token) = test_auth();
     let app = api::router(state).layer(axum::Extension(auth));
     let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
