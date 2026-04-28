@@ -27,7 +27,7 @@ else
   TTY_PATH="/dev/null"
 fi
 
-SCRIPT_VERSION="v0.1.7"
+SCRIPT_VERSION="v0.1.13"
 
 while [[ $# -gt 0 ]]; do
   case "$1" in
@@ -321,8 +321,13 @@ WantedBy=multi-user.target
 EOF
 
     systemctl daemon-reload
-    systemctl enable --now sonium-server
-    ok "Enabled and started sonium-server.service"
+    systemctl enable sonium-server
+    
+    info "Stopping any lingering sonium-server processes..."
+    pkill -x sonium-server 2>/dev/null || true
+    
+    systemctl restart sonium-server
+    ok "Enabled and restarted sonium-server.service"
   else
     info "Skipping systemd service"
   fi
