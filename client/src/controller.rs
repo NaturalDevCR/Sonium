@@ -77,7 +77,7 @@ async fn connect_and_run(
     let mut eq_bands: Vec<EqBand> = vec![];
     let mut eq_enabled = false;
     let mut eq_processor = None;
-    let mut server_buffer_ms: i32 = cfg.latency_ms as i32 + 500; // Default buffer depth
+    let mut server_buffer_ms: i32 = cfg.latency_ms + 500; // Default buffer depth
     let mut server_latency_ms: i32 = 0;
 
     let mut hdr_buf = [0u8; HEADER_SIZE];

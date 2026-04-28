@@ -202,7 +202,7 @@ impl SyncBuffer {
             underrun_count: self.underrun_count,
             stale_drop_count: self.stale_drop_count,
             buffer_depth_ms: (self.buffer_depth_us() / 1000) as i32,
-            jitter_ms: (self.jitter_us as f64 / 1000.0) as i32,
+            jitter_ms: (self.jitter_us / 1000.0) as i32,
         }
     }
 }
