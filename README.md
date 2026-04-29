@@ -24,6 +24,9 @@ music source -> sonium-server -> LAN -> sonium-client -> speaker
 
 ### Linux
 
+> [!IMPORTANT]
+> **System Requirements**: The pre-compiled binaries require **GLIBC 2.39** or higher. This means you need at least **Debian 13 (Trixie/Testing)**, **Ubuntu 24.04 (Noble)**, or any other modern rolling release. If you are on an older system (like Debian 12), you must compile from source.
+
 Use the automated installation script:
 
 ```bash
