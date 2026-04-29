@@ -62,10 +62,6 @@ pub fn register(registry: &Arc<BroadcasterRegistry>, bc: Arc<Broadcaster>) {
     registry.write().insert(bc.stream_id.clone(), bc);
 }
 
-pub fn unregister(registry: &Arc<BroadcasterRegistry>, stream_id: &str) {
-    registry.write().remove(stream_id);
-}
-
 pub fn lookup(registry: &Arc<BroadcasterRegistry>, stream_id: &str) -> Option<Arc<Broadcaster>> {
     registry.read().get(stream_id).cloned()
 }

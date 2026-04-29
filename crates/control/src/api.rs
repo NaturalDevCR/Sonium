@@ -42,6 +42,7 @@ pub fn router(state: AppState) -> Router {
     let write_routes = Router::new()
         .route("/clients/:id/volume", patch(patch_volume))
         .route("/clients/:id/latency", patch(patch_latency))
+        .route("/clients/:id/observability", patch(patch_observability))
         .route("/clients/:id/group", patch(patch_client_group))
         .route("/clients/:id/name", patch(patch_client_name))
         .route("/streams/:id/eq", patch(patch_stream_eq))
@@ -51,6 +52,7 @@ pub fn router(state: AppState) -> Router {
         .route("/groups/:id", patch(patch_group))
         .route("/groups/:id/stream", patch(patch_group_stream))
         .route("/discover/scan", get(get_discover_scan))
+        .route("/discover/local-subnet", get(get_discover_local_subnet))
         .layer(middleware::from_fn(require_operator));
 
     Router::new()
@@ -167,6 +169,23 @@ async fn patch_latency(
     Json(body): Json<LatencyBody>,
 ) -> Response {
     if s.set_latency(&id, body.latency_ms) {
+        StatusCode::NO_CONTENT.into_response()
+    } else {
+        StatusCode::NOT_FOUND.into_response()
+    }
+}
+
+#[derive(Deserialize)]
+struct ObservabilityBody {
+    enabled: bool,
+}
+
+async fn patch_observability(
+    State(s): State<AppState>,
+    Path(id): Path<String>,
+    Json(body): Json<ObservabilityBody>,
+) -> Response {
+    if s.set_client_observability(&id, body.enabled) {
         StatusCode::NO_CONTENT.into_response()
     } else {
         StatusCode::NOT_FOUND.into_response()
@@ -316,6 +335,17 @@ fn default_scan_port() -> u16 {
 async fn get_discover_scan(Query(q): Query<ScanQuery>) -> impl IntoResponse {
     let results = crate::discovery::scan_subnet(&q.cidr, q.port, 64).await;
     Json(results)
+}
+
+#[derive(Serialize)]
+struct LocalSubnetResponse {
+    cidr: Option<String>,
+}
+
+async fn get_discover_local_subnet() -> impl IntoResponse {
+    Json(LocalSubnetResponse {
+        cidr: crate::discovery::local_ipv4_subnet(),
+    })
 }
 
 // ── Streams ───────────────────────────────────────────────────────────────

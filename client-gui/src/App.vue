@@ -25,6 +25,14 @@ const scanning = ref(false);
 const healthState = ref<Record<number, { lastSeen: number, connected: boolean, report?: any, logs: string[] }>>({});
 const APP_VERSION = 'v0.1.37';
 
+function instanceStatus(instance: InstanceConfig) {
+  if (!instance.enabled) return { label: 'Stopped', tone: 'text-slate-500/80', dot: 'bg-slate-600' };
+  const state = healthState.value[instance.id];
+  if (state?.connected) return { label: 'Connected', tone: 'text-emerald-500/80', dot: 'bg-emerald-500 animate-pulse' };
+  if (!state || Date.now() - state.lastSeen < 10000) return { label: 'Starting', tone: 'text-amber-400/80', dot: 'bg-amber-400 animate-pulse' };
+  return { label: 'Offline', tone: 'text-red-500/80', dot: 'bg-red-500' };
+}
+
 const localSubnet = computed(() => {
   if (!localIp.value) return '';
   return localIp.value.split('.').slice(0, 3).join('.');
@@ -58,6 +66,16 @@ async function loadInstances() {
 
 async function saveInstances() {
   await invoke('save_instances', { instances: instances.value });
+  const now = Date.now();
+  for (const instance of instances.value) {
+    if (instance.enabled && !healthState.value[instance.id]) {
+      healthState.value[instance.id] = {
+        lastSeen: now,
+        connected: false,
+        logs: [`${new Date().toLocaleTimeString()} - Starting client instance`],
+      };
+    }
+  }
   await loadInstances();
 }
 
@@ -253,16 +271,13 @@ onMounted(async () => {
               <div>
                 <div class="flex items-center space-x-2">
                   <h3 class="font-bold text-slate-200 group-hover:text-white transition-colors">{{ instance.name }}</h3>
-                  <div 
-                    v-if="instance.enabled"
-                    class="flex items-center"
-                  >
+                  <div v-if="instance.enabled" class="flex items-center">
                     <span 
                       class="w-1.5 h-1.5 rounded-full mr-1.5"
-                      :class="healthState[instance.id]?.connected ? 'bg-emerald-500 animate-pulse' : 'bg-red-500'"
+                      :class="instanceStatus(instance).dot"
                     ></span>
-                    <span class="text-[9px] font-bold uppercase tracking-widest" :class="healthState[instance.id]?.connected ? 'text-emerald-500/70' : 'text-red-500/70'">
-                      {{ healthState[instance.id]?.connected ? 'Connected' : 'Offline' }}
+                    <span class="text-[9px] font-bold uppercase tracking-widest" :class="instanceStatus(instance).tone">
+                      {{ instanceStatus(instance).label }}
                     </span>
                   </div>
                 </div>
@@ -284,7 +299,7 @@ onMounted(async () => {
           </div>
 
           <!-- Diagnostics & Logs Panel -->
-          <div v-if="instance.enabled && healthState[instance.id]?.connected" 
+          <div v-if="instance.enabled"
                class="mx-2 overflow-hidden bg-slate-950/40 rounded-xl border border-white/5 animate-in fade-in slide-in-from-top-2 duration-300">
             <!-- Stats Grid -->
             <div class="p-4 grid grid-cols-3 gap-4 border-b border-white/5">

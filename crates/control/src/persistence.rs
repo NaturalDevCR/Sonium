@@ -32,6 +32,8 @@ pub struct PersistedClient {
     pub volume: u8,
     pub muted: bool,
     pub latency_ms: i32,
+    #[serde(default)]
+    pub observability_enabled: bool,
     pub group_id: String,
     pub last_seen: DateTime<Utc>,
 }

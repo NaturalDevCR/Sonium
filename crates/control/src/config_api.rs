@@ -140,7 +140,7 @@ async fn post_config_reload(State(s): State<ConfigApiState>) -> Response {
     let Some(tx) = &s.reload_tx else {
         return (
             StatusCode::SERVICE_UNAVAILABLE,
-            "config reload is not available",
+            "config hot reload is disabled; restart Sonium server to apply changes",
         )
             .into_response();
     };

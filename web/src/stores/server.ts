@@ -80,6 +80,14 @@ export const useServerStore = defineStore('server', () => {
         );
         break;
 
+      case 'client_observability_changed':
+        clients.value = clients.value.map((c) =>
+          c.id === event.client_id
+            ? { ...c, observability_enabled: event.enabled, health: event.enabled ? c.health : null }
+            : c,
+        );
+        break;
+
       case 'client_group_changed':
         clients.value = clients.value.map((c) =>
           c.id === event.client_id ? { ...c, group_id: event.group_id } : c,
@@ -143,14 +151,19 @@ export const useServerStore = defineStore('server', () => {
 
   // ── Live updates via WebSocket ─────────────────────────────────────────
   let wsClose: (() => void) | null = null;
+  let liveRequested = false;
 
   function startLiveUpdates() {
+    liveRequested = true;
+    if (wsClose) return;
     wsClose = subscribeEvents(applyEvent, () => {
-      setTimeout(() => { loadAll(); startLiveUpdates(); }, 3000);
+      wsClose = null;
+      if (liveRequested) setTimeout(() => { loadAll(); startLiveUpdates(); }, 3000);
     });
   }
 
   function stopLiveUpdates() {
+    liveRequested = false;
     wsClose?.();
     wsClose = null;
   }

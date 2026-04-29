@@ -34,9 +34,17 @@ pub struct EqBand {
     pub gain_db: f32,
     /// Quality factor (bandwidth)
     pub q: f32,
+    /// HPF/LPF slope in dB/octave. Values above 12 dB/oct are implemented by
+    /// cascading biquad sections on the client.
+    #[serde(default = "default_slope")]
+    pub slope_db_per_oct: u16,
     /// Whether this band is active
     #[serde(default = "default_true")]
     pub enabled: bool,
+}
+
+fn default_slope() -> u16 {
+    12
 }
 
 fn default_true() -> bool {
@@ -65,6 +73,9 @@ pub struct ServerSettings {
     /// Whether the EQ is enabled.
     #[serde(default)]
     pub eq_enabled: bool,
+    /// Whether the client should stream diagnostic health reports to server.
+    #[serde(default)]
+    pub observability_enabled: bool,
 }
 
 impl Default for ServerSettings {
@@ -76,6 +87,7 @@ impl Default for ServerSettings {
             muted: false,
             eq_bands: vec![],
             eq_enabled: false,
+            observability_enabled: false,
         }
     }
 }

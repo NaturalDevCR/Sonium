@@ -1,5 +1,5 @@
 use std::collections::VecDeque;
-use std::sync::atomic::{AtomicU32, Ordering};
+use std::sync::atomic::{AtomicU32, AtomicUsize, Ordering};
 use std::sync::mpsc::{self, Receiver, SyncSender};
 use std::sync::{Arc, Mutex};
 use std::thread;
@@ -33,6 +33,7 @@ pub struct Player {
     ring: Arc<Mutex<VecDeque<i16>>>,
     fmt: SampleFormat,
     health: Arc<HealthState>,
+    max_samples: Arc<AtomicUsize>,
     /// Dropping this disconnects the audio thread's park channel, stopping it.
     _keepalive: SyncSender<()>,
 }
@@ -42,6 +43,7 @@ impl Player {
         let capacity = fmt.rate as usize * fmt.channels as usize * 2; // ~2 s headroom
         let ring = Arc::new(Mutex::new(VecDeque::<i16>::with_capacity(capacity)));
         let health = Arc::new(HealthState::default());
+        let max_samples = Arc::new(AtomicUsize::new(capacity));
 
         // init_tx/rx: audio thread reports success or failure back to Player::new.
         let (init_tx, init_rx) = mpsc::sync_channel::<Result<(), String>>(0);
@@ -79,19 +81,32 @@ impl Player {
             ring,
             fmt,
             health,
+            max_samples,
             _keepalive: park_tx,
         })
+    }
+
+    pub fn set_buffer_limit_ms(&mut self, ms: i32) {
+        let ms = ms.clamp(80, 10_000) as usize;
+        let samples = self.fmt.rate as usize * self.fmt.channels as usize * ms / 1000;
+        self.max_samples.store(samples.max(1), Ordering::Relaxed);
     }
 
     /// Push interleaved i16 PCM samples into the ring buffer.
     pub fn write(&mut self, samples: &[i16]) -> Result<(), SoniumError> {
         let mut ring = self.ring.lock().unwrap();
-        // Guard against unbounded growth (> 4 s): drop the incoming chunk.
-        let max = self.fmt.rate as usize * self.fmt.channels as usize * 4;
+        // Keep the newest scheduled audio if the output callback falls behind.
+        let max = self.max_samples.load(Ordering::Relaxed);
         if ring.len() + samples.len() > max {
-            warn!(drop = samples.len(), "Ring buffer full — dropping chunk");
+            let overflow = ring.len() + samples.len() - max;
+            for _ in 0..overflow {
+                let _ = ring.pop_front();
+            }
+            warn!(
+                drop = overflow,
+                "Ring buffer full — dropping oldest samples"
+            );
             self.health.overrun_count.fetch_add(1, Ordering::Relaxed);
-            return Ok(());
         }
         ring.extend(samples.iter().copied());
         debug!(buffered = ring.len(), "Player::write");

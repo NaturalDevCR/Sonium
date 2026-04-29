@@ -128,20 +128,34 @@ impl BiquadState {
 /// A single EQ band: one biquad state per channel.
 struct BandFilter {
     channels: Vec<BiquadState>,
+    sections: usize,
 }
 
 impl BandFilter {
     fn new(band: &EqBand, sample_rate: u32, n_channels: usize) -> Self {
         let proto = BiquadState::from_band(band, sample_rate);
+        let sections = match band.filter_type {
+            sonium_protocol::messages::FilterType::HighPass
+            | sonium_protocol::messages::FilterType::LowPass => {
+                (band.slope_db_per_oct.clamp(12, 48) / 12) as usize
+            }
+            _ => 1,
+        };
         Self {
-            channels: vec![proto; n_channels],
+            channels: vec![proto; n_channels * sections],
+            sections,
         }
     }
 
     /// Process one sample on the given channel.
     #[inline]
     fn process(&mut self, ch: usize, x: f32) -> f32 {
-        self.channels[ch].process(x)
+        let mut y = x;
+        let n_channels = self.channels.len() / self.sections;
+        for section in 0..self.sections {
+            y = self.channels[section * n_channels + ch].process(y);
+        }
+        y
     }
 }
 
@@ -181,6 +195,71 @@ impl EqProcessor {
                 x = band.process(ch, x);
             }
             *s = x.clamp(i16::MIN as f32, i16::MAX as f32) as i16;
+        }
+    }
+}
+
+/// EQ wrapper that crossfades between configurations to avoid clicks/dropouts
+/// when the operator edits filters in real time.
+pub struct SmoothedEqProcessor {
+    current: Option<EqProcessor>,
+    pending: Option<Option<EqProcessor>>,
+    remaining_samples: usize,
+    total_samples: usize,
+    sample_rate: u32,
+    n_channels: usize,
+}
+
+impl SmoothedEqProcessor {
+    pub fn new(enabled: bool, bands: &[EqBand], sample_rate: u32, n_channels: usize) -> Self {
+        Self {
+            current: build_eq(enabled, bands, sample_rate, n_channels),
+            pending: None,
+            remaining_samples: 0,
+            total_samples: 0,
+            sample_rate,
+            n_channels,
+        }
+    }
+
+    pub fn set_config(&mut self, enabled: bool, bands: &[EqBand]) {
+        let next = build_eq(enabled, bands, self.sample_rate, self.n_channels);
+        let fade_frames = (self.sample_rate / 80).max(128);
+        self.pending = Some(next);
+        self.total_samples = fade_frames as usize * self.n_channels;
+        self.remaining_samples = self.total_samples;
+    }
+
+    pub fn apply(&mut self, samples: &mut [i16]) {
+        if self.pending.is_none() {
+            if let Some(eq) = self.current.as_mut() {
+                eq.apply(samples);
+            }
+            return;
+        }
+
+        let mut next_samples = samples.to_vec();
+        if let Some(eq) = self.current.as_mut() {
+            eq.apply(samples);
+        }
+        if let Some(next) = self.pending.as_mut().and_then(|p| p.as_mut()) {
+            next.apply(&mut next_samples);
+        }
+
+        for (old, next) in samples.iter_mut().zip(next_samples.iter()) {
+            if self.remaining_samples == 0 {
+                *old = *next;
+                continue;
+            }
+            let progressed = self.total_samples - self.remaining_samples;
+            let mix = progressed as f32 / self.total_samples.max(1) as f32;
+            let y = (*old as f32 * (1.0 - mix)) + (*next as f32 * mix);
+            *old = y.clamp(i16::MIN as f32, i16::MAX as f32) as i16;
+            self.remaining_samples -= 1;
+        }
+
+        if self.remaining_samples == 0 {
+            self.current = self.pending.take().unwrap_or(None);
         }
     }
 }

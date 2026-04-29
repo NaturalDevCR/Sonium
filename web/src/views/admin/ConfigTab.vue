@@ -16,7 +16,7 @@ const value   = ref('');
 const saved   = ref('');
 const loading = ref(true);
 const saving  = ref(false);
-const reloading = ref(false);
+const restarting = ref(false);
 const status  = ref<{ type: 'success' | 'error'; msg: string } | null>(null);
 const validationError = ref<string | null>(null);
 
@@ -48,7 +48,7 @@ async function save() {
   try {
     await api.saveConfigRaw(value.value);
     saved.value  = value.value;
-    status.value = { type: 'success', msg: 'Config saved. Stream changes will reload automatically.' };
+    status.value = { type: 'success', msg: 'Config saved. Restart Sonium server to apply these changes.' };
   } catch (e) {
     status.value = { type: 'error', msg: String(e) };
   } finally {
@@ -56,30 +56,30 @@ async function save() {
   }
 }
 
-async function reloadConfig() {
-  reloading.value = true;
-  status.value = null;
-  try {
-    const report = await api.reloadConfig();
-    const changed = report.added.length + report.removed.length + report.restarted.length;
-    const restartOnly = report.restart_required.length
-      ? ` Restart still required for: ${report.restart_required.join(', ')}.`
-      : '';
-    status.value = {
-      type: 'success',
-      msg: `Config reloaded: ${changed} stream change${changed === 1 ? '' : 's'} applied.${restartOnly}`,
-    };
-  } catch (e) {
-    status.value = { type: 'error', msg: String(e) };
-  } finally {
-    reloading.value = false;
-  }
-}
-
 function reset() {
   value.value  = saved.value;
   status.value = null;
   validationError.value = null;
+}
+
+async function restartServer() {
+  const ok = window.confirm(
+    'Restart Sonium server now? Audio will stop briefly and the web UI may disconnect while the process comes back.',
+  );
+  if (!ok) return;
+
+  restarting.value = true;
+  status.value = null;
+  try {
+    await api.restartServer();
+    status.value = {
+      type: 'success',
+      msg: 'Restart requested. If Sonium is managed by systemd, launchd, Docker, or another supervisor, it should come back automatically.',
+    };
+  } catch (e) {
+    status.value = { type: 'error', msg: String(e) };
+    restarting.value = false;
+  }
 }
 
 </script>
@@ -102,7 +102,7 @@ function reset() {
         </button>
         <button
           @click="save"
-          :disabled="!isDirty || saving || !auth.isAdmin || !!validationError"
+          :disabled="!isDirty || saving || restarting || !auth.isAdmin || !!validationError"
           class="flex items-center gap-1.5 px-3 py-1.5 rounded-lg bg-blue-600 hover:bg-blue-500 text-white text-sm
                  font-medium disabled:opacity-50 transition-colors"
         >
@@ -110,13 +110,13 @@ function reset() {
           {{ saving ? 'Saving…' : 'Save' }}
         </button>
         <button
-          @click="reloadConfig"
-          :disabled="saving || reloading || !auth.isAdmin"
-          class="flex items-center gap-1.5 px-3 py-1.5 rounded-lg bg-slate-800 hover:bg-slate-700 text-slate-100 text-sm
+          @click="restartServer"
+          :disabled="saving || restarting || !auth.isAdmin"
+          class="flex items-center gap-1.5 px-3 py-1.5 rounded-lg bg-amber-600/90 hover:bg-amber-500 text-white text-sm
                  font-medium disabled:opacity-50 transition-colors"
         >
-          <span class="mdi" :class="reloading ? 'mdi-loading animate-spin' : 'mdi-refresh'"></span>
-          {{ reloading ? 'Reloading…' : 'Reload' }}
+          <span class="mdi" :class="restarting ? 'mdi-loading animate-spin' : 'mdi-restart'"></span>
+          {{ restarting ? 'Restarting…' : 'Restart server' }}
         </button>
       </div>
     </div>
@@ -174,8 +174,7 @@ function reset() {
     </div>
 
     <p class="text-xs text-slate-600">
-      Stream changes reload live after saving. Bind address, ports, mDNS, and log-level changes still require a restart.
-      Sonium validates the TOML before saving.
+      Sonium validates the TOML before saving. Changes are applied on the next restart; use restart server when Sonium is supervised and should come back automatically.
     </p>
   </div>
 </template>

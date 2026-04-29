@@ -7,9 +7,8 @@ mod streamreader;
 
 use anyhow::Context;
 use clap::Parser;
-use std::{collections::HashMap, path::PathBuf, sync::Arc};
+use std::{path::PathBuf, sync::Arc};
 use tokio::net::TcpListener;
-use tokio::sync::mpsc;
 use tokio::task::JoinHandle;
 use tokio_util::sync::CancellationToken;
 use tracing::{info, warn};
@@ -17,11 +16,9 @@ use tracing::{info, warn};
 use tokio::time::Duration;
 
 use sonium_common::config::{ServerConfig, StreamSource};
-use sonium_control::{config_api, ws::Event, EventBus, PersistenceStore, ServerState, UserStore};
+use sonium_control::{ws::Event, EventBus, PersistenceStore, ServerState, UserStore};
 
-use broadcaster::{new_registry, register, unregister, BroadcasterRegistry};
-
-type StreamHandles = HashMap<String, (CancellationToken, JoinHandle<()>)>;
+use broadcaster::{new_registry, register, BroadcasterRegistry};
 
 #[derive(Parser)]
 #[command(
@@ -147,8 +144,6 @@ async fn main() -> anyhow::Result<()> {
     state.restore_groups(saved_groups);
 
     // ── One stream reader per configured source ───────────────────────────
-    let live_cfg = Arc::new(parking_lot::RwLock::new(cfg.clone()));
-    let mut stream_handles = StreamHandles::new();
     for stream_cfg in &cfg.streams {
         let (cancel, handle) = spawn_stream(
             stream_cfg.clone(),
@@ -156,20 +151,8 @@ async fn main() -> anyhow::Result<()> {
             state.clone(),
             shutdown.clone(),
         );
-        stream_handles.insert(stream_cfg.id.clone(), (cancel, handle));
+        drop((cancel, handle));
     }
-
-    let (reload_tx, reload_rx) = mpsc::channel(8);
-    spawn_reload_manager(
-        reload_rx,
-        cli.config.clone(),
-        live_cfg.clone(),
-        stream_handles,
-        registry.clone(),
-        state.clone(),
-        shutdown.clone(),
-    );
-    spawn_config_watcher(cli.config.clone(), reload_tx.clone(), shutdown.clone());
 
     // ── Heartbeat task (pushes uptime to connected web UIs every 5 s) ─────
     {
@@ -195,12 +178,11 @@ async fn main() -> anyhow::Result<()> {
         let state = state.clone();
         let auth = auth.clone();
         let config_path = cli.config.clone();
-        let reload_tx = reload_tx.clone();
         let port = cfg.server.control_port;
         let cancel = shutdown.clone();
         tokio::spawn(async move {
             tokio::select! {
-                result = control_server::run(state, auth, config_path, Some(reload_tx), port) => {
+                result = control_server::run(state, auth, config_path, None, port) => {
                     if let Err(e) = result {
                         warn!("Control server error: {e}");
                     }
@@ -249,12 +231,12 @@ async fn main() -> anyhow::Result<()> {
                 let _ = stream.set_nodelay(true);
                 info!(%peer, "New client connected");
                 let registry = registry.clone();
-                let cfg      = live_cfg.read().clone();
+                let session_cfg = cfg.clone();
                 let state    = state.clone();
                 let cancel   = shutdown.clone();
                 tokio::spawn(async move {
                     tokio::select! {
-                        result = session::handle(stream, peer, registry, cfg, state) => {
+                        result = session::handle(stream, peer, registry, session_cfg, state) => {
                             if let Err(e) = result {
                                 warn!(%peer, "Session error: {e}");
                             }
@@ -299,6 +281,9 @@ fn spawn_stream(
         &stream_cfg.codec,
         format!("{}", stream_cfg.sample_format),
         &stream_cfg.source,
+        stream_cfg.buffer_ms,
+        stream_cfg.idle_timeout_ms,
+        stream_cfg.silence_on_idle,
     );
 
     let stream_id = stream_cfg.id.clone();
@@ -338,224 +323,6 @@ fn spawn_stream(
 
     info!(stream = %stream_id, "Stream reader started");
     (local_cancel, handle)
-}
-
-fn spawn_reload_manager(
-    mut reload_rx: mpsc::Receiver<config_api::ReloadRequest>,
-    config_path: PathBuf,
-    live_cfg: Arc<parking_lot::RwLock<ServerConfig>>,
-    mut handles: StreamHandles,
-    registry: Arc<BroadcasterRegistry>,
-    state: Arc<ServerState>,
-    shutdown: CancellationToken,
-) {
-    tokio::spawn(async move {
-        loop {
-            tokio::select! {
-                Some(req) = reload_rx.recv() => {
-                    let result = reload_config(
-                        &config_path,
-                        &live_cfg,
-                        &mut handles,
-                        registry.clone(),
-                        state.clone(),
-                        shutdown.clone(),
-                    );
-                    let _ = req.respond_to.send(result);
-                }
-                _ = shutdown.cancelled() => break,
-            }
-        }
-    });
-}
-
-fn reload_config(
-    config_path: &std::path::Path,
-    live_cfg: &Arc<parking_lot::RwLock<ServerConfig>>,
-    handles: &mut StreamHandles,
-    registry: Arc<BroadcasterRegistry>,
-    state: Arc<ServerState>,
-    shutdown: CancellationToken,
-) -> Result<config_api::ConfigReloadReport, String> {
-    let mut next_cfg = ServerConfig::from_file(config_path).map_err(|e| e.to_string())?;
-    let current_cfg = live_cfg.read().clone();
-
-    let mut restart_required = Vec::new();
-    if next_cfg.server.bind != current_cfg.server.bind {
-        restart_required.push("server.bind".into());
-        next_cfg.server.bind = current_cfg.server.bind.clone();
-    }
-    if next_cfg.server.stream_port != current_cfg.server.stream_port {
-        restart_required.push("server.stream_port".into());
-        next_cfg.server.stream_port = current_cfg.server.stream_port;
-    }
-    if next_cfg.server.control_port != current_cfg.server.control_port {
-        restart_required.push("server.control_port".into());
-        next_cfg.server.control_port = current_cfg.server.control_port;
-    }
-    if next_cfg.server.mdns != current_cfg.server.mdns {
-        restart_required.push("server.mdns".into());
-        next_cfg.server.mdns = current_cfg.server.mdns;
-    }
-    if next_cfg.server.snapcast_compat != current_cfg.server.snapcast_compat {
-        restart_required.push("server.snapcast_compat".into());
-        next_cfg.server.snapcast_compat = current_cfg.server.snapcast_compat;
-    }
-    if next_cfg.log.level != current_cfg.log.level {
-        restart_required.push("log.level".into());
-        next_cfg.log.level = current_cfg.log.level.clone();
-    }
-
-    let old_streams: HashMap<_, _> = current_cfg
-        .streams
-        .iter()
-        .map(|s| (s.id.clone(), s.clone()))
-        .collect();
-    let new_streams: HashMap<_, _> = next_cfg
-        .streams
-        .iter()
-        .map(|s| (s.id.clone(), s.clone()))
-        .collect();
-
-    let mut report = config_api::ConfigReloadReport {
-        added: Vec::new(),
-        removed: Vec::new(),
-        restarted: Vec::new(),
-        unchanged: Vec::new(),
-        restart_required,
-    };
-
-    for (id, old_stream) in &old_streams {
-        match new_streams.get(id) {
-            None => {
-                if let Some((cancel, handle)) = handles.remove(id) {
-                    cancel.cancel();
-                    handle.abort();
-                }
-                unregister(&registry, id);
-                state.unregister_stream(id);
-                state.events().emit(Event::StreamRemoved {
-                    stream_id: id.clone(),
-                });
-                report.removed.push(id.clone());
-            }
-            Some(new_stream) if stream_requires_restart(old_stream, new_stream) => {
-                if let Some((cancel, handle)) = handles.remove(id) {
-                    cancel.cancel();
-                    handle.abort();
-                }
-                unregister(&registry, id);
-                let (cancel, handle) = spawn_stream(
-                    new_stream.clone(),
-                    registry.clone(),
-                    state.clone(),
-                    shutdown.clone(),
-                );
-                handles.insert(id.clone(), (cancel, handle));
-                state.events().emit(Event::StreamRestarted {
-                    stream_id: id.clone(),
-                });
-                report.restarted.push(id.clone());
-            }
-            Some(new_stream) => {
-                state.register_stream(
-                    id,
-                    new_stream.display_name.clone(),
-                    &new_stream.codec,
-                    format!("{}", new_stream.sample_format),
-                    &new_stream.source,
-                );
-                report.unchanged.push(id.clone());
-            }
-        }
-    }
-
-    for (id, new_stream) in &new_streams {
-        if !old_streams.contains_key(id) {
-            let (cancel, handle) = spawn_stream(
-                new_stream.clone(),
-                registry.clone(),
-                state.clone(),
-                shutdown.clone(),
-            );
-            handles.insert(id.clone(), (cancel, handle));
-            report.added.push(id.clone());
-        }
-    }
-
-    *live_cfg.write() = next_cfg;
-    info!(
-        added = report.added.len(),
-        removed = report.removed.len(),
-        restarted = report.restarted.len(),
-        unchanged = report.unchanged.len(),
-        "Config reloaded"
-    );
-    Ok(report)
-}
-
-fn stream_requires_restart(old: &StreamSource, new: &StreamSource) -> bool {
-    old.source != new.source
-        || old.codec != new.codec
-        || old.sample_format != new.sample_format
-        || old.buffer_ms != new.buffer_ms
-        || old.idle_timeout_ms != new.idle_timeout_ms
-        || old.silence_on_idle != new.silence_on_idle
-}
-
-fn spawn_config_watcher(
-    config_path: PathBuf,
-    reload_tx: mpsc::Sender<config_api::ReloadRequest>,
-    shutdown: CancellationToken,
-) {
-    tokio::spawn(async move {
-        use notify::{EventKind, RecursiveMode, Watcher};
-
-        let (fs_tx, mut fs_rx) = mpsc::channel(8);
-        let mut watcher = match notify::recommended_watcher(move |result| {
-            let _ = fs_tx.blocking_send(result);
-        }) {
-            Ok(w) => w,
-            Err(e) => {
-                warn!("Config watcher unavailable: {e}");
-                return;
-            }
-        };
-
-        if let Err(e) = watcher.watch(&config_path, RecursiveMode::NonRecursive) {
-            warn!(path = %config_path.display(), "Config watcher unavailable: {e}");
-            return;
-        }
-
-        loop {
-            tokio::select! {
-                Some(result) = fs_rx.recv() => {
-                    let Ok(event) = result else { continue; };
-                    if !matches!(event.kind, EventKind::Modify(_) | EventKind::Create(_)) {
-                        continue;
-                    }
-                    tokio::time::sleep(Duration::from_millis(500)).await;
-                    while fs_rx.try_recv().is_ok() {}
-
-                    let (respond_to, response) = tokio::sync::oneshot::channel();
-                    if reload_tx.send(config_api::ReloadRequest { respond_to }).await.is_err() {
-                        break;
-                    }
-                    match response.await {
-                        Ok(Ok(report)) => info!(
-                            added = report.added.len(),
-                            removed = report.removed.len(),
-                            restarted = report.restarted.len(),
-                            "Config file change reloaded"
-                        ),
-                        Ok(Err(e)) => warn!("Config file change could not be reloaded: {e}"),
-                        Err(_) => break,
-                    }
-                }
-                _ = shutdown.cancelled() => break,
-            }
-        }
-    });
 }
 
 /// Wait for SIGINT (Ctrl-C) or SIGTERM.

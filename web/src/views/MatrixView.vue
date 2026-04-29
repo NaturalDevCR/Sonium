@@ -233,6 +233,11 @@ const getGroupClients = (clientIds: string[]) => {
   return clientIds.map(id => store.clientsById[id]).filter(Boolean);
 };
 
+function goBack() {
+  if (window.history.length > 1) router.back();
+  else router.push({ name: 'admin-groups' });
+}
+
 // Renaming (Simplified for Sonium)
 const renamingGroupId = ref<string | null>(null);
 const newGroupName = ref('');
@@ -263,7 +268,7 @@ const vFocus = {
     <header class="matrix-header">
       <div class="matrix-header-inner">
         <div class="flex items-center gap-4">
-          <button @click="router.push('/')" class="ctrl-icon-btn" title="Back to control">
+          <button @click="goBack" class="ctrl-icon-btn" title="Back">
             <span class="mdi mdi-arrow-left text-lg"></span>
           </button>
           <div>

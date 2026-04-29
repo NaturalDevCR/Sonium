@@ -112,6 +112,10 @@ async fn session_loop(
     let init_vol = state.get_volume(client_id).unwrap_or((100, false));
     let init_client = state.get_client(client_id);
     let init_latency = init_client.as_ref().map(|c| c.latency_ms).unwrap_or(0);
+    let init_observability = init_client
+        .as_ref()
+        .map(|c| c.observability_enabled)
+        .unwrap_or(false);
     let (init_eq_bands, init_eq_enabled) = state.get_stream_eq(&stream_id).unwrap_or_default();
 
     // Send initial ServerSettings.
@@ -128,6 +132,7 @@ async fn session_loop(
         init_latency,
         init_eq_bands,
         init_eq_enabled,
+        init_observability,
     )
     .await?;
 
@@ -224,9 +229,10 @@ async fn session_loop(
                     {
                         let c = state.get_client(client_id);
                         let lat = c.as_ref().map(|c| c.latency_ms).unwrap_or(0);
+                        let obs = c.as_ref().map(|c| c.observability_enabled).unwrap_or(false);
                         let (eq, en) = state.get_stream_eq(&stream_id).unwrap_or_default();
                         let current_buffer = bc.as_ref().map(|b| b.buffer_ms).unwrap_or_else(|| cfg.default_stream().buffer_ms);
-                        send_server_settings(stream, current_buffer, volume, muted, lat, eq, en).await?;
+                        send_server_settings(stream, current_buffer, volume, muted, lat, eq, en, obs).await?;
                         debug!(%peer, volume, muted, "Volume settings pushed to client");
                     }
 
@@ -234,10 +240,23 @@ async fn session_loop(
                         if cid == client_id =>
                     {
                         let (vol, muted) = state.get_volume(client_id).unwrap_or((100, false));
+                        let obs = state.get_client(client_id).map(|c| c.observability_enabled).unwrap_or(false);
                         let (eq, en) = state.get_stream_eq(&stream_id).unwrap_or_default();
                         let current_buffer = bc.as_ref().map(|b| b.buffer_ms).unwrap_or_else(|| cfg.default_stream().buffer_ms);
-                        send_server_settings(stream, current_buffer, vol, muted, latency_ms, eq, en).await?;
+                        send_server_settings(stream, current_buffer, vol, muted, latency_ms, eq, en, obs).await?;
                         debug!(%peer, latency_ms, "Latency settings pushed to client");
+                    }
+
+                    Ok(Event::ClientObservabilityChanged { client_id: cid, enabled })
+                        if cid == client_id =>
+                    {
+                        let (vol, muted) = state.get_volume(client_id).unwrap_or((100, false));
+                        let c = state.get_client(client_id);
+                        let lat = c.as_ref().map(|c| c.latency_ms).unwrap_or(0);
+                        let (eq, en) = state.get_stream_eq(&stream_id).unwrap_or_default();
+                        let current_buffer = bc.as_ref().map(|b| b.buffer_ms).unwrap_or_else(|| cfg.default_stream().buffer_ms);
+                        send_server_settings(stream, current_buffer, vol, muted, lat, eq, en, enabled).await?;
+                        debug!(%peer, enabled, "Observability setting pushed to client");
                     }
 
                     Ok(Event::StreamEqChanged { stream_id: sid, eq_bands, enabled })
@@ -246,8 +265,9 @@ async fn session_loop(
                         let (vol, muted) = state.get_volume(client_id).unwrap_or((100, false));
                         let c = state.get_client(client_id);
                         let lat = c.as_ref().map(|c| c.latency_ms).unwrap_or(0);
+                        let obs = c.as_ref().map(|c| c.observability_enabled).unwrap_or(false);
                         let current_buffer = bc.as_ref().map(|b| b.buffer_ms).unwrap_or_else(|| cfg.default_stream().buffer_ms);
-                        send_server_settings(stream, current_buffer, vol, muted, lat, eq_bands, enabled).await?;
+                        send_server_settings(stream, current_buffer, vol, muted, lat, eq_bands, enabled, obs).await?;
                         debug!(%peer, stream_id, "Stream EQ settings pushed to client");
                     }
 
@@ -304,6 +324,7 @@ async fn recv_audio(
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 async fn send_server_settings(
     stream: &mut TcpStream,
     buffer_ms: u32,
@@ -312,6 +333,7 @@ async fn send_server_settings(
     latency_ms: i32,
     eq_bands: Vec<sonium_protocol::messages::EqBand>,
     eq_enabled: bool,
+    observability_enabled: bool,
 ) -> anyhow::Result<()> {
     let settings = ServerSettings {
         buffer_ms: buffer_ms as i32,
@@ -320,6 +342,7 @@ async fn send_server_settings(
         muted,
         eq_bands,
         eq_enabled,
+        observability_enabled,
     };
     let mut hdr = MessageHeader::new(MessageType::ServerSettings, 0);
     hdr.id = next_id();
@@ -358,7 +381,13 @@ async fn handle_client_msg(
         }
         MessageType::HealthReport => {
             if let Ok(Message::HealthReport(health)) = Message::from_payload(&hdr, payload) {
-                state.set_client_health(client_id, health);
+                if state
+                    .get_client(client_id)
+                    .map(|c| c.observability_enabled)
+                    .unwrap_or(false)
+                {
+                    state.set_client_health(client_id, health);
+                }
             }
         }
         other => debug!("Ignoring message: {other:?}"),

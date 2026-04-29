@@ -36,6 +36,8 @@
         :style="getNodeStyle(band)"
         @mousedown="startDrag(idx, $event)"
         @touchstart="startDrag(idx, $event)"
+        @wheel.prevent="adjustQ(idx, $event)"
+        :title="`Band ${idx + 1}: scroll to change Q`"
       >
         <span class="eq-node-label">{{ idx + 1 }}</span>
       </div>
@@ -99,6 +101,18 @@
               <input type="number" v-model.number="band.q" min="0.1" max="10" step="0.1" @change="update" />
             </div>
           </div>
+
+          <div class="param" v-if="['high_pass', 'low_pass'].includes(band.filter_type)">
+            <label>Slope</label>
+            <div class="value-input">
+              <select v-model.number="band.slope_db_per_oct" @change="update">
+                <option :value="12">12 dB/oct</option>
+                <option :value="24">24 dB/oct</option>
+                <option :value="36">36 dB/oct</option>
+                <option :value="48">48 dB/oct</option>
+              </select>
+            </div>
+          </div>
         </div>
       </div>
     </div>
@@ -131,21 +145,23 @@ const plotContainer = ref<HTMLDivElement | null>(null);
 let resizeObserver: ResizeObserver | null = null;
 
 const DEFAULT_BANDS: EqBand[] = [
-  { filter_type: 'peaking', freq_hz: 100,   gain_db: 0, q: 1.0, enabled: true },
-  { filter_type: 'peaking', freq_hz: 500,   gain_db: 0, q: 1.0, enabled: true },
-  { filter_type: 'peaking', freq_hz: 2000,  gain_db: 0, q: 1.0, enabled: true },
-  { filter_type: 'peaking', freq_hz: 8000,  gain_db: 0, q: 1.0, enabled: true },
+  { filter_type: 'peaking', freq_hz: 63,    gain_db: 0, q: 1.0, slope_db_per_oct: 12, enabled: true },
+  { filter_type: 'peaking', freq_hz: 160,   gain_db: 0, q: 1.0, slope_db_per_oct: 12, enabled: true },
+  { filter_type: 'peaking', freq_hz: 400,   gain_db: 0, q: 1.0, slope_db_per_oct: 12, enabled: true },
+  { filter_type: 'peaking', freq_hz: 1000,  gain_db: 0, q: 1.0, slope_db_per_oct: 12, enabled: true },
+  { filter_type: 'peaking', freq_hz: 2500,  gain_db: 0, q: 1.0, slope_db_per_oct: 12, enabled: true },
+  { filter_type: 'peaking', freq_hz: 8000,  gain_db: 0, q: 1.0, slope_db_per_oct: 12, enabled: true },
 ];
 
 // Initialize bands from props
 const initBands = () => {
   if (props.modelValue && props.modelValue.length > 0) {
-    // Fill up to 4 bands if fewer are provided
-    const existing = props.modelValue.map(b => ({ ...b }));
-    while (existing.length < 4) {
+    // Fill up to 6 bands if fewer are provided.
+    const existing: EqBand[] = props.modelValue.map(b => ({ ...b, slope_db_per_oct: b.slope_db_per_oct ?? 12 }));
+    while (existing.length < 6) {
       existing.push({ ...DEFAULT_BANDS[existing.length] });
     }
-    bands.value = existing.slice(0, 4);
+    bands.value = existing.slice(0, 6);
   } else {
     bands.value = DEFAULT_BANDS.map(b => ({ ...b }));
   }
@@ -163,6 +179,12 @@ watch(() => props.enabled, () => {
   scheduleRender();
 });
 
+watch(() => store.streamLevels[props.streamId], (level) => {
+  rmsHistory.push(level ?? -90);
+  if (rmsHistory.length > 40) rmsHistory.shift();
+  scheduleRender();
+});
+
 onMounted(async () => {
   initBands();
   await nextTick();
@@ -173,11 +195,9 @@ onMounted(async () => {
     resizeObserver.observe(plotContainer.value);
   }
   scheduleRender({ recalculateCurve: true });
-  startAnimation();
 });
 
 onUnmounted(() => {
-  stopAnimation();
   stopDrag();
   resizeObserver?.disconnect();
   if (renderFrameId !== null) cancelAnimationFrame(renderFrameId);
@@ -192,6 +212,16 @@ const update = () => {
 
 const reset = () => {
   bands.value = DEFAULT_BANDS.map(b => ({ ...b }));
+  update();
+};
+
+const adjustQ = (idx: number, e: WheelEvent) => {
+  const band = bands.value[idx];
+  if (!band) return;
+  activeBand.value = idx;
+  const direction = e.deltaY < 0 ? 1 : -1;
+  const step = e.shiftKey ? 0.5 : 0.1;
+  band.q = Math.round(Math.max(0.1, Math.min(10, band.q + direction * step)) * 10) / 10;
   update();
 };
 
@@ -333,7 +363,14 @@ const recalculateCurve = () => {
   // Pre-calculate band coefficients once
   const activeBands = bands.value
     .filter(b => b.enabled)
-    .map(b => getCoefficients(b, sampleRate))
+    .flatMap(b => {
+      const coeffs = getCoefficients(b, sampleRate);
+      if (!coeffs) return [];
+      const sections = ['high_pass', 'low_pass'].includes(b.filter_type)
+        ? Math.max(1, Math.min(4, Math.round((b.slope_db_per_oct ?? 12) / 12)))
+        : 1;
+      return Array.from({ length: sections }, () => coeffs);
+    })
     .filter(Boolean);
 
   frequencyMap.forEach((f, i) => {
@@ -370,35 +407,6 @@ const scheduleRender = (options: { emitModel?: boolean; recalculateCurve?: boole
 
   if (renderFrameId !== null) return;
   renderFrameId = requestAnimationFrame(flushRender);
-};
-
-let animationId: number | null = null;
-
-const startAnimation = () => {
-  let lastRtaUpdate = 0;
-  const loop = (timestamp: number) => {
-    if (!animationId) return;
-
-    // Throttled RTA update (12fps is enough and even lighter)
-    if (timestamp - lastRtaUpdate > 80) {
-      const currentRms = getStreamRms();
-      rmsHistory.push(currentRms);
-      if (rmsHistory.length > 40) rmsHistory.shift();
-      lastRtaUpdate = timestamp;
-      scheduleRender();
-    }
-    animationId = requestAnimationFrame(loop);
-  };
-  animationId = requestAnimationFrame(loop);
-};
-
-const stopAnimation = () => {
-  if (animationId) cancelAnimationFrame(animationId);
-  animationId = null;
-};
-
-const getStreamRms = () => {
-  return store.streamLevels[props.streamId] || -90;
 };
 
 // Biquad Magnitude Response calculation
@@ -548,19 +556,15 @@ const draw = () => {
     ctx.drawImage(grid, 0, 0, width, height);
   }
 
-  // ── 2. Draw Simulated RTA ───────────────────────────────────────────────
+  // ── 2. Draw level history from server RMS events ───────────────────────
   if (props.enabled) {
-    const rms = rmsHistory[rmsHistory.length - 1];
-    const normalized = Math.max(0, (rms + 70) / 70);
-    
-    const barCount = 40; // Reduced from 60
+    const barCount = rmsHistory.length;
     const barWidth = width / barCount;
     ctx.fillStyle = 'rgba(56, 189, 248, 0.1)';
 
-    const now = Date.now() / 300;
     for (let i = 0; i < barCount; i++) {
-      const noise = Math.sin(now + i * 0.3) * 0.15 + 0.85;
-      const h = normalized * height * 0.5 * noise * (1 - Math.abs(i - barCount/2) / (barCount * 0.75));
+      const normalized = Math.max(0, (rmsHistory[i] + 70) / 70);
+      const h = normalized * height * 0.5;
       if (h > 2) {
         ctx.fillRect(i * barWidth, height - h, barWidth - 1, h);
       }
@@ -871,7 +875,8 @@ const draw = () => {
   align-items: center;
   gap: 6px;
 }
-.value-input input {
+.value-input input,
+.value-input select {
   background: var(--bg-surface);
   border: 1px solid var(--border-mid);
   border-radius: 5px;
@@ -885,7 +890,12 @@ const draw = () => {
   outline: none;
   transition: border-color 0.2s;
 }
-.value-input input:focus {
+.value-input select {
+  width: 96px;
+  text-align: left;
+}
+.value-input input:focus,
+.value-input select:focus {
   border-color: var(--accent);
 }
 .value-input span {

@@ -195,6 +195,17 @@ pub async fn scan_subnet(cidr: &str, port: u16, concurrency: usize) -> Vec<ScanR
     results
 }
 
+/// Best-effort current IPv4 `/24` subnet for UI defaults.
+pub fn local_ipv4_subnet() -> Option<String> {
+    let socket = std::net::UdpSocket::bind((Ipv4Addr::UNSPECIFIED, 0)).ok()?;
+    socket.connect((Ipv4Addr::new(8, 8, 8, 8), 80)).ok()?;
+    let IpAddr::V4(ip) = socket.local_addr().ok()?.ip() else {
+        return None;
+    };
+    let octets = ip.octets();
+    Some(format!("{}.{}.{}.0/24", octets[0], octets[1], octets[2]))
+}
+
 /// Expand a CIDR like `"192.168.1.0/24"` into individual host addresses.
 /// Returns `None` if the CIDR is malformed.
 fn parse_cidr_hosts(cidr: &str) -> Option<Vec<Ipv4Addr>> {

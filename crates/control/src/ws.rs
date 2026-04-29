@@ -35,6 +35,10 @@ pub enum Event {
         client_id: String,
         latency_ms: i32,
     },
+    ClientObservabilityChanged {
+        client_id: String,
+        enabled: bool,
+    },
     ClientGroupChanged {
         client_id: String,
         group_id: String,

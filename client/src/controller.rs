@@ -13,7 +13,7 @@ use sonium_sync::time_provider::now_us;
 use sonium_sync::{PcmChunk, SyncBuffer, TimeProvider};
 
 use crate::decoder::ActiveDecoder;
-use crate::eq::build_eq;
+use crate::eq::SmoothedEqProcessor;
 use crate::player::Player;
 
 use tokio::sync::mpsc;
@@ -76,7 +76,8 @@ async fn connect_and_run(
     let mut muted = false;
     let mut eq_bands: Vec<EqBand> = vec![];
     let mut eq_enabled = false;
-    let mut eq_processor = None;
+    let mut eq_processor: Option<SmoothedEqProcessor> = None;
+    let mut observability_enabled = false;
     let mut server_buffer_ms: i32 = cfg.latency_ms + 500; // Default buffer depth
     let mut server_latency_ms: i32 = 0;
 
@@ -88,11 +89,15 @@ async fn connect_and_run(
     let mut sync_tick = tokio::time::interval(tokio::time::Duration::from_secs(1));
     let mut health_tick = tokio::time::interval(tokio::time::Duration::from_secs(2));
     let mut sync_seq: u16 = 0;
+    send_time_request(&mut stream, &mut sync_seq, &mut pending_time).await?;
 
     loop {
         tokio::select! {
             // Audio pump: ensure SyncBuffer is drained even if network is quiet
             _ = audio_tick.tick() => {
+                if time_provider.sample_count() == 0 {
+                    continue;
+                }
                 if let (Some(pl), Some(buf)) = (player.as_mut(), sync_buf.as_mut()) {
                     let now_server = time_provider.to_server_time(now_us());
                     while let Some(chunk) = buf.pop_ready(now_server) {
@@ -105,15 +110,10 @@ async fn connect_and_run(
 
             // Sync clock with server
             _ = sync_tick.tick() => {
-                sync_seq = sync_seq.wrapping_add(1);
-                let mut hdr = MessageHeader::new(MessageType::Time, 8);
-                hdr.id = sync_seq;
-                let msg = Message::Time(TimeMsg::zero()).encode_with_header(hdr);
-                if let Err(e) = stream.write_all(&msg).await {
+                if let Err(e) = send_time_request(&mut stream, &mut sync_seq, &mut pending_time).await {
                     warn!("Failed to send sync request: {e}");
                     break Ok(());
                 }
-                pending_time = Some((sync_seq, now_us()));
             }
 
             // Health report
@@ -145,10 +145,12 @@ async fn connect_and_run(
                     let _ = tx.send(report_msg.clone());
                 }
 
-                let msg = Message::HealthReport(report_msg).encode();
-                if let Err(e) = stream.write_all(&msg).await {
-                    warn!("Failed to send health report: {e}");
-                    break Ok(());
+                if observability_enabled {
+                    let msg = Message::HealthReport(report_msg).encode();
+                    if let Err(e) = stream.write_all(&msg).await {
+                        warn!("Failed to send health report: {e}");
+                        break Ok(());
+                    }
                 }
             }
 
@@ -181,7 +183,7 @@ async fn connect_and_run(
                         let fmt = dec.sample_format();
                         let p   = Player::new(fmt, cfg.device.as_deref())?;
                         let buf = SyncBuffer::new(fmt);
-                        eq_processor = build_eq(eq_enabled, &eq_bands, fmt.rate, fmt.channels as usize);
+                        eq_processor = Some(SmoothedEqProcessor::new(eq_enabled, &eq_bands, fmt.rate, fmt.channels as usize));
                         decoder  = Some(dec);
                         player   = Some(p);
                         sync_buf = Some(buf);
@@ -193,18 +195,34 @@ async fn connect_and_run(
                         muted    = ss.muted;
                         eq_bands = ss.eq_bands;
                         eq_enabled = ss.eq_enabled;
+                        observability_enabled = ss.observability_enabled;
                         server_buffer_ms = ss.buffer_ms;
                         server_latency_ms = ss.latency;
+                        if let Some(buf) = sync_buf.as_mut() {
+                            buf.set_target_buffer_ms(server_buffer_ms + cfg.latency_ms + server_latency_ms);
+                        }
+                        if let Some(pl) = player.as_mut() {
+                            pl.set_buffer_limit_ms((server_buffer_ms + cfg.latency_ms + server_latency_ms).max(80));
+                        }
                         if let Some(dec) = decoder.as_ref() {
                             let fmt = dec.sample_format();
-                            eq_processor = build_eq(eq_enabled, &eq_bands, fmt.rate, fmt.channels as usize);
+                            if let Some(eq) = eq_processor.as_mut() {
+                                eq.set_config(eq_enabled, &eq_bands);
+                            } else {
+                                eq_processor = Some(SmoothedEqProcessor::new(
+                                    eq_enabled,
+                                    &eq_bands,
+                                    fmt.rate,
+                                    fmt.channels as usize,
+                                ));
+                            }
                         }
                         debug!(volume = ss.volume, muted = ss.muted, buffer_ms = ss.buffer_ms, latency_ms = ss.latency, "ServerSettings applied");
                     }
 
                     MessageType::WireChunk => {
                         let chunk = sonium_protocol::messages::WireChunk::decode(&payload)?;
-                        if let (Some(dec), Some(pl), Some(buf)) =
+                        if let (Some(dec), Some(_pl), Some(buf)) =
                             (decoder.as_mut(), player.as_mut(), sync_buf.as_mut())
                         {
                             let mut samples = Vec::new();
@@ -222,11 +240,6 @@ async fn connect_and_run(
 
                             let now_server = time_provider.to_server_time(now_us());
                             buf.push(PcmChunk::new(playout_us, samples, dec.sample_format()), now_server);
-
-                            // Drain buffer immediately for ready chunks (low latency)
-                            while let Some(c) = buf.pop_ready(now_server) {
-                                let _ = pl.write(&c.samples);
-                            }
                         }
                     }
 
@@ -250,6 +263,21 @@ async fn connect_and_run(
             }
         }
     }
+}
+
+async fn send_time_request(
+    stream: &mut TcpStream,
+    sync_seq: &mut u16,
+    pending_time: &mut Option<(u16, i64)>,
+) -> anyhow::Result<()> {
+    *sync_seq = sync_seq.wrapping_add(1);
+    let mut hdr = MessageHeader::new(MessageType::Time, 8);
+    hdr.id = *sync_seq;
+    let sent_us = hdr.sent.to_micros();
+    let msg = Message::Time(TimeMsg::zero()).encode_with_header(hdr);
+    stream.write_all(&msg).await?;
+    *pending_time = Some((*sync_seq, sent_us));
+    Ok(())
 }
 
 fn apply_volume(samples: &mut [i16], volume: u8, muted: bool) {

@@ -7,6 +7,7 @@ const server = useServerStore();
 const logs = ref('');
 const logPollTimer = ref<any>(null);
 const logContainer = ref<HTMLElement | null>(null);
+const toggling = ref<Record<string, boolean>>({});
 
 onMounted(() => {
   refreshLogs();
@@ -58,6 +59,15 @@ function formatJitter(ms: number) {
 function formatOffset(ms: number) {
   const sign = ms > 0 ? '+' : '';
   return `${sign}${ms}ms`;
+}
+
+async function setObservability(clientId: string, enabled: boolean) {
+  toggling.value = { ...toggling.value, [clientId]: true };
+  try {
+    await api.setObservability(clientId, enabled);
+  } finally {
+    toggling.value = { ...toggling.value, [clientId]: false };
+  }
 }
 </script>
 
@@ -129,6 +139,7 @@ function formatOffset(ms: number) {
             <thead>
               <tr class="bg-slate-900/50 border-b border-slate-800">
                 <th class="px-4 py-3 text-xs font-semibold text-slate-500 uppercase tracking-wider">Client</th>
+                <th class="px-4 py-3 text-xs font-semibold text-slate-500 uppercase tracking-wider">Diagnostics</th>
                 <th class="px-4 py-3 text-xs font-semibold text-slate-500 uppercase tracking-wider">Health</th>
                 <th class="px-4 py-3 text-xs font-semibold text-slate-500 uppercase tracking-wider">Buffer</th>
                 <th class="px-4 py-3 text-xs font-semibold text-slate-500 uppercase tracking-wider text-right">Jitter</th>
@@ -143,10 +154,26 @@ function formatOffset(ms: number) {
                       <span class="mdi mdi-speaker"></span>
                     </div>
                     <div>
-                      <p class="text-sm font-semibold text-white">{{ client.display_name }}</p>
+                      <p class="text-sm font-semibold text-white">{{ client.display_name || client.hostname }}</p>
                       <p class="text-xs text-slate-500 font-mono">{{ client.id }}</p>
                     </div>
                   </div>
+                </td>
+                <td class="px-4 py-4">
+                  <button
+                    class="diag-toggle"
+                    :class="{ active: client.observability_enabled }"
+                    :disabled="toggling[client.id]"
+                    @click="setObservability(client.id, !client.observability_enabled)"
+                  >
+                    <span
+                      class="mdi"
+                      :class="toggling[client.id]
+                        ? 'mdi-loading animate-spin'
+                        : client.observability_enabled ? 'mdi-pulse' : 'mdi-pulse-off'"
+                    ></span>
+                    {{ client.observability_enabled ? 'On' : 'Off' }}
+                  </button>
                 </td>
                 <td class="px-4 py-4">
                   <div class="flex gap-4">
@@ -187,7 +214,7 @@ function formatOffset(ms: number) {
                 </td>
               </tr>
               <tr v-if="clients.length === 0">
-                <td colspan="5" class="px-4 py-8 text-center text-slate-500 text-sm italic">
+                <td colspan="6" class="px-4 py-8 text-center text-slate-500 text-sm italic">
                   No online clients available for diagnostics.
                 </td>
               </tr>
@@ -277,6 +304,30 @@ function getLogLevelClass(line: string) {
 .log-line:hover {
   background: rgba(255, 255, 255, 0.03);
   border-left: 1px solid var(--accent);
+}
+
+.diag-toggle {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.4rem;
+  min-width: 4.75rem;
+  padding: 0.35rem 0.65rem;
+  border-radius: 0.5rem;
+  border: 1px solid var(--border);
+  background: rgba(15, 23, 42, 0.8);
+  color: var(--text-muted);
+  font-size: 0.75rem;
+  font-weight: 700;
+}
+
+.diag-toggle.active {
+  border-color: rgba(34, 211, 238, 0.45);
+  background: rgba(8, 145, 178, 0.12);
+  color: var(--accent);
+}
+
+.diag-toggle:disabled {
+  opacity: 0.55;
 }
 
 /* Custom scrollbar for logs */

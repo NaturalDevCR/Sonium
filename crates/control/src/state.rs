@@ -63,6 +63,9 @@ pub struct ClientInfo {
     /// Optional operator-assigned display name (shown instead of hostname).
     #[serde(default)]
     pub display_name: Option<String>,
+    /// Whether this client should send diagnostic health reports.
+    #[serde(default)]
+    pub observability_enabled: bool,
     /// Real-time health metrics.
     pub health: Option<HealthReport>,
 }
@@ -103,6 +106,9 @@ pub struct StreamInfo {
     pub codec: String,
     pub format: String,
     pub source: String,
+    pub buffer_ms: u32,
+    pub idle_timeout_ms: Option<u32>,
+    pub silence_on_idle: bool,
     pub status: StreamStatus,
     /// Per-stream EQ bands (empty = flat).
     #[serde(default)]
@@ -163,6 +169,9 @@ impl ServerState {
                     codec: "Unknown".into(),
                     format: "Unknown".into(),
                     source: "Unknown".into(),
+                    buffer_ms: 1000,
+                    idle_timeout_ms: None,
+                    silence_on_idle: false,
                     status: StreamStatus::Idle,
                     eq_bands: ps.eq_bands.clone(),
                     eq_enabled: ps.eq_enabled,
@@ -179,6 +188,9 @@ impl ServerState {
                     codec: "Unknown".into(),
                     format: "Unknown".into(),
                     source: "Unknown".into(),
+                    buffer_ms: 1000,
+                    idle_timeout_ms: None,
+                    silence_on_idle: false,
                     status: StreamStatus::Idle,
                     eq_bands: vec![],
                     eq_enabled: true,
@@ -187,7 +199,34 @@ impl ServerState {
         }
 
         Self {
-            clients: RwLock::new(HashMap::new()),
+            clients: RwLock::new(
+                saved_clients
+                    .iter()
+                    .map(|c| {
+                        (
+                            c.id.clone(),
+                            ClientInfo {
+                                id: c.id.clone(),
+                                hostname: c.hostname.clone(),
+                                client_name: "Sonium".into(),
+                                os: "unknown".into(),
+                                arch: "unknown".into(),
+                                remote_addr: "".into(),
+                                volume: c.volume,
+                                muted: c.muted,
+                                latency_ms: c.latency_ms,
+                                group_id: c.group_id.clone(),
+                                status: ClientStatus::Disconnected,
+                                connected_at: c.last_seen,
+                                protocol_version: 0,
+                                display_name: c.display_name.clone(),
+                                observability_enabled: c.observability_enabled,
+                                health: None,
+                            },
+                        )
+                    })
+                    .collect(),
+            ),
             groups: RwLock::new(groups),
             streams: RwLock::new(streams),
             events,
@@ -208,6 +247,13 @@ impl ServerState {
                 stream_id: pg.stream_id,
                 client_ids: vec![],
             });
+        }
+        for client in self.clients.read().values() {
+            if let Some(group) = groups.get_mut(&client.group_id) {
+                if !group.client_ids.contains(&client.id) {
+                    group.client_ids.push(client.id.clone());
+                }
+            }
         }
     }
 
@@ -238,6 +284,7 @@ impl ServerState {
                 volume: c.volume,
                 muted: c.muted,
                 latency_ms: c.latency_ms,
+                observability_enabled: c.observability_enabled,
                 group_id: c.group_id.clone(),
                 last_seen: Utc::now(),
             })
@@ -273,20 +320,32 @@ impl ServerState {
         let id = id.into();
         let hostname = hostname.into();
 
-        // Restore settings from the last persisted snapshot for this client ID.
+        // Restore settings from live state first, then the startup snapshot.
+        let existing = self.clients.read().get(&id).cloned();
         let saved = self.saved_clients.iter().find(|c| c.id == id);
 
-        let (volume, muted, latency_ms, group_id, display_name) = if let Some(s) = saved {
-            (
-                s.volume,
-                s.muted,
-                s.latency_ms,
-                s.group_id.clone(),
-                s.display_name.clone(),
-            )
-        } else {
-            (100, false, 0, "default".into(), None)
-        };
+        let (volume, muted, latency_ms, group_id, display_name, observability_enabled) =
+            if let Some(c) = existing {
+                (
+                    c.volume,
+                    c.muted,
+                    c.latency_ms,
+                    c.group_id,
+                    c.display_name,
+                    c.observability_enabled,
+                )
+            } else if let Some(s) = saved {
+                (
+                    s.volume,
+                    s.muted,
+                    s.latency_ms,
+                    s.group_id.clone(),
+                    s.display_name.clone(),
+                    s.observability_enabled,
+                )
+            } else {
+                (100, false, 0, "default".into(), None, false)
+            };
 
         let info = ClientInfo {
             id: id.clone(),
@@ -303,6 +362,7 @@ impl ServerState {
             connected_at: Utc::now(),
             protocol_version,
             display_name,
+            observability_enabled,
             health: None,
         };
 
@@ -388,6 +448,27 @@ impl ServerState {
                 client_id: client_id.into(),
                 latency_ms,
             });
+            drop(clients);
+            self.persist();
+            true
+        } else {
+            false
+        }
+    }
+
+    /// Enable or disable diagnostic health reporting for a client.
+    pub fn set_client_observability(&self, client_id: &str, enabled: bool) -> bool {
+        let mut clients = self.clients.write();
+        if let Some(c) = clients.get_mut(client_id) {
+            c.observability_enabled = enabled;
+            if !enabled {
+                c.health = None;
+            }
+            self.events
+                .emit(crate::ws::Event::ClientObservabilityChanged {
+                    client_id: client_id.into(),
+                    enabled,
+                });
             drop(clients);
             self.persist();
             true
@@ -628,6 +709,7 @@ impl ServerState {
     }
 
     /// Register a new stream in the state (idempotent — updates status if already exists).
+    #[allow(clippy::too_many_arguments)]
     pub fn register_stream(
         &self,
         id: impl Into<String>,
@@ -635,6 +717,9 @@ impl ServerState {
         codec: impl Into<String>,
         format: impl Into<String>,
         source: impl Into<String>,
+        buffer_ms: u32,
+        idle_timeout_ms: Option<u32>,
+        silence_on_idle: bool,
     ) {
         let id = id.into();
         let codec = codec.into();
@@ -648,6 +733,9 @@ impl ServerState {
                 stream.codec = codec.clone();
                 stream.format = format.clone();
                 stream.source = source.clone();
+                stream.buffer_ms = buffer_ms;
+                stream.idle_timeout_ms = idle_timeout_ms;
+                stream.silence_on_idle = silence_on_idle;
             })
             .or_insert_with(|| {
                 // Restore EQ settings if this stream was previously saved.
@@ -664,6 +752,9 @@ impl ServerState {
                     codec,
                     format,
                     source,
+                    buffer_ms,
+                    idle_timeout_ms,
+                    silence_on_idle,
                     status: StreamStatus::Idle,
                     eq_bands,
                     eq_enabled,
@@ -843,6 +934,7 @@ mod tests {
             volume: 60,
             muted: true,
             latency_ms: 50,
+            observability_enabled: false,
             group_id: "default".into(),
             last_seen: Utc::now(),
         }];

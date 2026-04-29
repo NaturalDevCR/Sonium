@@ -92,6 +92,8 @@ pub struct SyncBuffer {
     /// Last arrival info for jitter calculation: (arrival_us, playout_us).
     last_arrival_info: Option<(i64, i64)>,
     state: State,
+    target_buffer_us: i64,
+    lead_us: i64,
 }
 
 impl SyncBuffer {
@@ -110,7 +112,16 @@ impl SyncBuffer {
             jitter_us: 0.0,
             last_arrival_info: None,
             state: State::Buffering,
+            target_buffer_us: 1_000_000,
+            lead_us: 40_000,
         }
+    }
+
+    /// Update the server-requested playout buffer.
+    pub fn set_target_buffer_ms(&mut self, buffer_ms: i32) {
+        let clamped_ms = buffer_ms.clamp(40, 10_000);
+        self.target_buffer_us = clamped_ms as i64 * 1000;
+        self.lead_us = (self.target_buffer_us / 10).clamp(20_000, 100_000);
     }
 
     /// Insert a decoded chunk, maintaining playout-time order.
@@ -135,6 +146,7 @@ impl SyncBuffer {
             .position(|c| c.playout_us > chunk.playout_us)
             .unwrap_or(self.chunks.len());
         self.chunks.insert(pos, chunk);
+        self.drop_excess_buffered_audio();
     }
 
     /// Return the next chunk ready to play relative to `now_server_us`, or
@@ -143,12 +155,11 @@ impl SyncBuffer {
     /// Stale chunks (more than 100 ms past their playout window) are dropped
     /// before checking.
     pub fn pop_ready(&mut self, now_server_us: i64) -> Option<PcmChunk> {
-        const STALE_THRESHOLD_US: i64 = 100_000; // 100ms leniency
-        const TARGET_BUFFER_US: i64 = 50_000; // 50ms hardware buffer target
+        let stale_threshold_us = (self.target_buffer_us / 2).clamp(100_000, 2_000_000);
 
         while let Some(front) = self.chunks.front() {
             let end_us = front.playout_us + front.remaining_us();
-            if end_us < now_server_us - STALE_THRESHOLD_US {
+            if end_us < now_server_us - stale_threshold_us {
                 let dropped = self.chunks.pop_front().unwrap();
                 self.buffered_samples = self
                     .buffered_samples
@@ -171,16 +182,17 @@ impl SyncBuffer {
 
         match self.state {
             State::Buffering => {
-                if front.playout_us <= now_server_us + TARGET_BUFFER_US {
+                if front.playout_us <= now_server_us + self.lead_us {
                     self.state = State::Playing;
-                    let frames =
-                        (TARGET_BUFFER_US as f64 / 1_000_000.0 * self.fmt.rate as f64) as usize;
-                    let samples = frames * self.fmt.channels as usize;
-                    return Some(PcmChunk::new(0, vec![0; samples], self.fmt));
+                    let chunk = self.chunks.pop_front().unwrap();
+                    self.buffered_samples = self
+                        .buffered_samples
+                        .saturating_sub(chunk.remaining_samples());
+                    return Some(chunk);
                 }
             }
             State::Playing => {
-                if front.playout_us <= now_server_us + TARGET_BUFFER_US {
+                if front.playout_us <= now_server_us + self.lead_us {
                     let chunk = self.chunks.pop_front().unwrap();
                     self.buffered_samples = self
                         .buffered_samples
@@ -190,6 +202,19 @@ impl SyncBuffer {
             }
         }
         None
+    }
+
+    fn drop_excess_buffered_audio(&mut self) {
+        let max_buffer_us = self.target_buffer_us.saturating_mul(2).max(500_000);
+        while self.buffer_depth_us() > max_buffer_us {
+            let Some(dropped) = self.chunks.pop_front() else {
+                break;
+            };
+            self.buffered_samples = self
+                .buffered_samples
+                .saturating_sub(dropped.remaining_samples());
+            self.stale_drop_count += 1;
+        }
     }
 
     /// Depth of buffered audio in microseconds.
@@ -268,10 +293,6 @@ mod tests {
         // Chunk scheduled to play at exactly 'now'
         buf.push(chunk(now, 960), now);
 
-        let silence = buf.pop_ready(now).unwrap();
-        assert_eq!(silence.samples.len(), 4800); // 50ms at 48kHz stereo
-        assert_eq!(silence.playout_us, 0);
-
         assert!(buf.pop_ready(now).is_some());
         assert!(buf.is_empty());
     }
@@ -306,8 +327,8 @@ mod tests {
         let mut buf = SyncBuffer::new(fmt());
         // Current time is 1,000,000us
         let now = 1_000_000i64;
-        // Chunk finished at 800,000us (stale by 200ms, threshold is 100ms)
-        buf.push(chunk(800_000 - 10_000, 960), now);
+        // Chunk finished long before the allowed stale window.
+        buf.push(chunk(300_000 - 10_000, 960), now);
 
         // pop_ready should drop the stale chunk
         assert!(buf.pop_ready(now).is_none());

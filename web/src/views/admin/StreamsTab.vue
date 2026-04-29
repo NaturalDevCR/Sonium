@@ -327,6 +327,7 @@ const addSilence     = ref(false);
 const showToml   = ref(true);
 const addInfo    = ref('');
 const saving     = ref(false);
+const saveBlocking = computed(() => saving.value);
 const isEditMode = ref(false);
 const editIdOriginal = ref('');
 // Raw URI — stays in sync with computed, can be manually overridden.
@@ -392,6 +393,115 @@ function selectType(t: SourceType) {
   uriOverridden.value = false;
 }
 
+function splitPipeArgs(source: string): string[] {
+  const query = source.includes('?') ? source.slice(source.indexOf('?') + 1) : '';
+  return query.split('&').filter(Boolean);
+}
+
+function hydrateFromSource(source: string) {
+  metaSources.value = [];
+  rawUri.value = source || '';
+  uriOverridden.value = false;
+
+  if (source === '-') {
+    selectType(sourceTypes.find(t => t.id === 'stdin')!);
+    return;
+  }
+  if (source.startsWith('meta://')) {
+    addType.value = sourceTypes.find(t => t.id === 'meta')!;
+    addFields.value = {};
+    metaSources.value = source.replace('meta://', '').split('/').filter(Boolean);
+    return;
+  }
+  if (source.startsWith('tcp-listen://')) {
+    const [, rest = '0.0.0.0:4953'] = source.split('://');
+    const [bind, port = '4953'] = rest.split(':');
+    addType.value = sourceTypes.find(t => t.id === 'tcp-listen')!;
+    addFields.value = { bind, port };
+    return;
+  }
+  if (source.startsWith('tcp://')) {
+    const [, rest = ':4953'] = source.split('://');
+    const [host, port = '4953'] = rest.split(':');
+    addType.value = sourceTypes.find(t => t.id === 'tcp-connect')!;
+    addFields.value = { host, port };
+    return;
+  }
+  if (source.startsWith('pipe://')) {
+    const args = splitPipeArgs(source);
+    const binary = source.slice('pipe://'.length).split('?')[0];
+
+    if (binary.includes('ffmpeg')) {
+      const inputIdx = args.indexOf('-i');
+      const input = inputIdx >= 0 ? args[inputIdx + 1] : '';
+      const formatIdx = args.indexOf('-f');
+      const firstFormat = formatIdx >= 0 ? args[formatIdx + 1] : 'auto';
+      const isTcp = input.startsWith('tcp://');
+      if (isTcp) {
+        const match = input.match(/^tcp:\/\/([^:]+):([^?]+)/);
+        addType.value = sourceTypes.find(t => t.id === 'ffmpeg-tcp')!;
+        addFields.value = { host: match?.[1] || '0.0.0.0', port: match?.[2] || '4953' };
+        return;
+      }
+      if (/^https?:\/\//.test(input)) {
+        addType.value = sourceTypes.find(t => t.id === 'ffmpeg-radio')!;
+        addFields.value = {
+          url: input,
+          reconnect: args.includes('-reconnect') ? 'true' : 'false',
+          format: firstFormat && firstFormat !== 's16le' ? firstFormat : 'auto',
+        };
+        return;
+      }
+      if (args.includes('avfoundation')) {
+        addType.value = sourceTypes.find(t => t.id === 'ffmpeg-mac')!;
+        addFields.value = { device: (input || ':BlackHole 2ch').replace(/^:/, '') };
+        return;
+      }
+      if (args.includes('alsa')) {
+        addType.value = sourceTypes.find(t => t.id === 'ffmpeg-alsa')!;
+        addFields.value = { device: input || 'default' };
+        return;
+      }
+      if (args.includes('pulse')) {
+        addType.value = sourceTypes.find(t => t.id === 'ffmpeg-pulse')!;
+        addFields.value = { source: input || 'default' };
+        return;
+      }
+      addType.value = sourceTypes.find(t => t.id === 'ffmpeg-file')!;
+      addFields.value = {
+        path: input,
+        realtime: args.includes('-re') ? 'true' : 'false',
+        loop: args.includes('-stream_loop') ? 'true' : 'false',
+      };
+      return;
+    }
+
+    if (binary.includes('shairport-sync')) {
+      addType.value = sourceTypes.find(t => t.id === 'airplay')!;
+      const nameIdx = args.indexOf('--name');
+      addFields.value = { binary, name: nameIdx >= 0 ? args[nameIdx + 1] : 'Sonium' };
+      return;
+    }
+    if (binary.includes('librespot')) {
+      addType.value = sourceTypes.find(t => t.id === 'spotify')!;
+      const nameIdx = args.indexOf('--name');
+      const bitrateIdx = args.indexOf('--bitrate');
+      addFields.value = {
+        binary,
+        name: nameIdx >= 0 ? args[nameIdx + 1] : 'Sonium',
+        bitrate: bitrateIdx >= 0 ? args[bitrateIdx + 1] : '320',
+      };
+      return;
+    }
+    addType.value = sourceTypes.find(t => t.id === 'process')!;
+    addFields.value = { binary, args: args.join(' ') };
+    return;
+  }
+
+  addType.value = sourceTypes.find(t => t.id === (source.includes('mpd') ? 'mpd' : 'fifo'))!;
+  addFields.value = { path: source };
+}
+
 function closeDialog() {
   showAdd.value = false;
   addId.value   = '';
@@ -417,18 +527,7 @@ function editStream(s: any) {
   addIdleMs.value = s.idle_timeout_ms || 3000;
   addSilence.value = !!s.silence_on_idle;
   
-  // Meta handling
-  if (s.source?.startsWith('meta://')) {
-    const list = s.source.replace('meta://', '').split(',');
-    metaSources.value = list.filter((x: string) => x);
-    selectType(sourceTypes.find(t => t.id === 'meta')!);
-    uriOverridden.value = false;
-  } else {
-    // Try to find matching source type for others if they are simple
-    // For now, if it's not meta, we use raw URI mode to be safe
-    rawUri.value = s.source || '';
-    uriOverridden.value = true;
-  }
+  hydrateFromSource(s.source || '');
   
   showAdd.value = true;
 }
@@ -467,13 +566,10 @@ async function submitAdd() {
     }
 
     await api.saveConfigRaw(stringify(config));
-    addInfo.value = isEditMode.value ? '✓ Stream updated successfully!' : '✓ Stream added successfully!';
-    
-    // Refresh the store and close after a delay
-    setTimeout(() => {
-      store.loadAll();
-      closeDialog();
-    }, 1200);
+    addInfo.value = isEditMode.value
+      ? '✓ Stream updated. Restart Sonium server to apply.'
+      : '✓ Stream added. Restart Sonium server to apply.';
+    closeDialog();
   } catch (e) {
     addInfo.value = `Could not save: ${String(e)}`;
   } finally {
@@ -539,6 +635,10 @@ async function submitAdd() {
       <div v-if="showAdd && auth.isAdmin"
            class="dialog-overlay" @click.self="closeDialog">
         <div class="dialog-panel anim-scale-in">
+          <div v-if="saveBlocking" class="saving-shield">
+            <span class="mdi mdi-loading spin saving-icon"></span>
+            <span>Saving stream</span>
+          </div>
 
           <!-- Dialog header -->
           <div class="dialog-header">
@@ -559,15 +659,15 @@ async function submitAdd() {
               <div class="type-panel">
                 <div v-for="g in groups" :key="g" class="mb-4">
                   <p class="group-label">{{ groupLabel[g] || g }}</p>
-                  <div class="grid grid-cols-2 gap-1">
+                  <div class="type-list">
                     <button
                       v-for="t in sourceTypes.filter(s => s.group === g)" :key="t.id"
                       @click="selectType(t)"
                       class="type-btn"
                       :class="{ 'type-btn-active': addType.id === t.id }"
                     >
-                      <span class="mdi shrink-0" :class="t.icon" style="font-size:14px;"></span>
-                      <span class="truncate text-left" style="font-size:11px;">{{ t.label }}</span>
+                      <span class="mdi shrink-0" :class="t.icon" style="font-size:16px;"></span>
+                      <span class="type-btn-text">{{ t.label }}</span>
                     </button>
                   </div>
                 </div>
@@ -856,7 +956,7 @@ async function submitAdd() {
 
           <!-- Dialog footer -->
           <div class="dialog-footer">
-            <button @click="closeDialog" class="btn-ghost">Cancel</button>
+            <button @click="closeDialog" :disabled="saving" class="btn-ghost">Cancel</button>
             <button @click="submitAdd" :disabled="!canSave" class="btn-primary">
               <span v-if="saving" class="mdi mdi-loading spin"></span>
               {{ saving ? 'Saving…' : 'Save to config' }}
@@ -907,6 +1007,7 @@ async function submitAdd() {
   -webkit-backdrop-filter: blur(12px);
 }
 .dialog-panel {
+  position: relative;
   width: 100%; max-width: 920px; max-height: 92vh;
   overflow: hidden;
   display: flex; flex-direction: column;
@@ -914,6 +1015,24 @@ async function submitAdd() {
   border: 1px solid var(--border-mid);
   border-radius: 18px;
   box-shadow: 0 40px 100px rgba(0,0,0,0.6), 0 0 0 1px rgba(56,189,248,0.04);
+}
+.saving-shield {
+  position: absolute;
+  inset: 0;
+  z-index: 5;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 10px;
+  background: rgba(2, 6, 14, 0.72);
+  backdrop-filter: blur(5px);
+  color: var(--text-primary);
+  font-size: 13px;
+  font-weight: 700;
+}
+.saving-icon {
+  color: var(--accent);
+  font-size: 20px;
 }
 .dialog-header {
   display: flex; align-items: flex-start; justify-content: space-between; gap: 16px;
@@ -950,9 +1069,13 @@ async function submitAdd() {
 
 /* ── Type panel (left) ── */
 .type-panel {
-  padding: 18px 16px;
+  padding: 18px 14px;
   border-right: 1px solid var(--border);
   overflow-y: auto;
+}
+.type-list {
+  display: grid;
+  gap: 6px;
 }
 .group-label {
   font-size: 10px; font-weight: 600; letter-spacing: 0.08em;
@@ -961,7 +1084,8 @@ async function submitAdd() {
 }
 .type-btn {
   display: flex; align-items: center; gap: 6px;
-  padding: 7px 9px;
+  min-height: 42px;
+  padding: 8px 10px;
   border-radius: 7px;
   border: 1px solid transparent;
   background: transparent;
@@ -970,6 +1094,12 @@ async function submitAdd() {
   transition: background 0.12s, color 0.12s, border-color 0.12s;
   font-family: var(--font-sans);
   text-align: left; width: 100%;
+}
+.type-btn-text {
+  min-width: 0;
+  font-size: 12px;
+  line-height: 1.15;
+  white-space: normal;
 }
 .type-btn:hover { background: var(--bg-hover); color: var(--text-secondary); }
 .type-btn-active {

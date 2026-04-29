@@ -22,6 +22,7 @@ pub fn router(store: Arc<UserStore>) -> Router {
     Router::new()
         .route("/system/info", get(get_system_info))
         .route("/system/logs", get(get_logs))
+        .route("/system/restart", post(post_restart))
         .route(
             "/system/dependencies/:id/:action",
             post(post_dependency_action),
@@ -86,6 +87,11 @@ struct DependencyActionResult {
     stderr: String,
 }
 
+#[derive(Serialize)]
+struct RestartResponse {
+    message: &'static str,
+}
+
 async fn get_system_info() -> Json<SystemInfo> {
     let package_manager = detect_package_manager().await;
     let audio_stack = detect_audio_stack().await;
@@ -146,6 +152,8 @@ async fn get_logs() -> Response {
         "/var/log/sonium/server.log",
         "/var/log/sonium/sonium-server.log",
         "./sonium.log",
+        "./run/sonium.log",
+        "run/sonium.log",
     ];
 
     for path in candidates {
@@ -163,12 +171,28 @@ async fn get_logs() -> Response {
     }
 
     if command_exists("journalctl").await {
+        for unit in ["sonium-server", "sonium-server.service", "sonium"] {
+            match Command::new("journalctl")
+                .args(["-u", unit, "-n", "240", "--no-pager"])
+                .output()
+                .await
+            {
+                Ok(output) if output.status.success() && !output.stdout.is_empty() => {
+                    return (
+                        [(header::CONTENT_TYPE, "text/plain; charset=utf-8")],
+                        String::from_utf8_lossy(&output.stdout).to_string(),
+                    )
+                        .into_response();
+                }
+                _ => {}
+            }
+        }
         match Command::new("journalctl")
-            .args(["-u", "sonium-server", "-n", "240", "--no-pager"])
+            .args(["-t", "sonium-server", "-n", "240", "--no-pager"])
             .output()
             .await
         {
-            Ok(output) if output.status.success() => {
+            Ok(output) if output.status.success() && !output.stdout.is_empty() => {
                 return (
                     [(header::CONTENT_TYPE, "text/plain; charset=utf-8")],
                     String::from_utf8_lossy(&output.stdout).to_string(),
@@ -184,6 +208,17 @@ async fn get_logs() -> Response {
         "No readable Sonium log file found. If running under systemd, grant journal access or configure file logging.",
     )
         .into_response()
+}
+
+async fn post_restart() -> Json<RestartResponse> {
+    tokio::spawn(async {
+        tokio::time::sleep(Duration::from_millis(350)).await;
+        tracing::warn!("Sonium server restart requested via control API");
+        std::process::exit(0);
+    });
+    Json(RestartResponse {
+        message: "Sonium server restart requested",
+    })
 }
 
 async fn post_dependency_action(AxumPath((id, action)): AxumPath<(String, String)>) -> Response {

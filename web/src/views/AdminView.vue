@@ -2,21 +2,28 @@
 import { useRouter, useRoute, RouterView } from 'vue-router';
 import { useAuthStore } from '@/stores/auth';
 import { api } from '@/lib/api';
-import { ref, onMounted } from 'vue';
+import { ref, onMounted, onUnmounted } from 'vue';
+import { useServerStore } from '@/stores/server';
 
 const auth   = useAuthStore();
 const router = useRouter();
 const route  = useRoute();
+const server = useServerStore();
 
 const version = ref('');
 
 onMounted(async () => {
+  server.startLiveUpdates();
   try {
     const status = await api.status();
     version.value = status.version;
   } catch (e) {
     console.warn('Failed to fetch version', e);
   }
+});
+
+onUnmounted(() => {
+  server.stopLiveUpdates();
 });
 
 const nav = [

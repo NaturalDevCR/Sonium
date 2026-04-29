@@ -56,6 +56,7 @@ export interface Client {
   id:               string;
   hostname:         string;
   display_name?:    string | null;
+  observability_enabled: boolean;
   client_name:      string;
   os:               string;
   arch:             string;
@@ -84,6 +85,7 @@ export interface EqBand {
   freq_hz:     number;
   gain_db:     number;
   q:           number;
+  slope_db_per_oct?: number;
   enabled:     boolean;
 }
 
@@ -93,6 +95,9 @@ export interface Stream {
   codec:        string;
   format:       string;
   source:       string;
+  buffer_ms:    number;
+  idle_timeout_ms?: number | null;
+  silence_on_idle: boolean;
   status:       'playing' | 'idle' | 'error';
   eq_bands?:    EqBand[];
   eq_enabled?:  boolean;
@@ -140,6 +145,10 @@ export interface DependencyActionResult {
   stderr: string;
 }
 
+export interface RestartResponse {
+  message: string;
+}
+
 export interface ConfigReloadReport {
   added:            string[];
   removed:          string[];
@@ -155,6 +164,7 @@ export type Event =
   | { type: 'client_renamed';      client_id: string; display_name: string }
   | { type: 'volume_changed';      client_id: string; volume: number; muted: boolean }
   | { type: 'latency_changed';     client_id: string; latency_ms: number }
+  | { type: 'client_observability_changed'; client_id: string; enabled: boolean }
   | { type: 'client_group_changed';client_id: string; group_id: string }
   | { type: 'group_created';       group: Group }
   | { type: 'group_deleted';       group_id: string }
@@ -262,6 +272,9 @@ export const api = {
   setLatency:  (id: string, latency_ms: number) =>
     patch(`/clients/${id}/latency`, { latency_ms }),
 
+  setObservability: (id: string, enabled: boolean) =>
+    patch(`/clients/${id}/observability`, { enabled }),
+
   setGroup:    (client_id: string, group_id: string) =>
     patch(`/clients/${client_id}/group`, { group_id }),
 
@@ -304,6 +317,7 @@ export const api = {
   // ── Discovery ───────────────────────────────────────────────────────────
   scanSubnet: (cidr: string, port = 1710) =>
     get<ScanResult[]>(`/discover/scan?cidr=${encodeURIComponent(cidr)}&port=${port}`),
+  localSubnet: () => get<{ cidr: string | null }>('/discover/local-subnet'),
 
   // ── Auth ────────────────────────────────────────────────────────────────
   logout: () => post<void>('/auth/logout', {}),
@@ -311,6 +325,7 @@ export const api = {
   // ── System ──────────────────────────────────────────────────────────────
   systemInfo: () => get<SystemInfo>('/system/info'),
   systemLogs: () => getText('/system/logs'),
+  restartServer: () => post<RestartResponse>('/system/restart', {}),
   dependencyAction: (id: string, action: 'install' | 'update' | 'remove') =>
     post<DependencyActionResult>(`/system/dependencies/${id}/${action}`, {}),
 };

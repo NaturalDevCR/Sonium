@@ -3,13 +3,21 @@ import { ref, computed, onMounted } from 'vue';
 import { useServerStore } from '@/stores/server';
 import { useAuthStore }   from '@/stores/auth';
 import { api }            from '@/lib/api';
-import type { EqBand, ScanResult } from '@/lib/api';
+import type { ScanResult } from '@/lib/api';
 import VolumeControl      from '@/components/VolumeControl.vue';
 
 const store = useServerStore();
 const auth  = useAuthStore();
 
-onMounted(() => store.loadAll());
+onMounted(async () => {
+  await store.loadAll();
+  try {
+    const { cidr } = await api.localSubnet();
+    if (cidr) scanCidr.value = cidr;
+  } catch {
+    // Keep the static fallback if the server cannot infer an interface.
+  }
+});
 
 // ── Sorted client list ────────────────────────────────────────────────────
 const sortedClients = computed(() =>
