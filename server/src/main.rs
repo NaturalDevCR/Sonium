@@ -246,6 +246,7 @@ async fn main() -> anyhow::Result<()> {
         tokio::select! {
             accept = listener.accept() => {
                 let (stream, peer) = accept?;
+                let _ = stream.set_nodelay(true);
                 info!(%peer, "New client connected");
                 let registry = registry.clone();
                 let cfg      = live_cfg.read().clone();

@@ -106,9 +106,13 @@ impl TimeProvider {
     /// - `server_latency_us` — `(t_server_recv - t_client_sent)` as reported by the server
     pub fn update(&self, t_sent_us: i64, t_recv_us: i64, server_latency_us: i64) {
         let rtt_us = t_recv_us - t_sent_us;
-        let c2s_us = server_latency_us;
-        let s2c_us = rtt_us.saturating_sub(c2s_us);
-        let diff_us = (c2s_us - s2c_us) / 2;
+        // Offset = ( (T2 - T1) - (T4 - T2) ) / 2
+        // where T1=sent, T2=server_recv, T4=recv.
+        // server_latency_us = T2 - T1
+        // T4 - T2 = (T4 - T1) - (T2 - T1) = rtt_us - server_latency_us
+        // Offset = ( server_latency_us - (rtt_us - server_latency_us) ) / 2
+        // Offset = ( 2 * server_latency_us - rtt_us ) / 2
+        let diff_us = server_latency_us - (rtt_us / 2);
 
         let mut buf = self.samples.lock();
         buf.push(diff_us);
@@ -214,6 +218,17 @@ mod tests {
             tp.update(0, 10_000, 2_500);
         }
         assert_eq!(tp.offset_us(), -2_500);
+    }
+
+    #[test]
+    fn large_server_ahead_offset() {
+        let tp = TimeProvider::new();
+        // Server is 1 second ahead. RTT is 20ms.
+        // T1 = 0
+        // T2 = 1,000,000 (offset) + 10,000 (transit) = 1,010,000
+        // T4 = 20,000
+        tp.update(0, 20_000, 1_010_000);
+        assert_eq!(tp.offset_us(), 1_000_000);
     }
 
     /// Outlier spike is suppressed by the median filter.

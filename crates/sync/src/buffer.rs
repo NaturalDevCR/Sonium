@@ -68,11 +68,17 @@ impl PcmChunk {
     }
 }
 
+#[derive(Debug, PartialEq, Clone, Copy)]
+enum State {
+    Buffering,
+    Playing,
+}
+
 /// Jitter buffer: holds decoded PCM chunks sorted by playout timestamp and
 /// releases them at the right time.
 ///
 /// **Drop policy:** chunks whose playout window has already passed (older than
-/// 50 ms behind `now`) are silently dropped on the next call to
+/// 100 ms behind `now`) are silently dropped on the next call to
 /// [`pop_ready`][Self::pop_ready].
 pub struct SyncBuffer {
     chunks: VecDeque<PcmChunk>,
@@ -85,6 +91,7 @@ pub struct SyncBuffer {
     jitter_us: f64,
     /// Last arrival info for jitter calculation: (arrival_us, playout_us).
     last_arrival_info: Option<(i64, i64)>,
+    state: State,
 }
 
 impl SyncBuffer {
@@ -102,6 +109,7 @@ impl SyncBuffer {
             underrun_count: 0,
             jitter_us: 0.0,
             last_arrival_info: None,
+            state: State::Buffering,
         }
     }
 
@@ -132,10 +140,11 @@ impl SyncBuffer {
     /// Return the next chunk ready to play relative to `now_server_us`, or
     /// `None` if no chunk is due yet.
     ///
-    /// Stale chunks (more than 50 ms past their playout window) are dropped
+    /// Stale chunks (more than 100 ms past their playout window) are dropped
     /// before checking.
     pub fn pop_ready(&mut self, now_server_us: i64) -> Option<PcmChunk> {
-        const STALE_THRESHOLD_US: i64 = 500_000; // 500ms leniency
+        const STALE_THRESHOLD_US: i64 = 100_000; // 100ms leniency
+        const TARGET_BUFFER_US: i64 = 50_000; // 50ms hardware buffer target
 
         while let Some(front) = self.chunks.front() {
             let end_us = front.playout_us + front.remaining_us();
@@ -150,13 +159,35 @@ impl SyncBuffer {
             break;
         }
 
+        if self.chunks.is_empty() {
+            if self.state == State::Playing {
+                self.underrun_count += 1;
+                self.state = State::Buffering;
+            }
+            return None;
+        }
+
         let front = self.chunks.front()?;
-        if front.playout_us <= now_server_us {
-            let chunk = self.chunks.pop_front().unwrap();
-            self.buffered_samples = self
-                .buffered_samples
-                .saturating_sub(chunk.remaining_samples());
-            return Some(chunk);
+
+        match self.state {
+            State::Buffering => {
+                if front.playout_us <= now_server_us + TARGET_BUFFER_US {
+                    self.state = State::Playing;
+                    let frames =
+                        (TARGET_BUFFER_US as f64 / 1_000_000.0 * self.fmt.rate as f64) as usize;
+                    let samples = frames * self.fmt.channels as usize;
+                    return Some(PcmChunk::new(0, vec![0; samples], self.fmt));
+                }
+            }
+            State::Playing => {
+                if front.playout_us <= now_server_us + TARGET_BUFFER_US {
+                    let chunk = self.chunks.pop_front().unwrap();
+                    self.buffered_samples = self
+                        .buffered_samples
+                        .saturating_sub(chunk.remaining_samples());
+                    return Some(chunk);
+                }
+            }
         }
         None
     }
@@ -183,6 +214,7 @@ impl SyncBuffer {
         self.buffered_samples = 0;
         self.stale_drop_count = 0;
         self.underrun_count = 0;
+        self.state = State::Buffering;
     }
 
     /// Return and reset the accumulated stale drop counter.
@@ -235,6 +267,11 @@ mod tests {
         let now = 1_000_000i64;
         // Chunk scheduled to play at exactly 'now'
         buf.push(chunk(now, 960), now);
+
+        let silence = buf.pop_ready(now).unwrap();
+        assert_eq!(silence.samples.len(), 4800); // 50ms at 48kHz stereo
+        assert_eq!(silence.playout_us, 0);
+
         assert!(buf.pop_ready(now).is_some());
         assert!(buf.is_empty());
     }
