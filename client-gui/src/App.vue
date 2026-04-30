@@ -23,7 +23,7 @@ const localIp = ref('');
 const scanning = ref(false);
 
 const healthState = ref<Record<number, { lastSeen: number, status: string, report?: any, logs: string[] }>>({});
-const APP_VERSION = 'v0.1.42';
+const APP_VERSION = 'v0.1.43';
 
 function instanceStatus(instance: InstanceConfig) {
   if (!instance.enabled) return { label: 'Stopped', tone: 'text-slate-500/80', dot: 'bg-slate-600' };
@@ -149,11 +149,6 @@ function cancelEdit() {
 }
 
 onMounted(async () => {
-  await fetchLocalIp();
-  await fetchAudioDevices();
-  await loadInstances();
-  await checkAutostart();
-
   // Listen for health updates from all instances
   await listen('client-health', (event: { payload: { id: number, report: any } }) => {
     const { id, report } = event.payload;
@@ -170,9 +165,7 @@ onMounted(async () => {
     
     healthState.value[id] = {
       lastSeen: Date.now(),
-      status: currentState.status === 'starting' || currentState.status === 'connecting'
-        ? 'ready'
-        : currentState.status,
+      status: 'ready',
       report,
       logs: newLogs.slice(0, 10) // Keep last 10 logs
     };
@@ -209,6 +202,31 @@ onMounted(async () => {
       }
     }
   }, 2000);
+
+  await fetchLocalIp();
+  await fetchAudioDevices();
+  await loadInstances();
+  await checkAutostart();
+
+  const now = Date.now();
+  let hasEnabledInstances = false;
+  for (const instance of instances.value) {
+    if (!instance.enabled) continue;
+    hasEnabledInstances = true;
+    if (!healthState.value[instance.id]) {
+      healthState.value[instance.id] = {
+        lastSeen: now,
+        status: 'starting',
+        logs: [`${new Date().toLocaleTimeString()} - Starting client instance`],
+      };
+    }
+  }
+
+  // Ensure startup instances are launched after the UI has subscribed to
+  // status/health events. The Tauri setup hook may have started them earlier.
+  if (hasEnabledInstances) {
+    await invoke('save_instances', { instances: instances.value });
+  }
 });
 </script>
 
@@ -219,18 +237,18 @@ onMounted(async () => {
       data-tauri-drag-region
       class="h-12 flex items-center bg-white/10 border-b border-white/5 shrink-0 relative z-50 select-none"
     >
-      <!-- Traffic lights spacer (macOS) - pointer-events-none ensures clicks pass to native controls -->
-      <div class="w-20 h-full pointer-events-none"></div>
+      <!-- Traffic lights spacer (macOS) -->
+      <div data-tauri-drag-region class="w-20 h-full"></div>
       
       <!-- Drag Handle Label -->
-      <div data-tauri-drag-region class="flex-1 h-full flex items-center justify-center pointer-events-none">
+      <div data-tauri-drag-region class="flex-1 h-full flex items-center justify-center">
         <div class="flex items-center space-x-2">
           <span class="text-[10px] font-bold tracking-[0.2em] text-slate-400 uppercase">Sonium Agent</span>
           <span class="text-[10px] text-slate-600 font-medium">{{ APP_VERSION }}</span>
         </div>
       </div>
       
-      <div data-tauri-drag-region class="w-20 h-full pointer-events-none"></div>
+      <div data-tauri-drag-region class="w-20 h-full"></div>
     </div>
 
     <div class="flex-1 overflow-y-auto p-6 space-y-6 custom-scrollbar">
@@ -470,6 +488,19 @@ onMounted(async () => {
 </template>
 
 <style>
+[data-tauri-drag-region] {
+  -webkit-app-region: drag;
+  app-region: drag;
+}
+
+button,
+input,
+select,
+textarea {
+  -webkit-app-region: no-drag;
+  app-region: no-drag;
+}
+
 .custom-scrollbar::-webkit-scrollbar {
   width: 4px;
 }

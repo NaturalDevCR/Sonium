@@ -757,7 +757,7 @@ checksum = "4bfbf56724aa9eca8afa4fcfadeb479e722935bb2a0900c2d37e0cc477af0688"
 
 [[package]]
 name = "client-gui"
-version = "0.1.42"
+version = "0.1.43"
 dependencies = [
  "anyhow",
  "cpal",
@@ -4798,7 +4798,7 @@ dependencies = [
 
 [[package]]
 name = "sonium-client"
-version = "0.1.42"
+version = "0.1.43"
 dependencies = [
  "anyhow",
  "bytes",
@@ -4826,7 +4826,7 @@ dependencies = [
 
 [[package]]
 name = "sonium-codec"
-version = "0.1.42"
+version = "0.1.43"
 dependencies = [
  "audiopus",
  "bytes",
@@ -4842,7 +4842,7 @@ dependencies = [
 
 [[package]]
 name = "sonium-common"
-version = "0.1.42"
+version = "0.1.43"
 dependencies = [
  "anyhow",
  "serde",
@@ -4854,7 +4854,7 @@ dependencies = [
 
 [[package]]
 name = "sonium-control"
-version = "0.1.42"
+version = "0.1.43"
 dependencies = [
  "anyhow",
  "argon2",
@@ -4882,7 +4882,7 @@ dependencies = [
 
 [[package]]
 name = "sonium-protocol"
-version = "0.1.42"
+version = "0.1.43"
 dependencies = [
  "bytes",
  "serde",
@@ -4893,7 +4893,7 @@ dependencies = [
 
 [[package]]
 name = "sonium-server"
-version = "0.1.42"
+version = "0.1.43"
 dependencies = [
  "anyhow",
  "axum",
@@ -4918,13 +4918,14 @@ dependencies = [
  "tokio-util",
  "toml 0.8.2",
  "tracing",
+ "tracing-appender",
  "tracing-subscriber",
  "uuid",
 ]
 
 [[package]]
 name = "sonium-sync"
-version = "0.1.42"
+version = "0.1.43"
 dependencies = [
  "parking_lot",
  "rubato",
@@ -5060,6 +5061,12 @@ dependencies = [
  "serde",
  "serde_json",
 ]
+
+[[package]]
+name = "symlink"
+version = "0.1.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "a7973cce6668464ea31f176d85b13c7ab3bba2cb3b77a2ed26abd7801688010a"
 
 [[package]]
 name = "symphonia-codec-aac"
@@ -5871,6 +5878,19 @@ dependencies = [
  "pin-project-lite",
  "tracing-attributes",
  "tracing-core",
+]
+
+[[package]]
+name = "tracing-appender"
+version = "0.2.5"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "050686193eb999b4bb3bc2acfa891a13da00f79734704c4b8b4ef1a10b368a3c"
+dependencies = [
+ "crossbeam-channel",
+ "symlink",
+ "thiserror 2.0.18",
+ "time",
+ "tracing-subscriber",
 ]
 
 [[package]]

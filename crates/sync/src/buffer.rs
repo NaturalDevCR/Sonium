@@ -156,6 +156,7 @@ impl SyncBuffer {
     /// before checking.
     pub fn pop_ready(&mut self, now_server_us: i64) -> Option<PcmChunk> {
         let stale_threshold_us = (self.target_buffer_us / 2).clamp(100_000, 2_000_000);
+        let low_water_us = self.lead_us.max(40_000);
 
         while let Some(front) = self.chunks.front() {
             let end_us = front.playout_us + front.remaining_us();
@@ -180,6 +181,7 @@ impl SyncBuffer {
 
         let front = self.chunks.front()?;
         let has_target_depth = self.buffer_depth_us() >= self.target_buffer_us;
+        let has_playing_depth = self.buffer_depth_us() >= low_water_us;
         let chunk_is_due = front.playout_us <= now_server_us + self.lead_us;
 
         match self.state {
@@ -194,7 +196,7 @@ impl SyncBuffer {
                 }
             }
             State::Playing => {
-                if chunk_is_due || has_target_depth {
+                if chunk_is_due || has_playing_depth {
                     let chunk = self.chunks.pop_front().unwrap();
                     self.buffered_samples = self
                         .buffered_samples
@@ -364,6 +366,26 @@ mod tests {
 
         // 10 ms per chunk, all scheduled well in the future. If clock sync is
         // lagging, playout should still recover once enough audio is queued.
+        for i in 0..10 {
+            buf.push(chunk(now + 5_000_000 + i * 10_000, 960), now);
+        }
+
+        assert!(buf.pop_ready(now).is_some());
+    }
+
+    #[test]
+    fn playing_state_uses_low_water_depth_to_avoid_burst_silence_cycles() {
+        let mut buf = SyncBuffer::new(fmt());
+        buf.set_target_buffer_ms(1000);
+        let now = 1_000_000i64;
+
+        // Enter Playing with a due chunk.
+        buf.push(chunk(now, 960), now);
+        assert!(buf.pop_ready(now).is_some());
+
+        // Subsequent chunks are far in the future due to a bad clock estimate,
+        // but once a small low-water amount is queued, playout should continue
+        // instead of waiting for the full target buffer again.
         for i in 0..10 {
             buf.push(chunk(now + 5_000_000 + i * 10_000, 960), now);
         }

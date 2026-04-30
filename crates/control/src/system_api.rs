@@ -148,17 +148,26 @@ async fn get_system_info() -> Json<SystemInfo> {
 }
 
 async fn get_logs() -> Response {
-    let candidates = [
-        "/var/log/sonium/server.log",
-        "/var/log/sonium/sonium-server.log",
-        "./sonium.log",
-        "./run/sonium.log",
-        "run/sonium.log",
-    ];
+    let mut candidates = Vec::new();
+    if let Ok(path) = std::env::var("SONIUM_LOG_FILE") {
+        candidates.push(path);
+    }
+    candidates.extend(
+        [
+            "/var/log/sonium/server.log",
+            "/var/log/sonium/sonium-server.log",
+            "sonium.log",
+            "./sonium.log",
+            "./run/sonium.log",
+            "run/sonium.log",
+        ]
+        .into_iter()
+        .map(str::to_owned),
+    );
 
     for path in candidates {
-        if Path::new(path).exists() {
-            match tail_file(path, 240).await {
+        if Path::new(&path).exists() {
+            match tail_file(&path, 240).await {
                 Ok(logs) => {
                     return ([(header::CONTENT_TYPE, "text/plain; charset=utf-8")], logs)
                         .into_response();
@@ -214,7 +223,20 @@ async fn post_restart() -> Json<RestartResponse> {
     tokio::spawn(async {
         tokio::time::sleep(Duration::from_millis(350)).await;
         tracing::warn!("Sonium server restart requested via control API");
-        std::process::exit(0);
+
+        if Path::new("/run/systemd/system").exists() && command_exists("systemctl").await {
+            match Command::new("systemctl")
+                .args(["restart", "sonium-server.service"])
+                .spawn()
+            {
+                Ok(_) => return,
+                Err(e) => tracing::error!("Failed to spawn systemctl restart: {e}"),
+            }
+        }
+
+        // If systemd is supervising the process with Restart=on-failure, this
+        // still brings it back. In foreground/dev runs it simply exits.
+        std::process::exit(75);
     });
     Json(RestartResponse {
         message: "Sonium server restart requested",

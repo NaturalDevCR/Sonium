@@ -12,6 +12,7 @@ use tokio::net::TcpListener;
 use tokio::task::JoinHandle;
 use tokio_util::sync::CancellationToken;
 use tracing::{info, warn};
+use tracing_subscriber::prelude::*;
 
 use tokio::time::Duration;
 
@@ -84,14 +85,43 @@ async fn main() -> anyhow::Result<()> {
         cfg.server.mdns = false;
     }
 
-    tracing_subscriber::fmt()
-        .with_env_filter(
-            tracing_subscriber::EnvFilter::try_from_default_env()
-                .unwrap_or_else(|_| cfg.log.level.parse().unwrap_or_default()),
-        )
+    let config_dir = cli
+        .config
+        .parent()
+        .map(|p| p.to_path_buf())
+        .unwrap_or_else(|| std::path::PathBuf::from("."));
+    let log_path = config_dir.join("sonium.log");
+    let log_dir = log_path
+        .parent()
+        .map(|p| p.to_path_buf())
+        .unwrap_or_else(|| std::path::PathBuf::from("."));
+    if let Err(e) = std::fs::create_dir_all(&log_dir) {
+        warn!(path = %log_dir.display(), "Could not create log directory: {e}");
+    }
+    std::env::set_var("SONIUM_LOG_FILE", &log_path);
+    let log_file_name = log_path
+        .file_name()
+        .and_then(|name| name.to_str())
+        .unwrap_or("sonium.log");
+    let file_appender = tracing_appender::rolling::never(&log_dir, log_file_name);
+    let (file_writer, _log_guard) = tracing_appender::non_blocking(file_appender);
+
+    let env_filter = tracing_subscriber::EnvFilter::try_from_default_env()
+        .unwrap_or_else(|_| cfg.log.level.parse().unwrap_or_default());
+    let stdout_layer = tracing_subscriber::fmt::layer()
         .with_target(true)
         .with_thread_ids(false)
-        .compact()
+        .compact();
+    let file_layer = tracing_subscriber::fmt::layer()
+        .with_writer(file_writer)
+        .with_ansi(false)
+        .with_target(true)
+        .with_thread_ids(false)
+        .compact();
+    tracing_subscriber::registry()
+        .with(env_filter)
+        .with(stdout_layer)
+        .with(file_layer)
         .init();
 
     let local_ip = local_ip_address::local_ip()
@@ -109,13 +139,6 @@ async fn main() -> anyhow::Result<()> {
 
     // ── Shutdown coordination ─────────────────────────────────────────────
     let shutdown = CancellationToken::new();
-
-    // Config directory — used for users.json and sonium-state.json.
-    let config_dir = cli
-        .config
-        .parent()
-        .map(|p| p.to_path_buf())
-        .unwrap_or_else(|| std::path::PathBuf::from("."));
 
     // One-time initialization if requested.
     if let Some(password) = cli.init_admin {
