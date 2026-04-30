@@ -106,8 +106,13 @@ async fn main() -> anyhow::Result<()> {
     let file_appender = tracing_appender::rolling::never(&log_dir, log_file_name);
     let (file_writer, _log_guard) = tracing_appender::non_blocking(file_appender);
 
-    let env_filter = tracing_subscriber::EnvFilter::try_from_default_env()
-        .unwrap_or_else(|_| cfg.log.level.parse().unwrap_or_default());
+    let env_filter = tracing_subscriber::EnvFilter::try_from_default_env().unwrap_or_else(|_| {
+        format!("{},mdns_sd::service_daemon=off", cfg.log.level)
+            .parse()
+            .unwrap_or_else(|_| {
+                tracing_subscriber::EnvFilter::new("info,mdns_sd::service_daemon=off")
+            })
+    });
     let stdout_layer = tracing_subscriber::fmt::layer()
         .with_target(true)
         .with_thread_ids(false)
