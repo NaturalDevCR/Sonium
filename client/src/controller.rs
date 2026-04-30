@@ -1,5 +1,6 @@
 use std::time::Duration;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
+use tokio::net::tcp::{OwnedReadHalf, OwnedWriteHalf};
 use tokio::net::TcpStream;
 use tracing::{debug, info, warn};
 
@@ -17,6 +18,11 @@ use crate::eq::SmoothedEqProcessor;
 use crate::player::Player;
 
 use tokio::sync::mpsc;
+
+enum IncomingFrame {
+    Message(MessageHeader, Vec<u8>),
+    Closed(String),
+}
 
 #[derive(Debug, Clone, serde::Serialize)]
 pub enum ConnectionStatus {
@@ -78,8 +84,9 @@ async fn connect_and_run(
     health_tx: Option<mpsc::UnboundedSender<HealthReport>>,
     status_tx: Option<mpsc::UnboundedSender<ConnectionStatus>>,
 ) -> anyhow::Result<()> {
-    let mut stream = TcpStream::connect(addr).await?;
+    let stream = TcpStream::connect(addr).await?;
     stream.set_nodelay(true)?;
+    let (reader, mut writer) = stream.into_split();
     let _ = status_tx
         .as_ref()
         .map(|tx| tx.send(ConnectionStatus::Connected));
@@ -97,7 +104,7 @@ async fn connect_and_run(
     let mut hello_msg = Hello::new(display_name, &client_id);
     hello_msg.hostname = display_name.to_owned();
     let hello = Message::Hello(hello_msg);
-    stream.write_all(&hello.encode()).await?;
+    writer.write_all(&hello.encode()).await?;
     info!("Hello sent");
 
     // 2. Wait for CodecHeader, then ServerSettings
@@ -113,17 +120,18 @@ async fn connect_and_run(
     let mut server_buffer_ms: i32 = cfg.latency_ms + 500; // Default buffer depth
     let mut server_latency_ms: i32 = 0;
 
-    let mut hdr_buf = [0u8; HEADER_SIZE];
     let mut pending_time: Option<(u16, i64)> = None; // (msg_id, sent_us)
 
     // Start periodic tasks
+    let (incoming_tx, mut incoming_rx) = mpsc::unbounded_channel();
+    let read_task = tokio::spawn(socket_reader(reader, incoming_tx));
     let mut audio_tick = tokio::time::interval(tokio::time::Duration::from_millis(20));
     let mut sync_tick = tokio::time::interval(tokio::time::Duration::from_secs(1));
     let mut health_tick = tokio::time::interval(tokio::time::Duration::from_secs(2));
     let mut sync_seq: u16 = 0;
-    send_time_request(&mut stream, &mut sync_seq, &mut pending_time).await?;
+    send_time_request(&mut writer, &mut sync_seq, &mut pending_time).await?;
 
-    loop {
+    let result = loop {
         tokio::select! {
             // Audio pump: ensure SyncBuffer is drained even if network is quiet
             _ = audio_tick.tick() => {
@@ -142,7 +150,7 @@ async fn connect_and_run(
 
             // Sync clock with server
             _ = sync_tick.tick() => {
-                if let Err(e) = send_time_request(&mut stream, &mut sync_seq, &mut pending_time).await {
+                if let Err(e) = send_time_request(&mut writer, &mut sync_seq, &mut pending_time).await {
                     warn!("Failed to send sync request: {e}");
                     break Ok(());
                 }
@@ -179,7 +187,7 @@ async fn connect_and_run(
 
                 if observability_enabled {
                     let msg = Message::HealthReport(report_msg).encode();
-                    if let Err(e) = stream.write_all(&msg).await {
+                    if let Err(e) = writer.write_all(&msg).await {
                         warn!("Failed to send health report: {e}");
                         break Ok(());
                     }
@@ -187,25 +195,18 @@ async fn connect_and_run(
             }
 
             // Read next message from server
-            read_result = stream.read_exact(&mut hdr_buf) => {
-                if let Err(e) = read_result {
-                    warn!("Connection closed or read error: {e}");
+            incoming = incoming_rx.recv() => {
+                let Some(incoming) = incoming else {
+                    warn!("Connection reader stopped");
                     break Ok(());
-                }
-
-                let hdr = match MessageHeader::from_bytes(&hdr_buf) {
-                    Ok(h) => h,
-                    Err(e) => {
-                        warn!("Invalid header: {e}");
+                };
+                let (hdr, payload) = match incoming {
+                    IncomingFrame::Message(hdr, payload) => (hdr, payload),
+                    IncomingFrame::Closed(reason) => {
+                        warn!("Connection closed or read error: {reason}");
                         break Ok(());
                     }
                 };
-
-                let mut payload = vec![0u8; hdr.payload_size as usize];
-                if let Err(e) = stream.read_exact(&mut payload).await {
-                    warn!("Error reading payload: {e}");
-                    break Ok(());
-                }
 
                 match hdr.msg_type {
                     MessageType::CodecHeader => {
@@ -297,11 +298,14 @@ async fn connect_and_run(
                 }
             }
         }
-    }
+    };
+
+    read_task.abort();
+    result
 }
 
 async fn send_time_request(
-    stream: &mut TcpStream,
+    stream: &mut OwnedWriteHalf,
     sync_seq: &mut u16,
     pending_time: &mut Option<(u16, i64)>,
 ) -> anyhow::Result<()> {
@@ -313,6 +317,34 @@ async fn send_time_request(
     stream.write_all(&msg).await?;
     *pending_time = Some((*sync_seq, sent_us));
     Ok(())
+}
+
+async fn socket_reader(mut reader: OwnedReadHalf, tx: mpsc::UnboundedSender<IncomingFrame>) {
+    loop {
+        let mut hdr_buf = [0u8; HEADER_SIZE];
+        if let Err(e) = reader.read_exact(&mut hdr_buf).await {
+            let _ = tx.send(IncomingFrame::Closed(e.to_string()));
+            break;
+        }
+
+        let hdr = match MessageHeader::from_bytes(&hdr_buf) {
+            Ok(hdr) => hdr,
+            Err(e) => {
+                let _ = tx.send(IncomingFrame::Closed(format!("invalid header: {e}")));
+                break;
+            }
+        };
+
+        let mut payload = vec![0u8; hdr.payload_size as usize];
+        if let Err(e) = reader.read_exact(&mut payload).await {
+            let _ = tx.send(IncomingFrame::Closed(format!("error reading payload: {e}")));
+            break;
+        }
+
+        if tx.send(IncomingFrame::Message(hdr, payload)).is_err() {
+            break;
+        }
+    }
 }
 
 fn apply_volume(samples: &mut [i16], volume: u8, muted: bool) {

@@ -16,8 +16,10 @@ use std::net::SocketAddr;
 use std::sync::atomic::{AtomicU16, Ordering};
 use std::sync::Arc;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
+use tokio::net::tcp::{OwnedReadHalf, OwnedWriteHalf};
 use tokio::net::TcpStream;
 use tokio::sync::broadcast;
+use tokio::sync::mpsc;
 use tracing::{debug, info, instrument, warn};
 
 use sonium_common::config::ServerConfig;
@@ -32,6 +34,11 @@ use crate::broadcaster::{lookup, AudioFrame, BroadcasterRegistry};
 use crate::metrics;
 
 static MSG_SEQ: AtomicU16 = AtomicU16::new(1);
+
+enum IncomingClientFrame {
+    Message(MessageHeader, Vec<u8>),
+    Closed(String),
+}
 
 fn next_id() -> u16 {
     MSG_SEQ.fetch_add(1, Ordering::Relaxed)
@@ -77,14 +84,25 @@ pub async fn handle(
         proto_ver,
     );
 
-    let result = session_loop(&mut stream, peer, registry, cfg, state.clone(), &client_id).await;
+    let (reader, mut writer) = stream.into_split();
+    let result = session_loop(
+        reader,
+        &mut writer,
+        peer,
+        registry,
+        cfg,
+        state.clone(),
+        &client_id,
+    )
+    .await;
     state.client_disconnected(&client_id);
     metrics::CONNECTED_CLIENTS.dec();
     result
 }
 
 async fn session_loop(
-    stream: &mut TcpStream,
+    reader: OwnedReadHalf,
+    stream: &mut OwnedWriteHalf,
     peer: SocketAddr,
     registry: Arc<BroadcasterRegistry>,
     cfg: ServerConfig,
@@ -141,19 +159,24 @@ async fn session_loop(
     let mut audio_rx: Option<broadcast::Receiver<AudioFrame>> = bc.as_ref().map(|b| b.subscribe());
     let mut events_rx = state.events().subscribe();
 
-    let mut hdr_buf = [0u8; HEADER_SIZE];
+    let (incoming_tx, mut incoming_rx) = mpsc::unbounded_channel();
+    let read_task = tokio::spawn(socket_reader(reader, incoming_tx));
 
-    loop {
+    let result = loop {
         tokio::select! {
             // ── Incoming message from client ──────────────────────────────
-            read_result = stream.read_exact(&mut hdr_buf) => {
-                match read_result {
-                    Err(_) => break,
-                    Ok(_) => {
-                        let hdr = MessageHeader::from_bytes(&hdr_buf)?;
-                        let mut payload = vec![0u8; hdr.payload_size as usize];
-                        stream.read_exact(&mut payload).await?;
+            incoming = incoming_rx.recv() => {
+                let Some(incoming) = incoming else {
+                    debug!(%peer, "Client reader stopped");
+                    break Ok(());
+                };
+                match incoming {
+                    IncomingClientFrame::Message(hdr, payload) => {
                         handle_client_msg(stream, &state, client_id, hdr, &payload).await?;
+                    }
+                    IncomingClientFrame::Closed(reason) => {
+                        debug!(%peer, %reason, "Client reader closed");
+                        break Ok(());
                     }
                 }
             }
@@ -162,12 +185,14 @@ async fn session_loop(
             frame = recv_audio(&mut audio_rx) => {
                 match frame {
                     Ok(f) => {
-                        if stream.write_all(&f.wire_bytes).await.is_err() { break; }
+                        if stream.write_all(&f.wire_bytes).await.is_err() {
+                            break Ok(());
+                        }
                     }
                     Err(broadcast::error::RecvError::Lagged(n)) => {
                         warn!(%peer, dropped = n, "Client lagged");
                     }
-                    Err(_) => break,
+                    Err(_) => break Ok(()),
                 }
             }
 
@@ -278,14 +303,15 @@ async fn session_loop(
                 }
             }
         }
-    }
+    };
 
-    Ok(())
+    read_task.abort();
+    result
 }
 
 /// Re-subscribe to a different stream broadcaster and notify the client.
 async fn switch_stream(
-    wire: &mut TcpStream,
+    wire: &mut OwnedWriteHalf,
     registry: &Arc<BroadcasterRegistry>,
     audio_rx: &mut Option<broadcast::Receiver<AudioFrame>>,
     stream_id: &mut String,
@@ -326,7 +352,7 @@ async fn recv_audio(
 
 #[allow(clippy::too_many_arguments)]
 async fn send_server_settings(
-    stream: &mut TcpStream,
+    stream: &mut OwnedWriteHalf,
     buffer_ms: u32,
     volume: u8,
     muted: bool,
@@ -353,7 +379,7 @@ async fn send_server_settings(
 }
 
 async fn handle_client_msg(
-    stream: &mut TcpStream,
+    stream: &mut OwnedWriteHalf,
     state: &ServerState,
     client_id: &str,
     hdr: MessageHeader,
@@ -393,6 +419,36 @@ async fn handle_client_msg(
         other => debug!("Ignoring message: {other:?}"),
     }
     Ok(())
+}
+
+async fn socket_reader(mut reader: OwnedReadHalf, tx: mpsc::UnboundedSender<IncomingClientFrame>) {
+    loop {
+        let mut hdr_buf = [0u8; HEADER_SIZE];
+        if let Err(e) = reader.read_exact(&mut hdr_buf).await {
+            let _ = tx.send(IncomingClientFrame::Closed(e.to_string()));
+            break;
+        }
+
+        let hdr = match MessageHeader::from_bytes(&hdr_buf) {
+            Ok(hdr) => hdr,
+            Err(e) => {
+                let _ = tx.send(IncomingClientFrame::Closed(format!("invalid header: {e}")));
+                break;
+            }
+        };
+
+        let mut payload = vec![0u8; hdr.payload_size as usize];
+        if let Err(e) = reader.read_exact(&mut payload).await {
+            let _ = tx.send(IncomingClientFrame::Closed(format!(
+                "error reading payload: {e}"
+            )));
+            break;
+        }
+
+        if tx.send(IncomingClientFrame::Message(hdr, payload)).is_err() {
+            break;
+        }
+    }
 }
 
 async fn read_message(stream: &mut TcpStream) -> anyhow::Result<Message> {
