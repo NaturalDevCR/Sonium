@@ -78,6 +78,7 @@ display_name = "Main"
 source = "/tmp/sonium.fifo"
 codec = "opus"
 buffer_ms = 1000
+chunk_ms = 20
 silence_on_idle = true
 
 [log]

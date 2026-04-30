@@ -72,10 +72,11 @@ pub async fn run(
         source = %stream.source,
         codec,
         format = %fmt,
+        chunk_ms = stream_chunk_ms(&stream),
         "Stream reader started"
     );
 
-    let frame_samples = fmt.frames_for_ms(20.0) * fmt.channels as usize;
+    let frame_samples = fmt.frames_for_ms(stream_chunk_ms(&stream) as f64) * fmt.channels as usize;
     let frame_bytes = frame_samples * 2; // i16 = 2 bytes
     let mut pcm_buf = vec![0u8; frame_bytes];
     let mut enc_buf: Vec<u8> = Vec::new();
@@ -140,6 +141,20 @@ pub async fn run(
             silence_on_idle,
         )
         .await
+    }
+}
+
+fn stream_chunk_ms(stream: &StreamSource) -> u32 {
+    let ms = stream.chunk_ms.unwrap_or(20).clamp(10, 60);
+    match stream.codec.as_str() {
+        "opus" => match ms {
+            10 | 20 | 40 | 60 => ms,
+            0..=14 => 10,
+            15..=29 => 20,
+            30..=49 => 40,
+            _ => 60,
+        },
+        _ => ms,
     }
 }
 

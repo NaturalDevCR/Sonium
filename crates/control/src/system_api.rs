@@ -91,7 +91,13 @@ struct DependencyActionResult {
 
 #[derive(Serialize)]
 struct RestartResponse {
-    message: &'static str,
+    message: String,
+}
+
+struct RestartCommand {
+    program: String,
+    args: Vec<String>,
+    label: String,
 }
 
 async fn get_system_info() -> Json<SystemInfo> {
@@ -256,28 +262,50 @@ async fn get_logs(Query(query): Query<LogsQuery>) -> Response {
         .into_response()
 }
 
-async fn post_restart() -> Json<RestartResponse> {
-    tokio::spawn(async {
-        tokio::time::sleep(Duration::from_millis(350)).await;
-        tracing::warn!("Sonium server restart requested via control API");
+async fn post_restart() -> Response {
+    match restart_command().await {
+        Ok(Some(cmd)) => {
+            tokio::spawn(async move {
+                tokio::time::sleep(Duration::from_millis(350)).await;
+                tracing::warn!(command = %cmd.label, "Sonium server restart requested via control API");
 
-        if Path::new("/run/systemd/system").exists() && command_exists("systemctl").await {
-            match Command::new("systemctl")
-                .args(["restart", "sonium-server.service"])
-                .spawn()
-            {
-                Ok(_) => return,
-                Err(e) => tracing::error!("Failed to spawn systemctl restart: {e}"),
-            }
+                match Command::new(&cmd.program).args(&cmd.args).output().await {
+                    Ok(output) if output.status.success() => {
+                        tracing::info!("Restart command accepted by system supervisor");
+                    }
+                    Ok(output) => {
+                        let stderr = String::from_utf8_lossy(&output.stderr);
+                        tracing::error!(
+                            status = ?output.status.code(),
+                            stderr = %stderr.trim(),
+                            "Restart command failed"
+                        );
+                    }
+                    Err(e) => tracing::error!("Failed to run restart command: {e}"),
+                }
+            });
+
+            Json(RestartResponse {
+                message: "Sonium server restart requested".to_owned(),
+            })
+            .into_response()
         }
+        Ok(None) => {
+            tokio::spawn(async {
+                tokio::time::sleep(Duration::from_millis(350)).await;
+                tracing::warn!("Sonium server restart requested via control API");
+                // If a dev supervisor restarts on failure, this brings Sonium
+                // back. Foreground runs simply exit.
+                std::process::exit(75);
+            });
 
-        // If systemd is supervising the process with Restart=on-failure, this
-        // still brings it back. In foreground/dev runs it simply exits.
-        std::process::exit(75);
-    });
-    Json(RestartResponse {
-        message: "Sonium server restart requested",
-    })
+            Json(RestartResponse {
+                message: "Sonium server restart requested".to_owned(),
+            })
+            .into_response()
+        }
+        Err(message) => (StatusCode::FORBIDDEN, Json(RestartResponse { message })).into_response(),
+    }
 }
 
 async fn post_dependency_action(AxumPath((id, action)): AxumPath<(String, String)>) -> Response {
@@ -336,6 +364,80 @@ async fn command_exists(binary: &str) -> bool {
         .await
         .map(|status| status.success())
         .unwrap_or(false)
+}
+
+async fn command_path(binary: &str) -> Option<String> {
+    let output = Command::new("sh")
+        .args(["-c", &format!("command -v {binary}")])
+        .output()
+        .await
+        .ok()?;
+
+    if !output.status.success() {
+        return None;
+    }
+
+    String::from_utf8_lossy(&output.stdout)
+        .lines()
+        .next()
+        .map(str::trim)
+        .filter(|path| !path.is_empty())
+        .map(ToOwned::to_owned)
+}
+
+async fn running_as_root() -> bool {
+    let Ok(output) = Command::new("id").arg("-u").output().await else {
+        return false;
+    };
+
+    output.status.success() && String::from_utf8_lossy(&output.stdout).trim() == "0"
+}
+
+async fn sudo_allows_restart(sudo: &str, systemctl: &str) -> bool {
+    Command::new(sudo)
+        .args(["-n", "-l", systemctl, "restart", "sonium-server.service"])
+        .status()
+        .await
+        .map(|status| status.success())
+        .unwrap_or(false)
+}
+
+async fn restart_command() -> Result<Option<RestartCommand>, String> {
+    if !Path::new("/run/systemd/system").exists() {
+        return Ok(None);
+    }
+
+    let Some(systemctl) = command_path("systemctl").await else {
+        return Ok(None);
+    };
+
+    if running_as_root().await {
+        return Ok(Some(RestartCommand {
+            label: format!("{systemctl} restart sonium-server.service"),
+            program: systemctl,
+            args: vec!["restart".to_owned(), "sonium-server.service".to_owned()],
+        }));
+    }
+
+    if let Some(sudo) = command_path("sudo").await {
+        if sudo_allows_restart(&sudo, &systemctl).await {
+            return Ok(Some(RestartCommand {
+                label: format!("{sudo} -n {systemctl} restart sonium-server.service"),
+                program: sudo,
+                args: vec![
+                    "-n".to_owned(),
+                    systemctl,
+                    "restart".to_owned(),
+                    "sonium-server.service".to_owned(),
+                ],
+            }));
+        }
+    }
+
+    Err(
+        "Restart is not permitted for the sonium-server process. Re-run the installer to install the Sonium restart permission, or restart manually with: sudo systemctl restart sonium-server.service"
+            .to_owned(),
+    )
 }
 
 async fn version_of(binary: &str) -> Option<String> {

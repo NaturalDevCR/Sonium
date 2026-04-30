@@ -61,6 +61,9 @@ pub struct StreamSource {
     pub sample_format: SampleFormat,
     /// Milliseconds of jitter buffer suggested to connected clients.
     pub buffer_ms: u32,
+    /// Encoded audio frame duration in milliseconds. Smaller chunks reduce
+    /// scheduling latency; larger chunks reduce packet overhead.
+    pub chunk_ms: Option<u32>,
     /// After this many milliseconds of no input data, mark stream as Idle.
     /// `None` disables idle detection (stream stays in whatever state main.rs set).
     pub idle_timeout_ms: Option<u32>,
@@ -106,6 +109,7 @@ impl Default for StreamSource {
             codec: "opus".into(),
             sample_format: SampleFormat::default(),
             buffer_ms: 1000,
+            chunk_ms: None,
             idle_timeout_ms: None,
             silence_on_idle: false,
         }

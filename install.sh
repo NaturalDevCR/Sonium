@@ -14,6 +14,7 @@ CONF_DIR="${SONIUM_CONFIG_DIR:-/etc/sonium}"
 FIFO_PATH="${SONIUM_FIFO:-/tmp/sonium.fifo}"
 STREAM_PORT="${SONIUM_STREAM_PORT:-1710}"
 CONTROL_PORT="${SONIUM_CONTROL_PORT:-1711}"
+SUDOERS_FILE="/etc/sudoers.d/sonium-server-restart"
 
 # Detect if we can be interactive
 if [[ -t 0 ]]; then
@@ -27,7 +28,7 @@ else
   TTY_PATH="/dev/null"
 fi
 
-SCRIPT_VERSION="v0.1.47"
+SCRIPT_VERSION="v0.1.48"
 
 while [[ $# -gt 0 ]]; do
   case "$1" in
@@ -172,6 +173,11 @@ do_uninstall() {
     rm -f /etc/systemd/system/sonium-server.service
     systemctl daemon-reload
     ok "Removed systemd service"
+  fi
+
+  if [[ -f "${SUDOERS_FILE}" ]]; then
+    rm -f "${SUDOERS_FILE}"
+    ok "Removed Sonium restart permission"
   fi
 
   rm -f "${BIN_DIR}/sonium-server" "${BIN_DIR}/sonium-client"
@@ -334,6 +340,7 @@ display_name = "Main"
 source = "${FIFO_PATH}"
 codec = "opus"
 buffer_ms = 1000
+chunk_ms = 20
 silence_on_idle = true
 
 [log]
@@ -354,6 +361,27 @@ EOF
   fi
 
   if [[ "${INSTALL_SERVICE}" == "true" && -d /run/systemd/system && -x "$(command -v systemctl)" ]]; then
+    if ! command -v sudo >/dev/null 2>&1; then
+      install_pkg sudo
+    fi
+
+    SYSTEMCTL_BIN="$(command -v systemctl)"
+    if command -v sudo >/dev/null 2>&1 && command -v visudo >/dev/null 2>&1; then
+      cat > "${SUDOERS_FILE}" <<EOF
+# Allow the Sonium web UI to restart only its own systemd service.
+${SONIUM_USER} ALL=(root) NOPASSWD: ${SYSTEMCTL_BIN} restart sonium-server.service
+EOF
+      chmod 0440 "${SUDOERS_FILE}"
+      if visudo -cf "${SUDOERS_FILE}" >/dev/null; then
+        ok "Installed web UI restart permission"
+      else
+        rm -f "${SUDOERS_FILE}"
+        warn "Could not validate ${SUDOERS_FILE}; web UI restart will require manual sudoers setup"
+      fi
+    else
+      warn "sudo/visudo not available; web UI restart will require manual systemctl access"
+    fi
+
     cat > /etc/systemd/system/sonium-server.service <<EOF
 [Unit]
 Description=Sonium multiroom audio server
@@ -366,7 +394,7 @@ User=${SONIUM_USER}
 ExecStart=${BIN_DIR}/sonium-server --config ${CONF_DIR}/sonium.toml
 Restart=on-failure
 RestartSec=3
-NoNewPrivileges=true
+NoNewPrivileges=false
 ProtectSystem=strict
 ProtectHome=true
 ReadWritePaths=${CONF_DIR} /tmp

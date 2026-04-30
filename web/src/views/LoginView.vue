@@ -17,7 +17,7 @@ async function submit() {
   loading.value = true;
   try {
     await auth.login(username.value, password.value);
-    const redirect = (route.query.redirect as string) || '/';
+    const redirect = (route.query.redirect as string) || (auth.isAdmin ? '/admin' : '/');
     router.push(redirect);
   } catch (e: any) {
     error.value = e.message || 'Login failed';

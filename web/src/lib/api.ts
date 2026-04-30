@@ -222,7 +222,17 @@ async function post<T>(path: string, body: unknown): Promise<T> {
     body: JSON.stringify(body),
   });
   if (r.status === 401) handleUnauthorized();
-  if (!r.ok) throw new Error(`POST ${path}: ${r.status}`);
+  if (!r.ok) {
+    const body = await r.text().catch(() => '');
+    let msg = body || `POST ${path}: ${r.status}`;
+    try {
+      const parsed = JSON.parse(body);
+      if (parsed?.message) msg = parsed.message;
+    } catch {
+      // Plain text errors are fine.
+    }
+    throw new Error(msg);
+  }
   return parseJson<T>(r, `POST ${path}`);
 }
 

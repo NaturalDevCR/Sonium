@@ -124,7 +124,7 @@ async fn connect_and_run(
     // Start periodic tasks
     let (incoming_tx, mut incoming_rx) = mpsc::unbounded_channel();
     let read_task = tokio::spawn(socket_reader(reader, incoming_tx));
-    let mut audio_tick = tokio::time::interval(tokio::time::Duration::from_millis(20));
+    let mut audio_tick = tokio::time::interval(tokio::time::Duration::from_millis(5));
     let mut sync_tick = tokio::time::interval(tokio::time::Duration::from_secs(1));
     let mut health_tick = tokio::time::interval(tokio::time::Duration::from_secs(2));
     let mut sync_seq: u16 = 0;
@@ -139,9 +139,17 @@ async fn connect_and_run(
                 }
                 if let (Some(pl), Some(buf)) = (player.as_mut(), sync_buf.as_mut()) {
                     let now_server = time_provider.to_server_time(now_us());
-                    while let Some(chunk) = buf.pop_ready(now_server) {
+                    let target_output_us = output_prefill_us(
+                        server_buffer_ms + cfg.latency_ms + server_latency_ms,
+                    );
+                    while pl.buffered_us() < target_output_us {
+                        let sink_ready_at = now_server + pl.buffered_us();
+                        let Some(chunk) = buf.pop_ready(sink_ready_at) else {
+                            break;
+                        };
                         if let Err(e) = pl.write(&chunk.samples) {
                             warn!("Audio pump write error: {e}");
+                            break;
                         }
                     }
                 }
@@ -298,6 +306,11 @@ async fn connect_and_run(
 
     read_task.abort();
     result
+}
+
+fn output_prefill_us(total_buffer_ms: i32) -> i64 {
+    let ms = (total_buffer_ms / 4).clamp(120, 300);
+    ms as i64 * 1000
 }
 
 async fn send_time_request(

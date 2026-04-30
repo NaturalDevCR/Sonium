@@ -23,7 +23,7 @@ const localIp = ref('');
 const scanning = ref(false);
 
 const healthState = ref<Record<number, { lastSeen: number, status: string, report?: any, logs: string[] }>>({});
-const APP_VERSION = 'v0.1.47';
+const APP_VERSION = 'v0.1.48';
 
 function instanceStatus(instance: InstanceConfig) {
   if (!instance.enabled) return { label: 'Stopped', tone: 'text-slate-500/80', dot: 'bg-slate-600' };

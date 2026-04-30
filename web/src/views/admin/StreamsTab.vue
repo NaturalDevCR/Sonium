@@ -321,12 +321,15 @@ const addId      = ref('');
 const addName    = ref('');
 const addCodec   = ref('opus');
 const addBufMs   = ref(1000);
+const addChunkMs = ref(20);
 const addIdleEnabled = ref(false);
 const addIdleMs      = ref(3000);
 const addSilence     = ref(false);
 const showToml   = ref(true);
 const addInfo    = ref('');
 const saving     = ref(false);
+const restarting = ref(false);
+const restartNotice = ref('');
 const saveBlocking = computed(() => saving.value);
 const isEditMode = ref(false);
 const editIdOriginal = ref('');
@@ -378,6 +381,7 @@ const tomlSnippet = computed(() => {
   lines.push(`source    = "${esc(effectiveSource.value)}"`);
   lines.push(`codec     = "${esc(addCodec.value)}"`);
   lines.push(`buffer_ms = ${addBufMs.value}`);
+  if (addChunkMs.value !== 20) lines.push(`chunk_ms  = ${addChunkMs.value}`);
   if (addIdleEnabled.value) {
     lines.push(`idle_timeout_ms = ${addIdleMs.value}`);
     if (addSilence.value) lines.push(`silence_on_idle = true`);
@@ -507,6 +511,7 @@ function closeDialog() {
   addId.value   = '';
   addName.value = '';
   addInfo.value = '';
+  addChunkMs.value = 20;
   addIdleEnabled.value = false;
   addSilence.value = false;
   metaSources.value = [];
@@ -523,6 +528,7 @@ function editStream(s: any) {
   addName.value = s.display_name || '';
   addCodec.value = s.codec || 'opus';
   addBufMs.value = s.buffer_ms || 1000;
+  addChunkMs.value = s.chunk_ms || 20;
   addIdleEnabled.value = !!s.idle_timeout_ms;
   addIdleMs.value = s.idle_timeout_ms || 3000;
   addSilence.value = !!s.silence_on_idle;
@@ -548,6 +554,7 @@ async function submitAdd() {
       codec: addCodec.value,
       buffer_ms: addBufMs.value,
     };
+    if (addChunkMs.value !== 20) streamData.chunk_ms = addChunkMs.value;
     if (addName.value.trim()) streamData.display_name = addName.value.trim();
     if (addIdleEnabled.value) {
       streamData.idle_timeout_ms = addIdleMs.value;
@@ -566,14 +573,30 @@ async function submitAdd() {
     }
 
     await api.saveConfigRaw(stringify(config));
-    addInfo.value = isEditMode.value
-      ? '✓ Stream updated. Restart Sonium server to apply.'
-      : '✓ Stream added. Restart Sonium server to apply.';
+    restartNotice.value = isEditMode.value
+      ? 'Stream updated. Restart Sonium server to apply.'
+      : 'Stream added. Restart Sonium server to apply.';
     closeDialog();
   } catch (e) {
     addInfo.value = `Could not save: ${String(e)}`;
   } finally {
     saving.value = false;
+  }
+}
+
+async function restartServer() {
+  const ok = window.confirm(
+    'Restart Sonium server now? Audio will stop briefly and the web UI may disconnect while the process comes back.',
+  );
+  if (!ok) return;
+
+  restarting.value = true;
+  try {
+    await api.restartServer();
+    restartNotice.value = 'Restart requested. Sonium should come back automatically if it is supervised by systemd.';
+  } catch (e) {
+    restartNotice.value = String(e);
+    restarting.value = false;
   }
 }
 </script>
@@ -592,6 +615,26 @@ async function submitAdd() {
         Add stream
       </button>
     </div>
+
+    <Transition name="slide">
+      <div
+        v-if="restartNotice"
+        class="restart-banner"
+        :class="{ 'restart-banner-error': restartNotice.startsWith('Error') || restartNotice.includes('not permitted') }"
+      >
+        <span class="mdi mdi-restart-alert restart-banner-icon"></span>
+        <p>{{ restartNotice }}</p>
+        <button
+          v-if="auth.isAdmin"
+          @click="restartServer"
+          :disabled="restarting"
+          class="btn-primary restart-banner-btn"
+        >
+          <span class="mdi" :class="restarting ? 'mdi-loading spin' : 'mdi-restart'"></span>
+          {{ restarting ? 'Restarting...' : 'Restart' }}
+        </button>
+      </div>
+    </Transition>
 
     <!-- Stream list -->
     <div class="card">
@@ -849,7 +892,7 @@ async function submitAdd() {
                   <div class="space-y-3">
 
                     <!-- Codec + Buffer -->
-                    <div class="grid grid-cols-2 gap-3">
+                    <div class="grid grid-cols-3 gap-3">
                       <div>
                         <label class="param-label block mb-1.5">Codec</label>
                         <select v-model="addCodec" class="field">
@@ -863,6 +906,15 @@ async function submitAdd() {
                         <input v-model.number="addBufMs" type="number"
                                min="100" max="10000" step="100"
                                class="field field-mono" />
+                      </div>
+                      <div>
+                        <label class="param-label block mb-1.5">Chunk (ms)</label>
+                        <select v-model.number="addChunkMs" class="field field-mono">
+                          <option :value="10">10</option>
+                          <option :value="20">20</option>
+                          <option :value="40">40</option>
+                          <option :value="60">60</option>
+                        </select>
                       </div>
                     </div>
 
@@ -977,6 +1029,40 @@ async function submitAdd() {
   letter-spacing: -0.01em;
 }
 .page-sub { font-size: 13px; color: var(--text-muted); }
+
+.slide-enter-active, .slide-leave-active { transition: all .2s ease; }
+.slide-enter-from, .slide-leave-to { opacity: 0; transform: translateY(-6px); }
+
+.restart-banner {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  padding: 12px 14px;
+  border-radius: 10px;
+  border: 1px solid rgba(245, 158, 11, 0.35);
+  background: rgba(245, 158, 11, 0.10);
+  color: #fbbf24;
+  font-size: 13px;
+}
+.restart-banner-error {
+  border-color: var(--red-border);
+  background: var(--red-dim);
+  color: var(--red);
+}
+.restart-banner p {
+  flex: 1;
+  min-width: 0;
+  line-height: 1.45;
+}
+.restart-banner-icon {
+  flex-shrink: 0;
+  font-size: 18px;
+}
+.restart-banner-btn {
+  flex-shrink: 0;
+  padding: 7px 11px;
+  font-size: 12px;
+}
 
 /* ── Stream list ── */
 .stream-row {

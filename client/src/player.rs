@@ -92,6 +92,12 @@ impl Player {
         self.max_samples.store(samples.max(1), Ordering::Relaxed);
     }
 
+    pub fn buffered_us(&self) -> i64 {
+        let ring = self.ring.lock().unwrap();
+        let frames = ring.len() / self.fmt.channels as usize;
+        (frames as f64 / self.fmt.rate as f64 * 1_000_000.0) as i64
+    }
+
     /// Push interleaved i16 PCM samples into the ring buffer.
     pub fn write(&mut self, samples: &[i16]) -> Result<(), SoniumError> {
         let mut ring = self.ring.lock().unwrap();
@@ -244,7 +250,13 @@ fn try_open_stream(
         .default_output_config()
         .map_err(|e| format!("default_output_config: {e}"))?;
 
-    let config = cpal::StreamConfig {
+    let fixed_frames = (fmt.rate / 25).max(256);
+    let fixed_config = cpal::StreamConfig {
+        channels: fmt.channels as cpal::ChannelCount,
+        sample_rate: cpal::SampleRate(fmt.rate),
+        buffer_size: cpal::BufferSize::Fixed(fixed_frames),
+    };
+    let default_config = cpal::StreamConfig {
         channels: fmt.channels as cpal::ChannelCount,
         sample_rate: cpal::SampleRate(fmt.rate),
         buffer_size: cpal::BufferSize::Default,
@@ -254,13 +266,50 @@ fn try_open_stream(
     let fade_samples = (fmt.rate as usize * fmt.channels as usize * 2) / 1000;
     let err_fn = |err| warn!("CPAL stream error: {err}");
 
-    let stream = match supported.sample_format() {
+    let stream = build_stream_for_format(
+        &device,
+        supported.sample_format(),
+        &fixed_config,
+        ring.clone(),
+        health.clone(),
+        fade_samples,
+        err_fn,
+    )
+    .or_else(|e| {
+        warn!(
+            buffer_frames = fixed_frames,
+            "Fixed audio callback buffer unavailable ({e}); falling back to device default"
+        );
+        build_stream_for_format(
+            &device,
+            supported.sample_format(),
+            &default_config,
+            ring.clone(),
+            health.clone(),
+            fade_samples,
+            err_fn,
+        )
+    })
+    .map_err(|e| format!("build_output_stream: {e}"))?;
+
+    stream.play().map_err(|e| format!("stream.play: {e}"))?;
+    Ok(stream)
+}
+
+fn build_stream_for_format(
+    device: &cpal::Device,
+    sample_format: cpal::SampleFormat,
+    config: &cpal::StreamConfig,
+    ring: Arc<Mutex<VecDeque<i16>>>,
+    health: Arc<HealthState>,
+    fade_samples: usize,
+    err_fn: impl Fn(cpal::StreamError) + Send + 'static + Copy,
+) -> Result<cpal::Stream, cpal::BuildStreamError> {
+    match sample_format {
         cpal::SampleFormat::I16 => {
             let mut fade = FadeState::new(fade_samples);
-            let ring = ring.clone();
-            let health = health.clone();
             device.build_output_stream(
-                &config,
+                config,
                 move |data: &mut [i16], _: &cpal::OutputCallbackInfo| {
                     let mut ring = ring.lock().unwrap();
                     for sample in data.iter_mut() {
@@ -280,10 +329,8 @@ fn try_open_stream(
         }
         cpal::SampleFormat::U16 => {
             let mut fade = FadeState::new(fade_samples);
-            let ring = ring.clone();
-            let health = health.clone();
             device.build_output_stream(
-                &config,
+                config,
                 move |data: &mut [u16], _: &cpal::OutputCallbackInfo| {
                     let mut ring = ring.lock().unwrap();
                     for sample in data.iter_mut() {
@@ -304,10 +351,8 @@ fn try_open_stream(
         }
         cpal::SampleFormat::F32 => {
             let mut fade = FadeState::new(fade_samples);
-            let ring = ring.clone();
-            let health = health.clone();
             device.build_output_stream(
-                &config,
+                config,
                 move |data: &mut [f32], _: &cpal::OutputCallbackInfo| {
                     let mut ring = ring.lock().unwrap();
                     for sample in data.iter_mut() {
@@ -326,12 +371,8 @@ fn try_open_stream(
                 None,
             )
         }
-        fmt => return Err(format!("unsupported sample format: {fmt:?}")),
+        _ => Err(cpal::BuildStreamError::StreamConfigNotSupported),
     }
-    .map_err(|e| format!("build_output_stream: {e}"))?;
-
-    stream.play().map_err(|e| format!("stream.play: {e}"))?;
-    Ok(stream)
 }
 
 // ── Crossfade state machine ──────────────────────────────────────────────────
