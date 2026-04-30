@@ -15,6 +15,13 @@ struct HealthEvent {
     report: HealthReport,
 }
 
+#[derive(Clone, serde::Serialize)]
+struct StatusEvent {
+    id: u32,
+    status: String,
+    message: Option<String>,
+}
+
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct InstanceConfig {
     pub id: u32,
@@ -152,11 +159,16 @@ async fn save_instances(
 
             let server_addr = format!("{}:{}", cfg.server_host, cfg.server_port);
             let (health_tx, mut health_rx) = mpsc::unbounded_channel::<HealthReport>();
+            let (status_tx, mut status_rx) =
+                mpsc::unbounded_channel::<controller::ConnectionStatus>();
             let app_handle = app.clone();
+            let status_app_handle = app.clone();
             let instance_id = config.id;
 
             let handle = tauri::async_runtime::spawn(async move {
-                let _ = controller::run(server_addr, cfg, Some(health_tx)).await;
+                let _ =
+                    controller::run_with_status(server_addr, cfg, Some(health_tx), Some(status_tx))
+                        .await;
             });
 
             // Monitor health for this instance
@@ -167,6 +179,30 @@ async fn save_instances(
                         HealthEvent {
                             id: instance_id,
                             report,
+                        },
+                    );
+                }
+            });
+
+            tauri::async_runtime::spawn(async move {
+                while let Some(status) = status_rx.recv().await {
+                    let (status, message) = match status {
+                        controller::ConnectionStatus::Connecting => ("connecting".to_owned(), None),
+                        controller::ConnectionStatus::Connected => ("connected".to_owned(), None),
+                        controller::ConnectionStatus::Ready => ("ready".to_owned(), None),
+                        controller::ConnectionStatus::Disconnected => {
+                            ("disconnected".to_owned(), None)
+                        }
+                        controller::ConnectionStatus::Error(message) => {
+                            ("error".to_owned(), Some(message))
+                        }
+                    };
+                    let _ = status_app_handle.emit(
+                        "client-status",
+                        StatusEvent {
+                            id: instance_id,
+                            status,
+                            message,
                         },
                     );
                 }
@@ -231,11 +267,14 @@ async fn start_instance(
 
     let server_addr = format!("{}:{}", cfg.server_host, cfg.server_port);
     let (health_tx, mut health_rx) = mpsc::unbounded_channel::<HealthReport>();
+    let (status_tx, mut status_rx) = mpsc::unbounded_channel::<controller::ConnectionStatus>();
     let app_handle = app.clone();
+    let status_app_handle = app.clone();
     let instance_id = config.id;
 
     let handle = tauri::async_runtime::spawn(async move {
-        let _ = controller::run(server_addr, cfg, Some(health_tx)).await;
+        let _ =
+            controller::run_with_status(server_addr, cfg, Some(health_tx), Some(status_tx)).await;
     });
 
     // Monitor health for this instance
@@ -246,6 +285,26 @@ async fn start_instance(
                 HealthEvent {
                     id: instance_id,
                     report,
+                },
+            );
+        }
+    });
+
+    tauri::async_runtime::spawn(async move {
+        while let Some(status) = status_rx.recv().await {
+            let (status, message) = match status {
+                controller::ConnectionStatus::Connecting => ("connecting".to_owned(), None),
+                controller::ConnectionStatus::Connected => ("connected".to_owned(), None),
+                controller::ConnectionStatus::Ready => ("ready".to_owned(), None),
+                controller::ConnectionStatus::Disconnected => ("disconnected".to_owned(), None),
+                controller::ConnectionStatus::Error(message) => ("error".to_owned(), Some(message)),
+            };
+            let _ = status_app_handle.emit(
+                "client-status",
+                StatusEvent {
+                    id: instance_id,
+                    status,
+                    message,
                 },
             );
         }

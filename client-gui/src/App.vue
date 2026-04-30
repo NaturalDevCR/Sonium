@@ -22,13 +22,16 @@ const editingInstance = ref<InstanceConfig | null>(null);
 const localIp = ref('');
 const scanning = ref(false);
 
-const healthState = ref<Record<number, { lastSeen: number, connected: boolean, report?: any, logs: string[] }>>({});
-const APP_VERSION = 'v0.1.37';
+const healthState = ref<Record<number, { lastSeen: number, status: string, report?: any, logs: string[] }>>({});
+const APP_VERSION = 'v0.1.42';
 
 function instanceStatus(instance: InstanceConfig) {
   if (!instance.enabled) return { label: 'Stopped', tone: 'text-slate-500/80', dot: 'bg-slate-600' };
   const state = healthState.value[instance.id];
-  if (state?.connected) return { label: 'Connected', tone: 'text-emerald-500/80', dot: 'bg-emerald-500 animate-pulse' };
+  if (state?.status === 'ready') return { label: 'Ready', tone: 'text-emerald-500/80', dot: 'bg-emerald-500 animate-pulse' };
+  if (state?.status === 'connected') return { label: 'Connected', tone: 'text-emerald-500/80', dot: 'bg-emerald-500 animate-pulse' };
+  if (state?.status === 'connecting') return { label: 'Connecting', tone: 'text-amber-400/80', dot: 'bg-amber-400 animate-pulse' };
+  if (state?.status === 'error') return { label: 'Error', tone: 'text-red-500/80', dot: 'bg-red-500' };
   if (!state || Date.now() - state.lastSeen < 10000) return { label: 'Starting', tone: 'text-amber-400/80', dot: 'bg-amber-400 animate-pulse' };
   return { label: 'Offline', tone: 'text-red-500/80', dot: 'bg-red-500' };
 }
@@ -71,7 +74,7 @@ async function saveInstances() {
     if (instance.enabled && !healthState.value[instance.id]) {
       healthState.value[instance.id] = {
         lastSeen: now,
-        connected: false,
+        status: 'starting',
         logs: [`${new Date().toLocaleTimeString()} - Starting client instance`],
       };
     }
@@ -154,7 +157,7 @@ onMounted(async () => {
   // Listen for health updates from all instances
   await listen('client-health', (event: { payload: { id: number, report: any } }) => {
     const { id, report } = event.payload;
-    const currentState = healthState.value[id] || { logs: [] };
+    const currentState = healthState.value[id] || { status: 'ready', logs: [] };
     
     // Detect significant events for the log
     const newLogs = [...currentState.logs];
@@ -167,9 +170,30 @@ onMounted(async () => {
     
     healthState.value[id] = {
       lastSeen: Date.now(),
-      connected: true,
+      status: currentState.status === 'starting' || currentState.status === 'connecting'
+        ? 'ready'
+        : currentState.status,
       report,
       logs: newLogs.slice(0, 10) // Keep last 10 logs
+    };
+  });
+
+  await listen('client-status', (event: { payload: { id: number, status: string, message?: string | null } }) => {
+    const { id, status, message } = event.payload;
+    const currentState = healthState.value[id] || { logs: [] };
+    const newLogs = [...currentState.logs];
+    const lastLog = newLogs[0] || '';
+    const label = message ? `${status}: ${message}` : status;
+
+    if (!lastLog.endsWith(label)) {
+      newLogs.unshift(`${new Date().toLocaleTimeString()} - ${label}`);
+    }
+
+    healthState.value[id] = {
+      lastSeen: Date.now(),
+      status,
+      report: currentState.report,
+      logs: newLogs.slice(0, 10),
     };
   });
 
@@ -178,10 +202,10 @@ onMounted(async () => {
     const now = Date.now();
     for (const id in healthState.value) {
       if (now - healthState.value[id].lastSeen > 10000) {
-        if (healthState.value[id].connected) {
+        if (['connected', 'ready'].includes(healthState.value[id].status)) {
           healthState.value[id].logs.unshift(`[${new Date().toLocaleTimeString()}] Connection timed out`);
         }
-        healthState.value[id].connected = false;
+        healthState.value[id].status = 'disconnected';
       }
     }
   }, 2000);

@@ -18,6 +18,15 @@ use crate::player::Player;
 
 use tokio::sync::mpsc;
 
+#[derive(Debug, Clone, serde::Serialize)]
+pub enum ConnectionStatus {
+    Connecting,
+    Connected,
+    Ready,
+    Disconnected,
+    Error(String),
+}
+
 /// Main client loop — connects, syncs clock, decodes and plays audio.
 /// Auto-reconnects on disconnect with exponential backoff.
 pub async fn run(
@@ -25,14 +34,33 @@ pub async fn run(
     cfg: ClientConfig,
     health_tx: Option<mpsc::UnboundedSender<HealthReport>>,
 ) -> anyhow::Result<()> {
+    run_with_status(server_addr, cfg, health_tx, None).await
+}
+
+pub async fn run_with_status(
+    server_addr: String,
+    cfg: ClientConfig,
+    health_tx: Option<mpsc::UnboundedSender<HealthReport>>,
+    status_tx: Option<mpsc::UnboundedSender<ConnectionStatus>>,
+) -> anyhow::Result<()> {
     let mut backoff = Duration::from_millis(500);
 
     loop {
-        match connect_and_run(&server_addr, &cfg, health_tx.clone()).await {
+        let _ = status_tx
+            .as_ref()
+            .map(|tx| tx.send(ConnectionStatus::Connecting));
+
+        match connect_and_run(&server_addr, &cfg, health_tx.clone(), status_tx.clone()).await {
             Ok(()) => {
+                let _ = status_tx
+                    .as_ref()
+                    .map(|tx| tx.send(ConnectionStatus::Disconnected));
                 info!("Disconnected cleanly");
             }
             Err(e) => {
+                let _ = status_tx
+                    .as_ref()
+                    .map(|tx| tx.send(ConnectionStatus::Error(e.to_string())));
                 warn!(
                     "Disconnected with error: {e} — reconnecting in {}ms",
                     backoff.as_millis()
@@ -48,9 +76,13 @@ async fn connect_and_run(
     addr: &str,
     cfg: &ClientConfig,
     health_tx: Option<mpsc::UnboundedSender<HealthReport>>,
+    status_tx: Option<mpsc::UnboundedSender<ConnectionStatus>>,
 ) -> anyhow::Result<()> {
     let mut stream = TcpStream::connect(addr).await?;
     stream.set_nodelay(true)?;
+    let _ = status_tx
+        .as_ref()
+        .map(|tx| tx.send(ConnectionStatus::Connected));
     info!(%addr, "Connected to server (TCP_NODELAY=true)");
 
     let time_provider = TimeProvider::new();
@@ -187,6 +219,9 @@ async fn connect_and_run(
                         decoder  = Some(dec);
                         player   = Some(p);
                         sync_buf = Some(buf);
+                        let _ = status_tx
+                            .as_ref()
+                            .map(|tx| tx.send(ConnectionStatus::Ready));
                     }
 
                     MessageType::ServerSettings => {

@@ -179,10 +179,12 @@ impl SyncBuffer {
         }
 
         let front = self.chunks.front()?;
+        let has_target_depth = self.buffer_depth_us() >= self.target_buffer_us;
+        let chunk_is_due = front.playout_us <= now_server_us + self.lead_us;
 
         match self.state {
             State::Buffering => {
-                if front.playout_us <= now_server_us + self.lead_us {
+                if chunk_is_due || has_target_depth {
                     self.state = State::Playing;
                     let chunk = self.chunks.pop_front().unwrap();
                     self.buffered_samples = self
@@ -192,7 +194,7 @@ impl SyncBuffer {
                 }
             }
             State::Playing => {
-                if front.playout_us <= now_server_us + self.lead_us {
+                if chunk_is_due || has_target_depth {
                     let chunk = self.chunks.pop_front().unwrap();
                     self.buffered_samples = self
                         .buffered_samples
@@ -352,5 +354,20 @@ mod tests {
         buf.push(chunk(10_000, 960), 0);
         buf.clear();
         assert!(buf.is_empty());
+    }
+
+    #[test]
+    fn releases_oldest_when_target_depth_is_reached_even_if_clock_lags() {
+        let mut buf = SyncBuffer::new(fmt());
+        buf.set_target_buffer_ms(100);
+        let now = 1_000_000i64;
+
+        // 10 ms per chunk, all scheduled well in the future. If clock sync is
+        // lagging, playout should still recover once enough audio is queued.
+        for i in 0..10 {
+            buf.push(chunk(now + 5_000_000 + i * 10_000, 960), now);
+        }
+
+        assert!(buf.pop_ready(now).is_some());
     }
 }
