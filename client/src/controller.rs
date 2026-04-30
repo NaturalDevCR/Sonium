@@ -116,7 +116,6 @@ async fn connect_and_run(
     let mut eq_bands: Vec<EqBand> = vec![];
     let mut eq_enabled = false;
     let mut eq_processor: Option<SmoothedEqProcessor> = None;
-    let mut observability_enabled = false;
     let mut server_buffer_ms: i32 = cfg.latency_ms + 500; // Default buffer depth
     let mut server_latency_ms: i32 = 0;
 
@@ -185,12 +184,10 @@ async fn connect_and_run(
                     let _ = tx.send(report_msg.clone());
                 }
 
-                if observability_enabled {
-                    let msg = Message::HealthReport(report_msg).encode();
-                    if let Err(e) = writer.write_all(&msg).await {
-                        warn!("Failed to send health report: {e}");
-                        break Ok(());
-                    }
+                let msg = Message::HealthReport(report_msg).encode();
+                if let Err(e) = writer.write_all(&msg).await {
+                    warn!("Failed to send health report: {e}");
+                    break Ok(());
                 }
             }
 
@@ -231,7 +228,6 @@ async fn connect_and_run(
                         muted    = ss.muted;
                         eq_bands = ss.eq_bands;
                         eq_enabled = ss.eq_enabled;
-                        observability_enabled = ss.observability_enabled;
                         server_buffer_ms = ss.buffer_ms;
                         server_latency_ms = ss.latency;
                         if let Some(buf) = sync_buf.as_mut() {

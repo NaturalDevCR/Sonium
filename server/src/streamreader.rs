@@ -1,4 +1,5 @@
 use bytes::Bytes;
+use std::io;
 use std::sync::Arc;
 use tokio::io::AsyncReadExt;
 use tokio::net::{TcpListener, TcpStream};
@@ -468,21 +469,22 @@ async fn run_reader<R: AsyncReadExt + Unpin>(
     let mut last_level = tokio::time::Instant::now()
         .checked_sub(level_interval)
         .unwrap_or_else(tokio::time::Instant::now);
+    let mut pcm_filled = 0usize;
 
     'read: loop {
         // ── Try to read one frame ─────────────────────────────────────────
         let read_ok: bool = if let Some(dur) = idle_timeout {
-            match tokio::time::timeout(dur, src.read_exact(pcm_buf)).await {
-                Ok(Ok(_)) => true,
-                Ok(Err(e)) if e.kind() == std::io::ErrorKind::UnexpectedEof => {
+            match read_pcm_frame(&mut src, pcm_buf, &mut pcm_filled, Some(dur)).await {
+                FrameRead::Frame => true,
+                FrameRead::Eof => {
                     info!("[{stream_id}] Input closed — reader stopping");
                     break 'read;
                 }
-                Ok(Err(e)) => {
+                FrameRead::Error(e) => {
                     warn!("[{stream_id}] Read error: {e}");
                     break 'read;
                 }
-                Err(_timeout) => {
+                FrameRead::Idle => {
                     // No data within idle_timeout → go idle.
                     if !is_idle {
                         is_idle = true;
@@ -497,20 +499,21 @@ async fn run_reader<R: AsyncReadExt + Unpin>(
                         loop {
                             tokio::select! {
                                 biased;
-                                result = src.read_exact(pcm_buf) => {
+                                result = read_pcm_frame(&mut src, pcm_buf, &mut pcm_filled, None) => {
                                     match result {
-                                        Ok(_) => {
+                                        FrameRead::Frame => {
                                             // Data resumed — break out of silence loop,
                                             // fall through to encode below.
                                         }
-                                        Err(e) if e.kind() == std::io::ErrorKind::UnexpectedEof => {
+                                        FrameRead::Eof => {
                                             info!("[{stream_id}] Input closed during idle");
                                             break 'read;
                                         }
-                                        Err(e) => {
+                                        FrameRead::Error(e) => {
                                             warn!("[{stream_id}] Read error during idle: {e}");
                                             break 'read;
                                         }
+                                        FrameRead::Idle => unreachable!("idle is disabled while waiting for resumed audio"),
                                     }
                                     break; // exit silence loop, encode the received frame
                                 }
@@ -529,16 +532,17 @@ async fn run_reader<R: AsyncReadExt + Unpin>(
                 }
             }
         } else {
-            match src.read_exact(pcm_buf).await {
-                Ok(_) => true,
-                Err(e) if e.kind() == std::io::ErrorKind::UnexpectedEof => {
+            match read_pcm_frame(&mut src, pcm_buf, &mut pcm_filled, None).await {
+                FrameRead::Frame => true,
+                FrameRead::Eof => {
                     info!("[{stream_id}] Input closed — reader stopping");
                     break 'read;
                 }
-                Err(e) => {
+                FrameRead::Error(e) => {
                     warn!("[{stream_id}] Read error: {e}");
                     break 'read;
                 }
+                FrameRead::Idle => unreachable!("idle is disabled for blocking reads"),
             }
         };
 
@@ -586,4 +590,82 @@ async fn run_reader<R: AsyncReadExt + Unpin>(
     }
 
     Ok(())
+}
+
+enum FrameRead {
+    Frame,
+    Idle,
+    Eof,
+    Error(io::Error),
+}
+
+async fn read_pcm_frame<R: AsyncReadExt + Unpin>(
+    src: &mut R,
+    pcm_buf: &mut [u8],
+    filled: &mut usize,
+    idle_timeout: Option<Duration>,
+) -> FrameRead {
+    while *filled < pcm_buf.len() {
+        let read = src.read(&mut pcm_buf[*filled..]);
+        let result = if let Some(timeout) = idle_timeout {
+            match tokio::time::timeout(timeout, read).await {
+                Ok(result) => result,
+                Err(_) => return FrameRead::Idle,
+            }
+        } else {
+            read.await
+        };
+
+        match result {
+            Ok(0) => {
+                *filled = 0;
+                return FrameRead::Eof;
+            }
+            Ok(n) => *filled += n,
+            Err(e) => {
+                *filled = 0;
+                return FrameRead::Error(e);
+            }
+        }
+    }
+
+    *filled = 0;
+    FrameRead::Frame
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use tokio::io::AsyncWriteExt;
+
+    #[tokio::test]
+    async fn read_pcm_frame_preserves_partial_data_after_idle() {
+        let (mut source, mut sink) = tokio::io::duplex(16);
+        let mut pcm = [0u8; 8];
+        let mut filled = 0usize;
+
+        sink.write_all(&[1, 2, 3, 4]).await.unwrap();
+        match read_pcm_frame(
+            &mut source,
+            &mut pcm,
+            &mut filled,
+            Some(Duration::from_millis(5)),
+        )
+        .await
+        {
+            FrameRead::Idle => {}
+            _ => panic!("expected idle with a partial frame"),
+        }
+
+        assert_eq!(filled, 4);
+
+        sink.write_all(&[5, 6, 7, 8]).await.unwrap();
+        match read_pcm_frame(&mut source, &mut pcm, &mut filled, None).await {
+            FrameRead::Frame => {}
+            _ => panic!("expected complete frame"),
+        }
+
+        assert_eq!(filled, 0);
+        assert_eq!(pcm, [1, 2, 3, 4, 5, 6, 7, 8]);
+    }
 }

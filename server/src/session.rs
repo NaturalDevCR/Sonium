@@ -175,7 +175,7 @@ async fn session_loop(
                         handle_client_msg(stream, &state, client_id, hdr, &payload).await?;
                     }
                     IncomingClientFrame::Closed(reason) => {
-                        debug!(%peer, %reason, "Client reader closed");
+                        info!(%peer, %reason, "Client reader closed");
                         break Ok(());
                     }
                 }
@@ -185,7 +185,8 @@ async fn session_loop(
             frame = recv_audio(&mut audio_rx) => {
                 match frame {
                     Ok(f) => {
-                        if stream.write_all(&f.wire_bytes).await.is_err() {
+                        if let Err(e) = stream.write_all(&f.wire_bytes).await {
+                            warn!(%peer, error = %e, "Audio frame write failed");
                             break Ok(());
                         }
                     }
@@ -275,13 +276,7 @@ async fn session_loop(
                     Ok(Event::ClientObservabilityChanged { client_id: cid, enabled })
                         if cid == client_id =>
                     {
-                        let (vol, muted) = state.get_volume(client_id).unwrap_or((100, false));
-                        let c = state.get_client(client_id);
-                        let lat = c.as_ref().map(|c| c.latency_ms).unwrap_or(0);
-                        let (eq, en) = state.get_stream_eq(&stream_id).unwrap_or_default();
-                        let current_buffer = bc.as_ref().map(|b| b.buffer_ms).unwrap_or_else(|| cfg.default_stream().buffer_ms);
-                        send_server_settings(stream, current_buffer, vol, muted, lat, eq, en, enabled).await?;
-                        debug!(%peer, enabled, "Observability setting pushed to client");
+                        debug!(%peer, enabled, "Observability updated server-side");
                     }
 
                     Ok(Event::StreamEqChanged { stream_id: sid, eq_bands, enabled })
