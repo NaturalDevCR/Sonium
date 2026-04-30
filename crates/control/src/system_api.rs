@@ -4,13 +4,15 @@ use std::path::Path;
 use std::sync::Arc;
 
 use axum::{
-    extract::{Path as AxumPath, Request, State},
+    extract::{Path as AxumPath, Query, Request, State},
     http::{header, StatusCode},
     middleware::{self, Next},
     response::{IntoResponse, Json, Response},
     routing::{get, post},
     Router,
 };
+use chrono::{DateTime, Local};
+use serde::Deserialize;
 use serde::Serialize;
 use tokio::process::Command;
 use tokio::time::{timeout, Duration};
@@ -147,7 +149,24 @@ async fn get_system_info() -> Json<SystemInfo> {
     })
 }
 
-async fn get_logs() -> Response {
+#[derive(Debug, Deserialize)]
+struct LogsQuery {
+    since: Option<String>,
+    lines: Option<usize>,
+}
+
+#[derive(Clone, Copy)]
+struct LogWindow {
+    since: Option<DateTime<Local>>,
+    limit: usize,
+}
+
+async fn get_logs(Query(query): Query<LogsQuery>) -> Response {
+    let window = match log_window(query) {
+        Ok(window) => window,
+        Err(message) => return (StatusCode::BAD_REQUEST, message).into_response(),
+    };
+
     let mut candidates = Vec::new();
     if let Ok(path) = std::env::var("SONIUM_LOG_FILE") {
         candidates.push(path);
@@ -167,7 +186,7 @@ async fn get_logs() -> Response {
 
     for path in candidates {
         if Path::new(&path).exists() {
-            match tail_file(&path, 240).await {
+            match read_log_file(&path, window).await {
                 Ok(logs) => {
                     return ([(header::CONTENT_TYPE, "text/plain; charset=utf-8")], logs)
                         .into_response();
@@ -181,11 +200,20 @@ async fn get_logs() -> Response {
 
     if command_exists("journalctl").await {
         for unit in ["sonium-server", "sonium-server.service", "sonium"] {
-            match Command::new("journalctl")
-                .args(["-u", unit, "-n", "240", "--no-pager"])
-                .output()
-                .await
-            {
+            let mut args = vec![
+                "-u".to_owned(),
+                unit.to_owned(),
+                "-n".to_owned(),
+                window.limit.to_string(),
+                "--no-pager".to_owned(),
+                "-o".to_owned(),
+                "short-iso".to_owned(),
+            ];
+            if let Some(since) = window.since {
+                args.push("--since".to_owned());
+                args.push(since.format("%Y-%m-%d %H:%M:%S").to_string());
+            }
+            match Command::new("journalctl").args(args).output().await {
                 Ok(output) if output.status.success() && !output.stdout.is_empty() => {
                     return (
                         [(header::CONTENT_TYPE, "text/plain; charset=utf-8")],
@@ -196,11 +224,20 @@ async fn get_logs() -> Response {
                 _ => {}
             }
         }
-        match Command::new("journalctl")
-            .args(["-t", "sonium-server", "-n", "240", "--no-pager"])
-            .output()
-            .await
-        {
+        let mut args = vec![
+            "-t".to_owned(),
+            "sonium-server".to_owned(),
+            "-n".to_owned(),
+            window.limit.to_string(),
+            "--no-pager".to_owned(),
+            "-o".to_owned(),
+            "short-iso".to_owned(),
+        ];
+        if let Some(since) = window.since {
+            args.push("--since".to_owned());
+            args.push(since.format("%Y-%m-%d %H:%M:%S").to_string());
+        }
+        match Command::new("journalctl").args(args).output().await {
             Ok(output) if output.status.success() && !output.stdout.is_empty() => {
                 return (
                     [(header::CONTENT_TYPE, "text/plain; charset=utf-8")],
@@ -422,9 +459,74 @@ fn package_name(manager: &str, package: &str) -> Option<&'static str> {
     }
 }
 
-async fn tail_file(path: &str, lines: usize) -> std::io::Result<String> {
+fn log_window(query: LogsQuery) -> Result<LogWindow, String> {
+    let limit = query.lines.unwrap_or(400).clamp(50, 2_000);
+    let since = match query
+        .since
+        .as_deref()
+        .map(str::trim)
+        .filter(|s| !s.is_empty() && *s != "all")
+    {
+        Some(raw) => Some(parse_since(raw)?),
+        None => None,
+    };
+    Ok(LogWindow { since, limit })
+}
+
+fn parse_since(raw: &str) -> Result<DateTime<Local>, String> {
+    if let Ok(dt) = DateTime::parse_from_rfc3339(raw) {
+        return Ok(dt.with_timezone(&Local));
+    }
+
+    let (amount, unit) = raw.split_at(raw.len().saturating_sub(1));
+    let amount: i64 = amount.parse().map_err(|_| {
+        "since must be all, an RFC3339 timestamp, or a duration like 2h, 30m, 1d".to_owned()
+    })?;
+
+    let duration = match unit {
+        "m" => chrono::Duration::minutes(amount),
+        "h" => chrono::Duration::hours(amount),
+        "d" => chrono::Duration::days(amount),
+        _ => return Err("since duration must end in m, h, or d".to_owned()),
+    };
+
+    Ok(Local::now() - duration)
+}
+
+async fn read_log_file(path: &str, window: LogWindow) -> std::io::Result<String> {
     let content = tokio::fs::read_to_string(path).await?;
-    let mut tail = content.lines().rev().take(lines).collect::<Vec<_>>();
+    let filtered = if let Some(since) = window.since {
+        filter_lines_since(&content, since)
+    } else {
+        content.lines().map(str::to_owned).collect()
+    };
+    let mut tail = filtered
+        .into_iter()
+        .rev()
+        .take(window.limit)
+        .collect::<Vec<_>>();
     tail.reverse();
     Ok(tail.join("\n"))
+}
+
+fn filter_lines_since(content: &str, since: DateTime<Local>) -> Vec<String> {
+    let mut keep_multiline_continuation = false;
+    content
+        .lines()
+        .filter_map(|line| match parse_log_line_time(line) {
+            Some(ts) => {
+                keep_multiline_continuation = ts >= since;
+                keep_multiline_continuation.then(|| line.to_owned())
+            }
+            None if keep_multiline_continuation => Some(line.to_owned()),
+            None => None,
+        })
+        .collect()
+}
+
+fn parse_log_line_time(line: &str) -> Option<DateTime<Local>> {
+    let first = line.split_whitespace().next()?;
+    DateTime::parse_from_rfc3339(first)
+        .ok()
+        .map(|dt| dt.with_timezone(&Local))
 }

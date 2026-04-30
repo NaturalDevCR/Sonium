@@ -114,13 +114,16 @@ async fn main() -> anyhow::Result<()> {
             })
     });
     let stdout_layer = tracing_subscriber::fmt::layer()
-        .with_target(true)
+        .with_timer(tracing_subscriber::fmt::time::ChronoLocal::rfc_3339())
+        .with_target(false)
         .with_thread_ids(false)
+        .with_ansi(false)
         .compact();
     let file_layer = tracing_subscriber::fmt::layer()
         .with_writer(file_writer)
+        .with_timer(tracing_subscriber::fmt::time::ChronoLocal::rfc_3339())
         .with_ansi(false)
-        .with_target(true)
+        .with_target(false)
         .with_thread_ids(false)
         .compact();
     tracing_subscriber::registry()

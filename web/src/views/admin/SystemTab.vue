@@ -1,9 +1,10 @@
 <script setup lang="ts">
 import { onMounted, onUnmounted, ref } from 'vue';
-import { api, type DependencyActionResult, type SystemInfo } from '@/lib/api';
+import { api, type DependencyActionResult, type SystemInfo, type SystemLogOptions } from '@/lib/api';
 
 const info = ref<SystemInfo | null>(null);
 const logs = ref('');
+const logWindow = ref<SystemLogOptions['since']>('2h');
 const loading = ref(true);
 const systemError = ref('');
 const logError = ref('');
@@ -12,6 +13,15 @@ const actionResult = ref<DependencyActionResult | null>(null);
 const actionError = ref('');
 
 let logPollTimer: ReturnType<typeof setInterval> | null = null;
+
+const logWindows: Array<{ value: SystemLogOptions['since']; label: string }> = [
+  { value: '1h', label: '1h' },
+  { value: '2h', label: '2h' },
+  { value: '6h', label: '6h' },
+  { value: '12h', label: '12h' },
+  { value: '24h', label: '24h' },
+  { value: 'all', label: 'All' },
+];
 
 onMounted(async () => {
   loading.value = true;
@@ -34,7 +44,7 @@ onUnmounted(() => {
 async function refreshLogs() {
   logError.value = '';
   try {
-    logs.value = await api.systemLogs();
+    logs.value = await api.systemLogs({ since: logWindow.value, lines: 800 });
   } catch (e) {
     logs.value = '';
     logError.value = String(e);
@@ -190,7 +200,22 @@ async function runDependencyAction(id: string, action: 'install' | 'update' | 'r
       </section>
 
       <section>
-        <h2 class="text-sm font-semibold text-slate-400 uppercase tracking-wider mb-3">Logs</h2>
+        <div class="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between mb-3">
+          <h2 class="text-sm font-semibold text-slate-400 uppercase tracking-wider">Logs</h2>
+          <div class="inline-flex rounded-lg border border-slate-800 bg-slate-950/70 p-1">
+            <button
+              v-for="item in logWindows"
+              :key="item.value"
+              @click="logWindow = item.value; refreshLogs()"
+              class="px-2.5 py-1 text-xs rounded-md transition-colors"
+              :class="logWindow === item.value
+                ? 'bg-cyan-500/15 text-cyan-300'
+                : 'text-slate-500 hover:text-slate-300 hover:bg-slate-800/70'"
+            >
+              {{ item.label }}
+            </button>
+          </div>
+        </div>
         <div class="card overflow-hidden">
           <div v-if="logError" class="p-4 text-sm text-amber-400">{{ logError }}</div>
           <pre v-else class="max-h-96 overflow-auto p-4 text-xs text-slate-300 bg-slate-950/70 font-mono whitespace-pre-wrap">{{ logs || 'No logs available yet.' }}</pre>

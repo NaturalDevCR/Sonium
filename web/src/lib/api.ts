@@ -145,6 +145,11 @@ export interface DependencyActionResult {
   stderr: string;
 }
 
+export interface SystemLogOptions {
+  since?: '1h' | '2h' | '6h' | '12h' | '24h' | 'all';
+  lines?: number;
+}
+
 export interface RestartResponse {
   message: string;
 }
@@ -324,7 +329,13 @@ export const api = {
 
   // ── System ──────────────────────────────────────────────────────────────
   systemInfo: () => get<SystemInfo>('/system/info'),
-  systemLogs: () => getText('/system/logs'),
+  systemLogs: (options: SystemLogOptions = {}) => {
+    const params = new URLSearchParams();
+    if (options.since) params.set('since', options.since);
+    if (options.lines) params.set('lines', String(options.lines));
+    const query = params.toString();
+    return getText(`/system/logs${query ? `?${query}` : ''}`);
+  },
   restartServer: () => post<RestartResponse>('/system/restart', {}),
   dependencyAction: (id: string, action: 'install' | 'update' | 'remove') =>
     post<DependencyActionResult>(`/system/dependencies/${id}/${action}`, {}),

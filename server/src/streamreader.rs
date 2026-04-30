@@ -43,8 +43,7 @@ fn rms_dbfs(pcm: &[i16]) -> f32 {
 /// - anything else — opens path as a file/FIFO
 ///
 /// Input is raw interleaved i16 LE PCM matching `stream.sample_format`.
-#[instrument(skip(bc, state, registry),
-             fields(stream_id = %stream.id, source = %stream.source, codec = %stream.codec))]
+#[instrument(skip_all, fields(stream_id = %stream.id))]
 pub async fn run(
     bc: Arc<Broadcaster>,
     stream: StreamSource,
@@ -388,44 +387,74 @@ async fn run_pipe(
 ) -> anyhow::Result<()> {
     let (cmd, args) = parse_pipe_uri(uri)?;
 
-    info!(stream = stream_id, command = %cmd, args = ?args, "Spawning external process");
+    let mut restart_count: u64 = 0;
 
-    let mut child = Command::new(&cmd)
-        .args(&args)
-        .stdout(std::process::Stdio::piped())
-        .stderr(std::process::Stdio::null())
-        .kill_on_drop(true)
-        .spawn()
-        .map_err(|e| anyhow::anyhow!("[{stream_id}] spawn `{cmd}`: {e}"))?;
+    loop {
+        info!(stream = stream_id, command = %cmd, args = ?args, restart_count, "Starting external audio source");
 
-    let stdout = child
-        .stdout
-        .take()
-        .ok_or_else(|| anyhow::anyhow!("[{stream_id}] no stdout from child"))?;
+        let mut child = Command::new(&cmd)
+            .args(&args)
+            .stdout(std::process::Stdio::piped())
+            .stderr(std::process::Stdio::null())
+            .kill_on_drop(true)
+            .spawn()
+            .map_err(|e| anyhow::anyhow!("[{stream_id}] spawn `{cmd}`: {e}"))?;
 
-    let result = run_reader(
-        stdout,
-        encoder,
-        bc,
-        pcm_buf,
-        enc_buf,
-        stream_id,
-        state,
-        idle_timeout,
-        silence_on_idle,
-    )
-    .await;
+        let stdout = child
+            .stdout
+            .take()
+            .ok_or_else(|| anyhow::anyhow!("[{stream_id}] no stdout from child"))?;
 
-    match child.try_wait() {
-        Ok(Some(status)) => info!("[{stream_id}] Process exited: {status}"),
-        Ok(None) => {
-            info!("[{stream_id}] Killing child process");
-            let _ = child.kill().await;
+        let result = run_reader(
+            stdout,
+            encoder,
+            bc.clone(),
+            pcm_buf,
+            enc_buf,
+            stream_id,
+            state,
+            idle_timeout,
+            silence_on_idle,
+        )
+        .await;
+
+        match child.try_wait() {
+            Ok(Some(status)) => warn!(stream = stream_id, %status, "External audio source exited"),
+            Ok(None) => {
+                info!(
+                    stream = stream_id,
+                    "Stopping external audio source after input ended"
+                );
+                let _ = child.kill().await;
+            }
+            Err(e) => warn!(
+                stream = stream_id,
+                "Error checking external audio source: {e}"
+            ),
         }
-        Err(e) => warn!("[{stream_id}] Error checking child: {e}"),
-    }
 
-    result
+        if let Err(e) = result {
+            warn!(
+                stream = stream_id,
+                "Audio source read failed; restarting external process: {e}"
+            );
+        } else {
+            warn!(
+                stream = stream_id,
+                "Audio source closed; restarting external process"
+            );
+        }
+
+        state.set_stream_status(stream_id, StreamStatus::Idle);
+        restart_count = restart_count.saturating_add(1);
+        let restart_delay = Duration::from_secs((restart_count * 2).min(30));
+        info!(
+            stream = stream_id,
+            restart_in_ms = restart_delay.as_millis(),
+            "Waiting before restarting external audio source"
+        );
+        tokio::time::sleep(restart_delay).await;
+    }
 }
 
 fn parse_pipe_uri(uri: &str) -> anyhow::Result<(String, Vec<String>)> {
@@ -477,11 +506,11 @@ async fn run_reader<R: AsyncReadExt + Unpin>(
             match read_pcm_frame(&mut src, pcm_buf, &mut pcm_filled, Some(dur)).await {
                 FrameRead::Frame => true,
                 FrameRead::Eof => {
-                    info!("[{stream_id}] Input closed — reader stopping");
+                    info!(stream = stream_id, "Audio input closed");
                     break 'read;
                 }
                 FrameRead::Error(e) => {
-                    warn!("[{stream_id}] Read error: {e}");
+                    warn!(stream = stream_id, "Audio input read error: {e}");
                     break 'read;
                 }
                 FrameRead::Idle => {
@@ -489,7 +518,11 @@ async fn run_reader<R: AsyncReadExt + Unpin>(
                     if !is_idle {
                         is_idle = true;
                         state.set_stream_status(stream_id, StreamStatus::Idle);
-                        info!("[{stream_id}] No audio data for {dur:?} — stream idle");
+                        info!(
+                            stream = stream_id,
+                            idle_after_ms = dur.as_millis(),
+                            "No audio data received; stream idle"
+                        );
                     }
 
                     if silence_on_idle {
@@ -506,11 +539,11 @@ async fn run_reader<R: AsyncReadExt + Unpin>(
                                             // fall through to encode below.
                                         }
                                         FrameRead::Eof => {
-                                            info!("[{stream_id}] Input closed during idle");
+                                            info!(stream = stream_id, "Audio input closed while idle");
                                             break 'read;
                                         }
                                         FrameRead::Error(e) => {
-                                            warn!("[{stream_id}] Read error during idle: {e}");
+                                            warn!(stream = stream_id, "Audio input read error while idle: {e}");
                                             break 'read;
                                         }
                                         FrameRead::Idle => unreachable!("idle is disabled while waiting for resumed audio"),
@@ -535,11 +568,11 @@ async fn run_reader<R: AsyncReadExt + Unpin>(
             match read_pcm_frame(&mut src, pcm_buf, &mut pcm_filled, None).await {
                 FrameRead::Frame => true,
                 FrameRead::Eof => {
-                    info!("[{stream_id}] Input closed — reader stopping");
+                    info!(stream = stream_id, "Audio input closed");
                     break 'read;
                 }
                 FrameRead::Error(e) => {
-                    warn!("[{stream_id}] Read error: {e}");
+                    warn!(stream = stream_id, "Audio input read error: {e}");
                     break 'read;
                 }
                 FrameRead::Idle => unreachable!("idle is disabled for blocking reads"),
@@ -554,7 +587,7 @@ async fn run_reader<R: AsyncReadExt + Unpin>(
         if is_idle {
             is_idle = false;
             state.set_stream_status(stream_id, StreamStatus::Playing);
-            info!("[{stream_id}] Audio data resumed — stream playing");
+            info!(stream = stream_id, "Audio data resumed; stream playing");
         }
 
         // ── Encode and broadcast ──────────────────────────────────────────

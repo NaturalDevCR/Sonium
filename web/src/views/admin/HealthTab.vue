@@ -1,10 +1,11 @@
 <script setup lang="ts">
 import { useServerStore } from '@/stores/server';
-import { api } from '@/lib/api';
+import { api, type SystemLogOptions } from '@/lib/api';
 import { ref, onMounted, onUnmounted, computed } from 'vue';
 
 const server = useServerStore();
 const logs = ref('');
+const logWindow = ref<SystemLogOptions['since']>('2h');
 const logPollTimer = ref<any>(null);
 const logContainer = ref<HTMLElement | null>(null);
 const toggling = ref<Record<string, boolean>>({});
@@ -20,10 +21,10 @@ onUnmounted(() => {
 
 async function refreshLogs() {
   try {
-    const newLogs = await api.systemLogs();
-    const shouldScroll = logContainer.value && 
+    const newLogs = await api.systemLogs({ since: logWindow.value, lines: 800 });
+    const shouldScroll = logContainer.value &&
       (logContainer.value.scrollHeight - logContainer.value.scrollTop <= logContainer.value.clientHeight + 50);
-    
+
     logs.value = newLogs;
 
     if (shouldScroll && logContainer.value) {
@@ -229,6 +230,18 @@ async function setObservability(clientId: string, enabled: boolean) {
       <div class="flex items-center justify-between mb-4 px-1">
         <h2 class="text-sm font-semibold text-slate-400 uppercase tracking-wider">System Logs</h2>
         <div class="flex items-center gap-2 text-[10px] text-slate-500">
+          <select
+            v-model="logWindow"
+            @change="refreshLogs"
+            class="rounded-md border border-slate-800 bg-slate-950 px-2 py-1 text-xs text-slate-300 outline-none"
+          >
+            <option value="1h">Last hour</option>
+            <option value="2h">Last 2 hours</option>
+            <option value="6h">Last 6 hours</option>
+            <option value="12h">Last 12 hours</option>
+            <option value="24h">Last 24 hours</option>
+            <option value="all">All</option>
+          </select>
           <span class="w-1.5 h-1.5 bg-accent rounded-full animate-pulse"></span>
           Live Monitoring
         </div>

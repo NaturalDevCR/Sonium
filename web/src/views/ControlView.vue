@@ -104,7 +104,7 @@ function fmtUptime(s: number) {
         <div class="flex items-center gap-3">
           <img src="/sonium-logo.png" alt="Sonium" class="h-8 w-8 object-contain" />
           <div>
-            <p class="ctrl-brand">SONIUM <span class="version-tag">v0.1.24</span></p>
+            <p class="ctrl-brand">SONIUM <span class="version-tag">v0.1.47</span></p>
             <p class="ctrl-tagline">
               {{ store.connectedClients.length }} client{{ store.connectedClients.length !== 1 ? 's' : '' }} online
               <span v-if="store.uptime" class="ml-2 opacity-60">· up {{ fmtUptime(store.uptime) }}</span>
