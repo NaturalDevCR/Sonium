@@ -185,14 +185,15 @@ mod tests {
 
     #[test]
     fn quic_stub_reports_correct_transport_mode() {
-        assert_eq!(QuicDgramMediaSender.transport_mode(), TransportMode::QuicDgram);
+        assert_eq!(
+            QuicDgramMediaSender.transport_mode(),
+            TransportMode::QuicDgram
+        );
     }
 
     #[tokio::test]
     async fn rtp_sender_reports_correct_transport_mode() {
-        let sock = std::sync::Arc::new(
-            tokio::net::UdpSocket::bind("127.0.0.1:0").await.unwrap(),
-        );
+        let sock = std::sync::Arc::new(tokio::net::UdpSocket::bind("127.0.0.1:0").await.unwrap());
         let peer: std::net::SocketAddr = "127.0.0.1:9999".parse().unwrap();
         let sender = RtpUdpMediaSender::new(sock, peer, 0xDEAD_BEEF);
         assert_eq!(sender.transport_mode(), TransportMode::RtpUdp);

@@ -129,8 +129,8 @@ pub fn rtp_from_wire_bytes(wire_bytes: &[u8], sequence: u16, ssrc: u32) -> Resul
 
 /// Convert a `(seconds, microseconds)` pair to a 90 kHz RTP timestamp (u32, wraps).
 pub fn rtp_timestamp(sec: i32, usec: i32) -> u32 {
-    let ts = (sec as i64 * RTP_CLOCK_RATE as i64)
-        + (usec as i64 * RTP_CLOCK_RATE as i64 / 1_000_000);
+    let ts =
+        (sec as i64 * RTP_CLOCK_RATE as i64) + (usec as i64 * RTP_CLOCK_RATE as i64 / 1_000_000);
     ts as u32
 }
 
