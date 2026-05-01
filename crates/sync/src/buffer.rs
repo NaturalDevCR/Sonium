@@ -253,6 +253,11 @@ impl SyncBuffer {
         count
     }
 
+    /// Target buffer depth in microseconds as configured by the server.
+    pub fn target_buffer_us(&self) -> i64 {
+        self.target_buffer_us
+    }
+
     /// Current estimated jitter in microseconds.
     pub fn jitter_us(&self) -> i64 {
         self.jitter_us as i64

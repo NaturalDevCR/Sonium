@@ -448,8 +448,6 @@ async fn connect_and_run(
                         {
                             if skipped > 0 {
                                 let conceal_count = skipped.min(MAX_CONCEALMENT_PACKETS_PER_GAP);
-                                rtp_concealed_packets =
-                                    rtp_concealed_packets.saturating_add(conceal_count as u32);
                                 let interval_us = last_rtp_timestamp
                                     .and_then(|last_timestamp| {
                                         let timestamp_delta = timestamp.wrapping_sub(last_timestamp);
@@ -473,20 +471,34 @@ async fn connect_and_run(
                                     + (cfg.latency_ms as i64 * 1000)
                                     + (server_latency_ms as i64 * 1000);
                                 let first_missing_back = i64::from(conceal_count);
+                                // Snapshot server time once for the whole concealment burst;
+                                // also used as the arrival timestamp in SyncBuffer::push.
+                                let now_server = time_provider.to_server_time(now_us());
+                                // Mirror the stale-drop threshold from SyncBuffer::pop_ready so
+                                // we never insert a frame that would be discarded immediately.
+                                let stale_threshold_us =
+                                    (buf.target_buffer_us() / 2).clamp(100_000, 2_000_000);
                                 for i in 0..conceal_count {
+                                    let playout_us = current_playout_us
+                                        - (first_missing_back - i64::from(i)) * interval_us;
+                                    // Always call decode_missing to advance the Opus decoder's
+                                    // internal PLC state, even when we will not queue the frame.
                                     let mut samples = Vec::new();
                                     dec.decode_missing((interval_us / 1000) as u32, &mut samples)?;
+                                    // Drop frames whose playout window has already passed.
+                                    if playout_us + interval_us < now_server - stale_threshold_us {
+                                        continue;
+                                    }
                                     apply_volume(&mut samples, volume, muted);
                                     if let Some(ref mut eq) = eq_processor {
                                         eq.apply(&mut samples);
                                     }
-                                    let playout_us = current_playout_us
-                                        - (first_missing_back - i64::from(i)) * interval_us;
-                                    let now_server = time_provider.to_server_time(now_us());
                                     buf.push(
                                         PcmChunk::new(playout_us, samples, dec.sample_format()),
                                         now_server,
                                     );
+                                    rtp_concealed_packets =
+                                        rtp_concealed_packets.saturating_add(1);
                                 }
                             }
 
