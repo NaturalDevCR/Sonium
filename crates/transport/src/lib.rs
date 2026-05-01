@@ -71,7 +71,7 @@ impl fmt::Display for TransportMode {
 /// ```toml
 /// [server.transport]
 /// mode     = "tcp"   # "tcp" (default) | "rtp_udp" | "quic_dgram"
-/// udp_port = 1711    # server UDP port for RTP media (0 = disabled)
+/// udp_port = 1712    # server UDP port for RTP media (0 = disabled)
 /// ```
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(default)]

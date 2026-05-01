@@ -106,6 +106,15 @@ pub struct HealthReport {
     /// Number of output callback errors/xruns reported by the audio backend.
     #[serde(default)]
     pub audio_callback_xrun_count: u32,
+    /// Number of RTP packets received by the client UDP media path.
+    #[serde(default)]
+    pub rtp_packets_received: u32,
+    /// Number of RTP sequence numbers skipped by the client UDP media path.
+    #[serde(default)]
+    pub rtp_sequence_gaps: u32,
+    /// Number of RTP datagrams rejected by the client decoder.
+    #[serde(default)]
+    pub rtp_decode_error_count: u32,
 }
 
 impl HealthReport {
@@ -129,6 +138,9 @@ impl HealthReport {
             target_playout_latency_ms: 0,
             callback_starvation_count: 0,
             audio_callback_xrun_count: 0,
+            rtp_packets_received: 0,
+            rtp_sequence_gaps: 0,
+            rtp_decode_error_count: 0,
         }
     }
 
@@ -158,6 +170,18 @@ impl HealthReport {
         self
     }
 
+    pub fn with_rtp_metrics(
+        mut self,
+        packets_received: u32,
+        sequence_gaps: u32,
+        decode_error_count: u32,
+    ) -> Self {
+        self.rtp_packets_received = packets_received;
+        self.rtp_sequence_gaps = sequence_gaps;
+        self.rtp_decode_error_count = decode_error_count;
+        self
+    }
+
     pub fn total_playout_queue_ms(&self) -> u32 {
         self.buffer_depth_ms.saturating_add(self.output_buffer_ms)
     }
@@ -176,11 +200,14 @@ impl HealthReport {
             target_playout_latency_ms: if r.remaining() >= 4 { r.read_u32()? } else { 0 },
             callback_starvation_count: if r.remaining() >= 4 { r.read_u32()? } else { 0 },
             audio_callback_xrun_count: if r.remaining() >= 4 { r.read_u32()? } else { 0 },
+            rtp_packets_received: if r.remaining() >= 4 { r.read_u32()? } else { 0 },
+            rtp_sequence_gaps: if r.remaining() >= 4 { r.read_u32()? } else { 0 },
+            rtp_decode_error_count: if r.remaining() >= 4 { r.read_u32()? } else { 0 },
         })
     }
 
     pub fn encode(&self) -> Vec<u8> {
-        let mut w = WireWrite::with_capacity(44);
+        let mut w = WireWrite::with_capacity(56);
         w.write_u32(self.underrun_count);
         w.write_u32(self.overrun_count);
         w.write_u32(self.stale_drop_count);
@@ -192,6 +219,9 @@ impl HealthReport {
         w.write_u32(self.target_playout_latency_ms);
         w.write_u32(self.callback_starvation_count);
         w.write_u32(self.audio_callback_xrun_count);
+        w.write_u32(self.rtp_packets_received);
+        w.write_u32(self.rtp_sequence_gaps);
+        w.write_u32(self.rtp_decode_error_count);
         w.finish()
     }
 }
@@ -246,7 +276,8 @@ mod tests {
     fn queue_metrics_round_trip_on_wire() {
         let original = report(0, 0, 0, 120, 8)
             .with_queue_metrics(180, 6, 500)
-            .with_callback_metrics(2, 1);
+            .with_callback_metrics(2, 1)
+            .with_rtp_metrics(100, 3, 1);
         let decoded = HealthReport::decode(&original.encode()).unwrap();
 
         assert_eq!(decoded.output_buffer_ms, 180);
@@ -254,6 +285,9 @@ mod tests {
         assert_eq!(decoded.target_playout_latency_ms, 500);
         assert_eq!(decoded.callback_starvation_count, 2);
         assert_eq!(decoded.audio_callback_xrun_count, 1);
+        assert_eq!(decoded.rtp_packets_received, 100);
+        assert_eq!(decoded.rtp_sequence_gaps, 3);
+        assert_eq!(decoded.rtp_decode_error_count, 1);
         assert_eq!(decoded.total_playout_queue_ms(), 300);
     }
 
@@ -275,5 +309,8 @@ mod tests {
         assert_eq!(decoded.target_playout_latency_ms, 0);
         assert_eq!(decoded.callback_starvation_count, 0);
         assert_eq!(decoded.audio_callback_xrun_count, 0);
+        assert_eq!(decoded.rtp_packets_received, 0);
+        assert_eq!(decoded.rtp_sequence_gaps, 0);
+        assert_eq!(decoded.rtp_decode_error_count, 0);
     }
 }

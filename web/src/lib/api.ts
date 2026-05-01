@@ -55,6 +55,9 @@ export interface HealthReport {
   target_playout_latency_ms?: number;
   callback_starvation_count?: number;
   audio_callback_xrun_count?: number;
+  rtp_packets_received?: number;
+  rtp_sequence_gaps?: number;
+  rtp_decode_error_count?: number;
 }
 
 export interface Client {

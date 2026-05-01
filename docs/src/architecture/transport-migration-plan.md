@@ -597,10 +597,10 @@ Phase 1 — transport abstraction layer — implemented on 2026-05-01:
 
 - Created `crates/transport` (`sonium-transport`) workspace crate with:
   - `TransportMode` enum: `tcp` (default), `rtp_udp`, `quic_dgram` — serde `snake_case`, `Display`.
-  - `TransportConfig` struct: `{ mode: TransportMode }` — TOML-deserializable under `[server.transport]`.
+  - `TransportConfig` struct: `{ mode: TransportMode, udp_port: u16 }` — TOML-deserializable under `[server.transport]`.
   - `MediaSender` trait: `send_wire_bytes(&mut self, bytes: &[u8]) -> BoxFuture<Result<()>>` with `BoxFuture` return type for future `dyn`-compatibility without `async_trait`.
   - `TcpMediaSender<'w>`: borrows `&'w mut OwnedWriteHalf`; implements `MediaSender`; writes pre-encoded `WireChunk` bytes with 5-second timeout.
-  - `RtpUdpMediaSender` stub: `unimplemented!()` — placeholder for Phase 2.
+  - `RtpUdpMediaSender` placeholder for Phase 2.
   - `QuicDgramMediaSender` stub: `unimplemented!()` — placeholder for Phase 5.
 - Added `transport: TransportConfig` field to `ServerNet` in `crates/common/src/config.rs`. Default is `tcp`. Config key: `[server.transport] / mode = "tcp"`.
 - `sonium-transport` added to workspace `Cargo.toml` members. `sonium-common` and `sonium-server` depend on it.
@@ -652,7 +652,7 @@ Phase 2 — RTP/UDP unicast media path — implemented on 2026-05-01:
   - UDP select arm processes received WireChunk payloads identically to the TCP path (decode, volume, EQ, playout scheduling).
 - Updated `web/src/views/admin/StreamsTab.vue`:
   - Added Media transport controls for `tcp`, `rtp_udp`, and `quic_dgram`.
-  - Added Server UDP port input and an RTP/UDP preset (`rtp_udp`, port `1711`).
+  - Added Server UDP port input and an RTP/UDP preset (`rtp_udp`, UDP port `1712`). This keeps the control API at `1711/TCP`, client/session TCP at `1710/TCP`, and RTP media on a distinct UDP socket.
   - Saving global tuning now persists `[server.transport]` in TOML and attempts to apply the selected runtime transport mode through `PATCH /api/server/transport`.
 
 Design decisions:
@@ -672,7 +672,22 @@ Remaining for Phase 2 validation:
 - Live RTP/UDP audio playback soak test on clean LAN.
 - Controlled loss comparison vs. TCP baseline (Phase 0 data: TCP fails at ~30% with head-of-line blocking).
 
-Next work: Phase 2 validation run, then Phase 2.5 (RTCP-style receiver reports).
+Phase 2 validation findings from first live `v0.1.51` run:
+
+- RTP/UDP session activation worked: server bound the UDP media socket and logged `RTP/UDP media path active`; client stayed connected through the TCP control/session socket and received media over the advertised client UDP port.
+- Clean-LAN playback was audibly unstable even at high configured buffers (`1200–2000 ms`), while TCP remained stable at `1200 ms`. This means Phase 2 is functionally wired but not ready as a recommended transport.
+- Metrics were initially misleading because server health observations still hardcoded the label `transport="tcp"` even when the effective session mode was `rtp_udp`.
+- The UI/config was confusing because the preset used UDP port `1711`, the same number as the TCP control API. TCP and UDP can share a numeric port without colliding, but Sonium should prefer clearer defaults: `1710/TCP` client session, `1711/TCP` control API, `1712/UDP` RTP media.
+
+Validation hardening applied after the first live run:
+
+- Server health metrics now use the effective session transport label (`tcp` or `rtp_udp`) instead of hardcoding `tcp`.
+- Client health reports now include RTP receive diagnostics: `rtp_packets_received`, `rtp_sequence_gaps`, and `rtp_decode_error_count`.
+- Server Prometheus metrics expose those fields as `sonium_client_rtp_packets_received`, `sonium_client_rtp_sequence_gaps`, and `sonium_client_rtp_decode_errors`.
+- Health classification treats new RTP sequence gaps and RTP decode errors as degradation signals.
+- Web UI RTP/UDP preset now uses UDP port `1712`; the UDP port input is disabled while TCP is selected and the help text explains that the value is ignored for TCP.
+
+Next work: publish the validation-hardening release, rerun clean RTP/UDP with the new metrics, then decide whether the bug is packet loss/gaps, RTP decode/path issues, or buffer/playout scheduling.
 
 ---
 

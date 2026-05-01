@@ -552,12 +552,17 @@ async function loadServerTuning() {
     autoBufferStepUpMs.value = Number(server.auto_buffer_step_up_ms ?? 120);
     autoBufferStepDownMs.value = Number(server.auto_buffer_step_down_ms ?? 40);
     autoBufferCooldownMs.value = Number(server.auto_buffer_cooldown_ms ?? 8000);
-    transportMode.value = (server.transport?.mode ?? 'tcp') as TransportMode;
-    transportUdpPort.value = Number(server.transport?.udp_port ?? 0);
+    const configuredTransport = server.transport || {};
+    transportMode.value = (configuredTransport.mode ?? 'tcp') as TransportMode;
+    transportUdpPort.value = Number(configuredTransport.udp_port ?? 0);
     const runtime = await api.transport().catch(() => null);
     if (runtime) {
-      transportMode.value = runtime.mode;
-      transportUdpPort.value = Number(runtime.server_udp_port ?? transportUdpPort.value);
+      if (!configuredTransport.mode) {
+        transportMode.value = runtime.mode;
+      }
+      if (configuredTransport.udp_port == null) {
+        transportUdpPort.value = Number(runtime.server_udp_port ?? transportUdpPort.value);
+      }
     }
   } catch (e) {
     tuningInfo.value = `Could not read global tuning: ${String(e)}`;
@@ -615,8 +620,8 @@ function applyAggressiveLanPreset() {
 
 function applyRtpUdpPreset() {
   transportMode.value = 'rtp_udp';
-  transportUdpPort.value = 1711;
-  tuningInfo.value = 'Preset applied: RTP/UDP on port 1711. Save global tuning and restart the server.';
+  transportUdpPort.value = 1712;
+  tuningInfo.value = 'Preset applied: RTP/UDP on UDP port 1712. Save global tuning and restart the server.';
 }
 
 function editStream(s: any) {
@@ -783,11 +788,19 @@ async function restartServer() {
           </div>
           <div>
             <label class="param-label block mb-1.5">Server UDP port</label>
-            <input v-model.number="transportUdpPort" type="number" min="0" max="65535" step="1" class="field field-mono" />
+            <input
+              v-model.number="transportUdpPort"
+              type="number"
+              min="0"
+              max="65535"
+              step="1"
+              class="field field-mono"
+              :disabled="transportMode === 'tcp'"
+            />
           </div>
         </div>
         <p class="param-desc mt-2">
-          TCP is the stable default. RTP/UDP requires a non-zero UDP port, server restart, and client reconnect. QUIC DATAGRAM is reserved for a later phase.
+          TCP is the stable default. RTP/UDP uses a separate UDP media port, usually 1712, and requires a server restart plus client reconnect. The UDP port is ignored while TCP is selected.
         </p>
       </div>
 

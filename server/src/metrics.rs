@@ -182,6 +182,36 @@ lazy_static! {
             ),
             &["client_id", "transport"]
         ).unwrap();
+
+    /// Latest reported RTP packets received by the client UDP media path.
+    pub static ref CLIENT_RTP_PACKETS_RECEIVED: IntGaugeVec =
+        register_int_gauge_vec!(
+            Opts::new(
+                "sonium_client_rtp_packets_received",
+                "Latest reported RTP packets received by the client UDP media path"
+            ),
+            &["client_id", "transport"]
+        ).unwrap();
+
+    /// Latest reported RTP sequence gaps detected by the client UDP media path.
+    pub static ref CLIENT_RTP_SEQUENCE_GAPS: IntGaugeVec =
+        register_int_gauge_vec!(
+            Opts::new(
+                "sonium_client_rtp_sequence_gaps",
+                "Latest reported RTP sequence gaps detected by the client UDP media path"
+            ),
+            &["client_id", "transport"]
+        ).unwrap();
+
+    /// Latest reported RTP datagrams rejected by the client decoder.
+    pub static ref CLIENT_RTP_DECODE_ERRORS: IntGaugeVec =
+        register_int_gauge_vec!(
+            Opts::new(
+                "sonium_client_rtp_decode_errors",
+                "Latest reported RTP datagrams rejected by the client decoder"
+            ),
+            &["client_id", "transport"]
+        ).unwrap();
 }
 
 pub fn observe_client_health(
@@ -224,6 +254,15 @@ pub fn observe_client_health(
     CLIENT_CLOCK_OFFSET_MS
         .with_label_values(&[client_id, transport])
         .set(report.latency_ms as i64);
+    CLIENT_RTP_PACKETS_RECEIVED
+        .with_label_values(&[client_id, transport])
+        .set(report.rtp_packets_received as i64);
+    CLIENT_RTP_SEQUENCE_GAPS
+        .with_label_values(&[client_id, transport])
+        .set(report.rtp_sequence_gaps as i64);
+    CLIENT_RTP_DECODE_ERRORS
+        .with_label_values(&[client_id, transport])
+        .set(report.rtp_decode_error_count as i64);
 
     for candidate in AudioHealthState::ALL {
         CLIENT_HEALTH_STATE

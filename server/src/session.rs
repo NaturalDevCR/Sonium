@@ -129,6 +129,7 @@ impl HealthTransitionTracker {
     fn observe(
         &mut self,
         client_id: &str,
+        transport: &str,
         report: &HealthReport,
         current_buffer_ms: u32,
     ) -> AudioHealthState {
@@ -167,7 +168,7 @@ impl HealthTransitionTracker {
         if self.last_state != Some(state) {
             debug!(
                 %client_id,
-                transport = "tcp",
+                %transport,
                 state = %state,
                 stable_streak = self.stable_streak,
                 buffer_depth_ms = report.buffer_depth_ms,
@@ -175,6 +176,9 @@ impl HealthTransitionTracker {
                 underruns = report.underrun_count,
                 stale_drops = report.stale_drop_count,
                 overruns = report.overrun_count,
+                rtp_packets_received = report.rtp_packets_received,
+                rtp_sequence_gaps = report.rtp_sequence_gaps,
+                rtp_decode_errors = report.rtp_decode_error_count,
                 callback_starvations = report.callback_starvation_count,
                 callback_xruns = report.audio_callback_xrun_count,
                 clock_offset_ms = report.latency_ms,
@@ -212,6 +216,12 @@ fn classify_health_report(
     let low_buffer = playout_queue_ms < low_buffer_warning_ms(current_buffer_ms);
     let callback_unhealthy =
         report.callback_starvation_count > 0 || report.audio_callback_xrun_count > 0;
+    let rtp_gap_delta = report
+        .rtp_sequence_gaps
+        .saturating_sub(previous.rtp_sequence_gaps);
+    let rtp_decode_error_delta = report
+        .rtp_decode_error_count
+        .saturating_sub(previous.rtp_decode_error_count);
 
     if underrun_delta > 0 {
         AudioHealthState::Underrun
@@ -220,6 +230,8 @@ fn classify_health_report(
         || high_jitter
         || low_buffer
         || callback_unhealthy
+        || rtp_gap_delta > 0
+        || rtp_decode_error_delta > 0
     {
         AudioHealthState::Degraded
     } else {
@@ -697,10 +709,18 @@ async fn handle_client_msg(
         }
         MessageType::HealthReport => {
             if let Ok(Message::HealthReport(health)) = Message::from_payload(&hdr, payload) {
-                let health_state =
-                    ctx.health_tracker
-                        .observe(ctx.client_id, &health, *ctx.current_buffer_ms);
-                metrics::observe_client_health(ctx.client_id, "tcp", &health, health_state);
+                let health_state = ctx.health_tracker.observe(
+                    ctx.client_id,
+                    &ctx.transport_mode,
+                    &health,
+                    *ctx.current_buffer_ms,
+                );
+                metrics::observe_client_health(
+                    ctx.client_id,
+                    &ctx.transport_mode,
+                    &health,
+                    health_state,
+                );
 
                 if let Some(next_buffer_ms) = ctx
                     .auto_buffer_tuner
@@ -838,7 +858,7 @@ mod tests {
     }
 
     fn feed(tracker: &mut HealthTransitionTracker, report: &HealthReport) -> AudioHealthState {
-        tracker.observe("test-client", report, BUF_MS)
+        tracker.observe("test-client", "tcp", report, BUF_MS)
     }
 
     #[test]
