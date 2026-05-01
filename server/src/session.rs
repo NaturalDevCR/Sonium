@@ -224,6 +224,13 @@ fn classify_health_report(
         .rtp_decode_error_count
         .saturating_sub(previous.rtp_decode_error_count);
 
+    // Allow up to 2 RTP sequence gaps per 2-second health interval before
+    // marking Degraded.  On Wi-Fi, 1–2 concealed packets per interval is
+    // normal and handled by PLC; immediately degrading on every single gap
+    // would keep the state permanently in Degraded/Recovering on any wireless
+    // path.  Decode errors and larger gap bursts remain hard signals.
+    let rtp_degraded = rtp_gap_delta > 2 || rtp_decode_error_delta > 0;
+
     if underrun_delta > 0 {
         AudioHealthState::Underrun
     } else if stale_delta > 0
@@ -231,8 +238,7 @@ fn classify_health_report(
         || high_jitter
         || low_buffer
         || callback_unhealthy
-        || rtp_gap_delta > 0
-        || rtp_decode_error_delta > 0
+        || rtp_degraded
     {
         AudioHealthState::Degraded
     } else {

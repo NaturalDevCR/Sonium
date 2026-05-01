@@ -690,7 +690,18 @@ Validation hardening applied after the first live run:
 - Client RTP receive handling now ignores late/out-of-order packets without moving the sequence baseline backward, preventing false gap inflation after reordering.
 - Opus packet-loss concealment is now used for missing RTP packets through `Decoder::decode_missing`; non-Opus decoders fall back to silence for the missing packet duration.
 
-Next work: publish the validation-hardening release, rerun clean RTP/UDP with the new metrics, then decide whether the bug is packet loss/gaps, RTP decode/path issues, or buffer/playout scheduling.
+Second diagnostic run on Wi-Fi with v0.1.53:
+- `rtp_packets_received = 968`, `rtp_sequence_gaps = 54` (~5.6% gap rate), `rtp_decode_errors = 0`, `rtp_concealed_packets = 0` (v0.1.53 adds PLC but the second live run was done before the v0.1.53 client was installed).
+- Buffer depth oscillated between 80 ms and 560 ms with `target = 1200 ms`, cycling through `stable` and `recovering` states.
+- Root cause confirmed: Wi-Fi UDP packet loss (AMPDU aggregation and CSMA/CA collisions deliver packets in bursts then gaps). TCP hides this with retransmits; UDP exposes it directly.
+- PLC in v0.1.53 should smooth the concealment side (no more hard silence on gap), but bursty delivery causing buffer oscillation is a Phase 3 (adaptive jitter buffer) problem.
+- The RTP health degradation signal was too aggressive: `rtp_gap_delta > 0` fired for any single gap, keeping Wi-Fi clients permanently in `Degraded`/`Recovering` even with light loss. Fixed to `rtp_gap_delta > 2` (allow up to 2 concealed gaps per 2-second interval before degrading; Opus PLC handles 1–2 gaps without audible artifact).
+
+Phase 2 validation next steps:
+- Install v0.1.53+ on server and client, reconnect, and run the metrics with `rtp_concealed_packets` in the grep.
+- Compare gap/concealment rate before and after the PLC fix.
+- For a definitive Phase 2 clean-LAN baseline, test on wired Ethernet (no Wi-Fi aggregation burstiness).
+- Use `tc netem` loss profiles on wired for the RTP/UDP vs. TCP comparison (Phase 0 showed TCP fails catastrophically at 30% loss; RTP/UDP with PLC should handle 1–3% cleanly).
 
 ---
 
