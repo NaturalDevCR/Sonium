@@ -58,6 +58,7 @@ export interface HealthReport {
   rtp_packets_received?: number;
   rtp_sequence_gaps?: number;
   rtp_decode_error_count?: number;
+  rtp_concealed_packets?: number;
 }
 
 export interface Client {

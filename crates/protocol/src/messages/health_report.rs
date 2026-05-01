@@ -115,6 +115,9 @@ pub struct HealthReport {
     /// Number of RTP datagrams rejected by the client decoder.
     #[serde(default)]
     pub rtp_decode_error_count: u32,
+    /// Number of missing RTP packets concealed by the client decoder.
+    #[serde(default)]
+    pub rtp_concealed_packets: u32,
 }
 
 impl HealthReport {
@@ -141,6 +144,7 @@ impl HealthReport {
             rtp_packets_received: 0,
             rtp_sequence_gaps: 0,
             rtp_decode_error_count: 0,
+            rtp_concealed_packets: 0,
         }
     }
 
@@ -175,10 +179,12 @@ impl HealthReport {
         packets_received: u32,
         sequence_gaps: u32,
         decode_error_count: u32,
+        concealed_packets: u32,
     ) -> Self {
         self.rtp_packets_received = packets_received;
         self.rtp_sequence_gaps = sequence_gaps;
         self.rtp_decode_error_count = decode_error_count;
+        self.rtp_concealed_packets = concealed_packets;
         self
     }
 
@@ -203,11 +209,12 @@ impl HealthReport {
             rtp_packets_received: if r.remaining() >= 4 { r.read_u32()? } else { 0 },
             rtp_sequence_gaps: if r.remaining() >= 4 { r.read_u32()? } else { 0 },
             rtp_decode_error_count: if r.remaining() >= 4 { r.read_u32()? } else { 0 },
+            rtp_concealed_packets: if r.remaining() >= 4 { r.read_u32()? } else { 0 },
         })
     }
 
     pub fn encode(&self) -> Vec<u8> {
-        let mut w = WireWrite::with_capacity(56);
+        let mut w = WireWrite::with_capacity(60);
         w.write_u32(self.underrun_count);
         w.write_u32(self.overrun_count);
         w.write_u32(self.stale_drop_count);
@@ -222,6 +229,7 @@ impl HealthReport {
         w.write_u32(self.rtp_packets_received);
         w.write_u32(self.rtp_sequence_gaps);
         w.write_u32(self.rtp_decode_error_count);
+        w.write_u32(self.rtp_concealed_packets);
         w.finish()
     }
 }
@@ -277,7 +285,7 @@ mod tests {
         let original = report(0, 0, 0, 120, 8)
             .with_queue_metrics(180, 6, 500)
             .with_callback_metrics(2, 1)
-            .with_rtp_metrics(100, 3, 1);
+            .with_rtp_metrics(100, 3, 1, 2);
         let decoded = HealthReport::decode(&original.encode()).unwrap();
 
         assert_eq!(decoded.output_buffer_ms, 180);
@@ -288,6 +296,7 @@ mod tests {
         assert_eq!(decoded.rtp_packets_received, 100);
         assert_eq!(decoded.rtp_sequence_gaps, 3);
         assert_eq!(decoded.rtp_decode_error_count, 1);
+        assert_eq!(decoded.rtp_concealed_packets, 2);
         assert_eq!(decoded.total_playout_queue_ms(), 300);
     }
 
@@ -312,5 +321,6 @@ mod tests {
         assert_eq!(decoded.rtp_packets_received, 0);
         assert_eq!(decoded.rtp_sequence_gaps, 0);
         assert_eq!(decoded.rtp_decode_error_count, 0);
+        assert_eq!(decoded.rtp_concealed_packets, 0);
     }
 }

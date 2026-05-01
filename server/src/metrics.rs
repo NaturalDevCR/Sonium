@@ -212,6 +212,16 @@ lazy_static! {
             ),
             &["client_id", "transport"]
         ).unwrap();
+
+    /// Latest reported missing RTP packets concealed by the client decoder.
+    pub static ref CLIENT_RTP_CONCEALED_PACKETS: IntGaugeVec =
+        register_int_gauge_vec!(
+            Opts::new(
+                "sonium_client_rtp_concealed_packets",
+                "Latest reported missing RTP packets concealed by the client decoder"
+            ),
+            &["client_id", "transport"]
+        ).unwrap();
 }
 
 pub fn observe_client_health(
@@ -263,6 +273,9 @@ pub fn observe_client_health(
     CLIENT_RTP_DECODE_ERRORS
         .with_label_values(&[client_id, transport])
         .set(report.rtp_decode_error_count as i64);
+    CLIENT_RTP_CONCEALED_PACKETS
+        .with_label_values(&[client_id, transport])
+        .set(report.rtp_concealed_packets as i64);
 
     for candidate in AudioHealthState::ALL {
         CLIENT_HEALTH_STATE

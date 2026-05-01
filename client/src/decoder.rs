@@ -16,6 +16,14 @@ impl ActiveDecoder {
         self.inner.decode(input, output)
     }
 
+    pub fn decode_missing(
+        &mut self,
+        duration_ms: u32,
+        output: &mut Vec<i16>,
+    ) -> Result<(), SoniumError> {
+        self.inner.decode_missing(duration_ms, output)
+    }
+
     pub fn sample_format(&self) -> SampleFormat {
         self.inner.sample_format()
     }

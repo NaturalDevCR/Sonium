@@ -8,7 +8,7 @@ use tokio::sync::mpsc as tokio_mpsc;
 use tokio::time::timeout;
 use tracing::{debug, info, warn};
 
-use sonium_transport::RtpPacket;
+use sonium_transport::{RtpPacket, RTP_CLOCK_RATE};
 
 use sonium_common::config::ClientConfig;
 use sonium_protocol::{
@@ -31,9 +31,15 @@ enum IncomingFrame {
 }
 
 enum UdpMediaEvent {
-    Packet { sequence: u16, payload: Vec<u8> },
+    Packet {
+        sequence: u16,
+        timestamp: u32,
+        payload: Vec<u8>,
+    },
     DecodeError,
 }
+
+const MAX_CONCEALMENT_PACKETS_PER_GAP: u16 = 10;
 
 const READ_TIMEOUT: Duration = Duration::from_secs(20);
 const WRITE_TIMEOUT: Duration = Duration::from_secs(5);
@@ -160,7 +166,9 @@ async fn connect_and_run(
     let mut rtp_packets_received = 0u32;
     let mut rtp_sequence_gaps = 0u32;
     let mut rtp_decode_error_count = 0u32;
+    let mut rtp_concealed_packets = 0u32;
     let mut last_rtp_sequence: Option<u16> = None;
+    let mut last_rtp_timestamp: Option<u32> = None;
 
     // Start periodic tasks
     let (incoming_tx, mut incoming_rx) = mpsc::unbounded_channel();
@@ -236,6 +244,7 @@ async fn connect_and_run(
                         rtp_packets_received,
                         rtp_sequence_gaps,
                         rtp_decode_error_count,
+                        rtp_concealed_packets,
                     )
                 } else {
                     // Send idle report to keep status "Connected"
@@ -330,6 +339,7 @@ async fn connect_and_run(
                                                     if udp_tx
                                                         .send(UdpMediaEvent::Packet {
                                                             sequence: pkt.sequence,
+                                                            timestamp: pkt.timestamp,
                                                             payload: pkt.payload,
                                                         })
                                                         .is_err()
@@ -359,6 +369,7 @@ async fn connect_and_run(
                                 task.abort();
                             }
                             last_rtp_sequence = None;
+                            last_rtp_timestamp = None;
                             info!(transport = %ss.transport_mode, "UDP media receiver stopped");
                         }
                     }
@@ -408,24 +419,77 @@ async fn connect_and_run(
             // RTP/UDP media path: WireChunk payloads received from UDP socket
             udp_event = recv_optional_udp(&mut udp_chunk_rx) => {
                 match udp_event {
-                    Some(UdpMediaEvent::Packet { sequence, payload }) => {
+                    Some(UdpMediaEvent::Packet { sequence, timestamp, payload }) => {
                         rtp_packets_received = rtp_packets_received.saturating_add(1);
+                        let mut skipped = 0u16;
                         if let Some(last) = last_rtp_sequence {
-                            let expected = last.wrapping_add(1);
-                            if sequence != expected {
-                                let skipped = sequence.wrapping_sub(expected);
-                                if skipped < 0x8000 {
-                                    rtp_sequence_gaps =
-                                        rtp_sequence_gaps.saturating_add(skipped as u32);
-                                }
+                            let diff = sequence.wrapping_sub(last);
+                            if diff == 0 {
+                                continue;
+                            }
+                            if diff >= 0x8000 {
+                                debug!(
+                                    last_sequence = last,
+                                    sequence,
+                                    "Dropping late or out-of-order RTP packet"
+                                );
+                                continue;
+                            }
+                            skipped = diff.saturating_sub(1);
+                            if skipped > 0 {
+                                rtp_sequence_gaps =
+                                    rtp_sequence_gaps.saturating_add(skipped as u32);
                             }
                         }
-                        last_rtp_sequence = Some(sequence);
 
                         let chunk = sonium_protocol::messages::WireChunk::decode(&payload)?;
                         if let (Some(dec), Some(_pl), Some(buf)) =
                             (decoder.as_mut(), player.as_mut(), sync_buf.as_mut())
                         {
+                            if skipped > 0 {
+                                let conceal_count = skipped.min(MAX_CONCEALMENT_PACKETS_PER_GAP);
+                                rtp_concealed_packets =
+                                    rtp_concealed_packets.saturating_add(conceal_count as u32);
+                                let interval_us = last_rtp_timestamp
+                                    .and_then(|last_timestamp| {
+                                        let timestamp_delta = timestamp.wrapping_sub(last_timestamp);
+                                        let packets = u32::from(skipped) + 1;
+                                        if packets == 0 {
+                                            None
+                                        } else {
+                                            Some(
+                                                ((timestamp_delta as u64)
+                                                    .saturating_mul(1_000_000)
+                                                    / RTP_CLOCK_RATE
+                                                    / packets as u64)
+                                                    .clamp(10_000, 60_000)
+                                                    as i64,
+                                            )
+                                        }
+                                    })
+                                    .unwrap_or(20_000);
+                                let current_playout_us = chunk.timestamp.to_micros()
+                                    + (server_buffer_ms as i64 * 1000)
+                                    + (cfg.latency_ms as i64 * 1000)
+                                    + (server_latency_ms as i64 * 1000);
+                                let first_missing_back = i64::from(conceal_count);
+                                for i in 0..conceal_count {
+                                    let mut samples = Vec::new();
+                                    dec.decode_missing((interval_us / 1000) as u32, &mut samples)?;
+                                    apply_volume(&mut samples, volume, muted);
+                                    if let Some(ref mut eq) = eq_processor {
+                                        eq.apply(&mut samples);
+                                    }
+                                    let playout_us = current_playout_us
+                                        - (first_missing_back - i64::from(i)) * interval_us;
+                                    let now_server = time_provider.to_server_time(now_us());
+                                    buf.push(
+                                        PcmChunk::new(playout_us, samples, dec.sample_format()),
+                                        now_server,
+                                    );
+                                }
+                            }
+
                             let mut samples = Vec::new();
                             dec.decode(&chunk.data, &mut samples)?;
                             apply_volume(&mut samples, volume, muted);
@@ -439,6 +503,8 @@ async fn connect_and_run(
                             let now_server = time_provider.to_server_time(now_us());
                             buf.push(PcmChunk::new(playout_us, samples, dec.sample_format()), now_server);
                         }
+                        last_rtp_sequence = Some(sequence);
+                        last_rtp_timestamp = Some(timestamp);
                     }
                     Some(UdpMediaEvent::DecodeError) => {
                         rtp_decode_error_count = rtp_decode_error_count.saturating_add(1);

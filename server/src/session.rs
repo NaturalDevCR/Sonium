@@ -179,6 +179,7 @@ impl HealthTransitionTracker {
                 rtp_packets_received = report.rtp_packets_received,
                 rtp_sequence_gaps = report.rtp_sequence_gaps,
                 rtp_decode_errors = report.rtp_decode_error_count,
+                rtp_concealed_packets = report.rtp_concealed_packets,
                 callback_starvations = report.callback_starvation_count,
                 callback_xruns = report.audio_callback_xrun_count,
                 clock_offset_ms = report.latency_ms,

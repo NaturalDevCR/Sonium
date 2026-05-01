@@ -682,10 +682,13 @@ Phase 2 validation findings from first live `v0.1.51` run:
 Validation hardening applied after the first live run:
 
 - Server health metrics now use the effective session transport label (`tcp` or `rtp_udp`) instead of hardcoding `tcp`.
-- Client health reports now include RTP receive diagnostics: `rtp_packets_received`, `rtp_sequence_gaps`, and `rtp_decode_error_count`.
-- Server Prometheus metrics expose those fields as `sonium_client_rtp_packets_received`, `sonium_client_rtp_sequence_gaps`, and `sonium_client_rtp_decode_errors`.
+- Client health reports now include RTP receive diagnostics: `rtp_packets_received`, `rtp_sequence_gaps`, `rtp_decode_error_count`, and `rtp_concealed_packets`.
+- Server Prometheus metrics expose those fields as `sonium_client_rtp_packets_received`, `sonium_client_rtp_sequence_gaps`, `sonium_client_rtp_decode_errors`, and `sonium_client_rtp_concealed_packets`.
 - Health classification treats new RTP sequence gaps and RTP decode errors as degradation signals.
 - Web UI RTP/UDP preset now uses UDP port `1712`; the UDP port input is disabled while TCP is selected and the help text explains that the value is ignored for TCP.
+- First diagnostic run on Wi-Fi showed `rtp_sequence_gaps=54` after `rtp_packets_received=968`, with `rtp_decode_errors=0`, `stale_drops=0`, and `underruns=0`. This points to UDP packet loss or packet reordering on the Wi-Fi path rather than RTP decode failures.
+- Client RTP receive handling now ignores late/out-of-order packets without moving the sequence baseline backward, preventing false gap inflation after reordering.
+- Opus packet-loss concealment is now used for missing RTP packets through `Decoder::decode_missing`; non-Opus decoders fall back to silence for the missing packet duration.
 
 Next work: publish the validation-hardening release, rerun clean RTP/UDP with the new metrics, then decide whether the bug is packet loss/gaps, RTP decode/path issues, or buffer/playout scheduling.
 

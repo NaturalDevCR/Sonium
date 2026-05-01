@@ -61,6 +61,22 @@ impl Decoder for OpusDecoder {
         Ok(())
     }
 
+    fn decode_missing(&mut self, duration_ms: u32, output: &mut Vec<i16>) -> Result<()> {
+        let frame_samples = (self.fmt.rate as usize)
+            .saturating_mul(duration_ms.clamp(2, 120) as usize)
+            .saturating_div(1000);
+        let max_samples = frame_samples.saturating_mul(self.fmt.channels as usize);
+        let start = output.len();
+        output.resize(start + max_samples, 0i16);
+        let decoded = self
+            .inner
+            .decode(None::<&[u8]>, &mut output[start..], false)
+            .map_err(|e| SoniumError::Codec(format!("opus plc decode: {e}")))?;
+        let actual = decoded * self.fmt.channels as usize;
+        output.truncate(start + actual);
+        Ok(())
+    }
+
     fn sample_format(&self) -> SampleFormat {
         self.fmt
     }
