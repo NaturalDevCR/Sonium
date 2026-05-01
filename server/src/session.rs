@@ -181,12 +181,17 @@ fn classify_health_report(
         .saturating_sub(previous.stale_drop_count);
     let high_jitter = report.jitter_ms > jitter_warning_ms(current_buffer_ms);
     let low_buffer = playout_queue_ms < low_buffer_warning_ms(current_buffer_ms);
+    let callback_unhealthy =
+        report.callback_starvation_count > 0 || report.audio_callback_xrun_count > 0;
 
     if underrun_delta > 0 {
         AudioHealthState::Underrun
-    } else if stale_delta > 0 || report.overrun_count > 0 || high_jitter || low_buffer {
-        AudioHealthState::Degraded
-    } else if report.callback_starvation_count > 0 || report.audio_callback_xrun_count > 0 {
+    } else if stale_delta > 0
+        || report.overrun_count > 0
+        || high_jitter
+        || low_buffer
+        || callback_unhealthy
+    {
         AudioHealthState::Degraded
     } else {
         AudioHealthState::Stable
@@ -334,14 +339,16 @@ async fn session_loop(
                 match incoming {
                     IncomingClientFrame::Message(hdr, payload) => {
                         handle_client_msg(
-                            stream,
-                            &state,
-                            client_id,
+                            ClientMsgContext {
+                                stream,
+                                state: &state,
+                                client_id,
+                                current_buffer_ms: &mut current_buffer_ms,
+                                auto_buffer_tuner: &mut auto_buffer_tuner,
+                                health_tracker: &mut health_tracker,
+                            },
                             hdr,
                             &payload,
-                            &mut current_buffer_ms,
-                            &mut auto_buffer_tuner,
-                            &mut health_tracker,
                         ).await?;
                     }
                     IncomingClientFrame::Closed(reason) => {
@@ -548,15 +555,19 @@ async fn send_server_settings(
     Ok(())
 }
 
+struct ClientMsgContext<'a> {
+    stream: &'a mut OwnedWriteHalf,
+    state: &'a ServerState,
+    client_id: &'a str,
+    current_buffer_ms: &'a mut u32,
+    auto_buffer_tuner: &'a mut AutoBufferTuner,
+    health_tracker: &'a mut HealthTransitionTracker,
+}
+
 async fn handle_client_msg(
-    stream: &mut OwnedWriteHalf,
-    state: &ServerState,
-    client_id: &str,
+    ctx: ClientMsgContext<'_>,
     hdr: MessageHeader,
     payload: &[u8],
-    current_buffer_ms: &mut u32,
-    auto_buffer_tuner: &mut AutoBufferTuner,
-    health_tracker: &mut HealthTransitionTracker,
 ) -> anyhow::Result<()> {
     match hdr.msg_type {
         MessageType::Time => {
@@ -570,35 +581,40 @@ async fn handle_client_msg(
             reply.refers_to = hdr.id;
             reply.received = now;
             write_all_with_timeout(
-                stream,
+                ctx.stream,
                 &Message::Time(TimeMsg { latency: diff }).encode_with_header(reply),
             )
             .await?;
         }
         MessageType::ClientInfo => {
             if let Ok(Message::ClientInfo(ci)) = Message::from_payload(&hdr, payload) {
-                state.set_volume(client_id, ci.volume, ci.muted);
+                ctx.state.set_volume(ctx.client_id, ci.volume, ci.muted);
             }
         }
         MessageType::HealthReport => {
             if let Ok(Message::HealthReport(health)) = Message::from_payload(&hdr, payload) {
-                let health_state = health_tracker.observe(client_id, &health, *current_buffer_ms);
-                metrics::observe_client_health(client_id, "tcp", &health, health_state);
+                let health_state =
+                    ctx.health_tracker
+                        .observe(ctx.client_id, &health, *ctx.current_buffer_ms);
+                metrics::observe_client_health(ctx.client_id, "tcp", &health, health_state);
 
-                if let Some(next_buffer_ms) =
-                    auto_buffer_tuner.on_health(&health, *current_buffer_ms)
+                if let Some(next_buffer_ms) = ctx
+                    .auto_buffer_tuner
+                    .on_health(&health, *ctx.current_buffer_ms)
                 {
-                    let (volume, muted) = state.get_volume(client_id).unwrap_or((100, false));
-                    let c = state.get_client(client_id);
+                    let (volume, muted) =
+                        ctx.state.get_volume(ctx.client_id).unwrap_or((100, false));
+                    let c = ctx.state.get_client(ctx.client_id);
                     let latency_ms = c.as_ref().map(|x| x.latency_ms).unwrap_or(0);
                     let obs = c.as_ref().map(|x| x.observability_enabled).unwrap_or(false);
-                    let stream_id = state
-                        .client_stream_id(client_id)
+                    let stream_id = ctx
+                        .state
+                        .client_stream_id(ctx.client_id)
                         .unwrap_or_else(|| "default".into());
                     let (eq_bands, eq_enabled) =
-                        state.get_stream_eq(&stream_id).unwrap_or_default();
+                        ctx.state.get_stream_eq(&stream_id).unwrap_or_default();
                     send_server_settings(
-                        stream,
+                        ctx.stream,
                         next_buffer_ms,
                         volume,
                         muted,
@@ -608,15 +624,16 @@ async fn handle_client_msg(
                         obs,
                     )
                     .await?;
-                    *current_buffer_ms = next_buffer_ms;
-                    debug!(%client_id, buffer_ms = next_buffer_ms, "Auto buffer adjusted");
+                    *ctx.current_buffer_ms = next_buffer_ms;
+                    debug!(client_id = %ctx.client_id, buffer_ms = next_buffer_ms, "Auto buffer adjusted");
                 }
-                if state
-                    .get_client(client_id)
+                if ctx
+                    .state
+                    .get_client(ctx.client_id)
                     .map(|c| c.observability_enabled)
                     .unwrap_or(false)
                 {
-                    state.set_client_health(client_id, health);
+                    ctx.state.set_client_health(ctx.client_id, health);
                 }
             }
         }

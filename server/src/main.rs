@@ -186,10 +186,12 @@ async fn main() -> anyhow::Result<()> {
         runtime_stream.chunk_ms = Some(effective_chunk_ms);
         let (cancel, handle) = spawn_stream(
             runtime_stream,
-            effective_buffer_ms,
-            buffer_ms_overridden,
-            effective_chunk_ms,
-            chunk_ms_overridden,
+            StreamRuntimeConfig {
+                effective_buffer_ms,
+                buffer_ms_overridden,
+                effective_chunk_ms,
+                chunk_ms_overridden,
+            },
             registry.clone(),
             state.clone(),
             shutdown.clone(),
@@ -327,19 +329,23 @@ fn configure_tcp_stream(stream: &TcpStream) {
     }
 }
 
-fn spawn_stream(
-    stream_cfg: StreamSource,
+struct StreamRuntimeConfig {
     effective_buffer_ms: u32,
     buffer_ms_overridden: bool,
     effective_chunk_ms: u32,
     chunk_ms_overridden: bool,
+}
+
+fn spawn_stream(
+    stream_cfg: StreamSource,
+    runtime: StreamRuntimeConfig,
     registry: Arc<BroadcasterRegistry>,
     state: Arc<ServerState>,
     shutdown: CancellationToken,
 ) -> (CancellationToken, JoinHandle<()>) {
     let bc = Arc::new(broadcaster::Broadcaster::new(
         &stream_cfg.id,
-        effective_buffer_ms,
+        runtime.effective_buffer_ms,
     ));
     register(&registry, bc.clone());
 
@@ -349,10 +355,10 @@ fn spawn_stream(
         &stream_cfg.codec,
         format!("{}", stream_cfg.sample_format),
         &stream_cfg.source,
-        effective_buffer_ms,
-        buffer_ms_overridden,
-        effective_chunk_ms,
-        chunk_ms_overridden,
+        runtime.effective_buffer_ms,
+        runtime.buffer_ms_overridden,
+        runtime.effective_chunk_ms,
+        runtime.chunk_ms_overridden,
         stream_cfg.idle_timeout_ms,
         stream_cfg.silence_on_idle,
     );

@@ -28,7 +28,7 @@ else
   TTY_PATH="/dev/null"
 fi
 
-SCRIPT_VERSION="v0.1.49"
+SCRIPT_VERSION="v0.1.50"
 
 while [[ $# -gt 0 ]]; do
   case "$1" in
