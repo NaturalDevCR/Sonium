@@ -46,6 +46,10 @@ pub struct Hello {
     /// Stream protocol version supported by this client (always 2 for Sonium).
     #[serde(rename = "SnapStreamProtocolVersion")]
     pub protocol_version: u32,
+    /// UDP port the client is listening on for RTP media delivery.
+    /// `0` means the client does not support UDP media (TCP only).
+    #[serde(rename = "UdpPort", default)]
+    pub udp_port: u16,
 }
 
 impl Hello {
@@ -61,6 +65,7 @@ impl Hello {
             instance: 1,
             id: id.into(),
             protocol_version: 2,
+            udp_port: 0,
         }
     }
 
@@ -98,6 +103,7 @@ mod tests {
             instance: 1,
             id: "unique-id-123".into(),
             protocol_version: 2,
+            udp_port: 0,
         }
     }
 
@@ -134,5 +140,23 @@ mod tests {
     fn new_helper_sets_protocol_version() {
         let h = Hello::new("host", "id");
         assert_eq!(h.protocol_version, 2);
+    }
+
+    #[test]
+    fn udp_port_round_trip() {
+        let mut h = sample();
+        h.udp_port = 5678;
+        let decoded = Hello::decode(&h.encode()).unwrap();
+        assert_eq!(decoded.udp_port, 5678);
+    }
+
+    #[test]
+    fn udp_port_defaults_to_zero_when_absent() {
+        // JSON without UdpPort key must decode to 0 (serde default).
+        let json = r#"{"MAC":"","HostName":"h","Version":"1","ClientName":"S","OS":"linux","Arch":"x86_64","Instance":1,"ID":"id","SnapStreamProtocolVersion":2}"#;
+        let mut w = WireWrite::new();
+        w.write_str(json);
+        let decoded = Hello::decode(&w.finish()).unwrap();
+        assert_eq!(decoded.udp_port, 0);
     }
 }

@@ -1,4 +1,5 @@
 use serde::{Deserialize, Serialize};
+use sonium_transport::TransportConfig;
 
 use crate::SampleFormat;
 
@@ -42,6 +43,10 @@ pub struct ServerNet {
     pub auto_buffer_step_down_ms: u32,
     /// Minimum delay between auto-buffer adjustments.
     pub auto_buffer_cooldown_ms: u64,
+    /// Media transport selection.  See [`TransportConfig`] for options.
+    /// Defaults to `tcp`; future modes (`rtp_udp`, `quic_dgram`) require
+    /// Phase 2+ implementations before they can be enabled.
+    pub transport: TransportConfig,
 }
 
 /// One audio source that the server encodes and broadcasts.
@@ -120,6 +125,7 @@ impl Default for ServerNet {
             auto_buffer_step_up_ms: 120,
             auto_buffer_step_down_ms: 40,
             auto_buffer_cooldown_ms: 8_000,
+            transport: TransportConfig::default(),
         }
     }
 }

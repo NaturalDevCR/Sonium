@@ -117,6 +117,109 @@ stale drops should remain flat
 jitter should stay low and bounded
 ```
 
+Smoke run:
+
+```text
+name: tcp-clean-20260501T055634Z
+date: 2026-05-01
+version: v0.1.50
+note: existing higher-buffer config, not the canonical 500 ms comparison baseline
+duration: 600 seconds
+samples: 120
+clients: 1
+final stream_status: playing
+final health_state: stable
+final buffer_depth_ms: 1000
+final output_buffer_ms: 300
+final jitter_buffer_chunks: 50
+final target_playout_latency_ms: 2000
+final jitter_ms: 0
+final underruns: 0
+final stale_drops: 0
+final overruns: 0
+final callback_starvations: 0
+final audio_callback_xruns: 0
+```
+
+Rejected low-latency clean attempt:
+
+```text
+date: 2026-05-01
+version: v0.1.50
+config: global buffer_ms=500, chunk_ms=20, auto_buffer=false, no stream buffer override
+observed target_playout_latency_ms: 500
+result: rejected as clean baseline
+reason: counters continued increasing after warmup
+60 second observation: underruns 174 -> 234, stale_drops 433 -> 490
+buffer_depth_ms range during observation: 20 -> 560
+callback_starvations: 0
+audio_callback_xruns: 0
+```
+
+Clean candidate:
+
+```text
+date: 2026-05-01
+version: v0.1.50
+config: global buffer_ms=1000, chunk_ms=20, auto_buffer=false, no stream buffer override
+observed target_playout_latency_ms: 1000
+precheck health_state: stable
+60 second observation: underruns stayed at 0, stale_drops stayed at 101
+buffer_depth_ms range during observation: 520 -> 1020
+output_buffer_ms: 260
+callback_starvations: 0
+audio_callback_xruns: 0
+next step: capture the 600 second baseline
+```
+
+Captured clean run:
+
+```text
+name: tcp-clean-buffer-1000ms-20260501T065459Z
+date: 2026-05-01
+version: v0.1.50
+duration: 600 seconds
+samples: 120
+config: global buffer_ms=1000, chunk_ms=20, auto_buffer=false, no stream buffer override
+final stream_status: playing
+final health_state: stable
+final buffer_depth_ms: 860
+final output_buffer_ms: 260
+final jitter_buffer_chunks: 43
+final target_playout_latency_ms: 1000
+final jitter_ms: 0
+final underruns: 2
+final stale_drops: 129
+final overruns: 0
+final callback_starvations: 0
+final audio_callback_xruns: 0
+note: accepted as first 1000 ms clean baseline candidate, but not a zero-drop baseline
+```
+
+Accepted clean reference:
+
+```text
+name: tcp-clean-buffer-1200ms-20260501T070823Z
+date: 2026-05-01
+version: v0.1.50
+duration: 600 seconds
+samples: 120
+config: global buffer_ms=1200, chunk_ms=20, auto_buffer=false, no stream buffer override
+final stream_status: playing
+final health_state: stable
+final buffer_depth_ms: 1040
+final output_buffer_ms: 300
+final jitter_buffer_chunks: 52
+final target_playout_latency_ms: 1200
+final jitter_ms: 0
+final underruns: 0
+final stale_drops: 91
+final overruns: 0
+final callback_starvations: 0
+final audio_callback_xruns: 0
+note: accepted strict clean baseline; stale_drops were already 91 at precheck and did not increase during capture
+```
+
 ---
 
 ## Profile B - high jitter
@@ -153,6 +256,131 @@ buffer depth may oscillate
 underruns should identify the buffer threshold where TCP becomes unstable
 ```
 
+Captured run:
+
+```text
+name: tcp-jitter-20ms-buffer-1200ms-20260501T071941Z
+date: 2026-05-01
+version: v0.1.50
+duration: 600 seconds
+samples: 120
+config: global buffer_ms=1200, chunk_ms=20, auto_buffer=false, no stream buffer override
+impairment: tc netem delay 20ms 10ms distribution normal on eth0
+final stream_status: playing
+final health_state: stable
+final buffer_depth_ms: 740
+final output_buffer_ms: 300
+final jitter_buffer_chunks: 37
+final target_playout_latency_ms: 1200
+final jitter_ms: 0
+final underruns: 0
+final stale_drops: 92
+final overruns: 0
+final callback_starvations: 0
+final audio_callback_xruns: 0
+note: accepted 20 ms jitter reference; stale_drops increased by one versus the clean precheck baseline
+```
+
+Exploratory run:
+
+```text
+name: tcp-jitter-50ms-buffer-1200ms-quick-20260501T073105Z
+date: 2026-05-01
+version: v0.1.50
+duration: 180 seconds
+samples: 36
+config: global buffer_ms=1200, chunk_ms=20, auto_buffer=false, no stream buffer override
+impairment: tc netem delay 50ms 20ms distribution normal on eth0
+final stream_status: playing
+final health_state: stable
+final buffer_depth_ms: 1180
+final output_buffer_ms: 300
+final jitter_buffer_chunks: 59
+final target_playout_latency_ms: 1200
+final jitter_ms: 2
+final underruns: 2
+final stale_drops: 101
+final overruns: 0
+final callback_starvations: 0
+final audio_callback_xruns: 0
+note: stable but mildly degraded; use as evidence that 50 ms jitter starts nudging TCP at 1200 ms
+```
+
+Exploratory run:
+
+```text
+name: tcp-jitter-100ms-buffer-1200ms-quick-20260501T073617Z
+date: 2026-05-01
+version: v0.1.50
+duration: 180 seconds
+samples: 36
+config: global buffer_ms=1200, chunk_ms=20, auto_buffer=false, no stream buffer override
+impairment: tc netem delay 100ms 50ms distribution normal on eth0
+final stream_status: playing
+final health_state: stable
+final buffer_depth_ms: 520
+final output_buffer_ms: 300
+final jitter_buffer_chunks: 26
+final target_playout_latency_ms: 1200
+final jitter_ms: 36
+final underruns: 2
+final stale_drops: 105
+final overruns: 0
+final callback_starvations: 0
+final audio_callback_xruns: 0
+note: stable but visibly stressed; measured jitter rose while final buffer depth fell
+```
+
+Exploratory failure run:
+
+```text
+name: tcp-jitter-200ms-buffer-1200ms-quick-20260501T074052Z
+date: 2026-05-01
+version: v0.1.50
+duration: 180 seconds
+samples: 36
+config: global buffer_ms=1200, chunk_ms=20, auto_buffer=false, no stream buffer override
+impairment: tc netem delay 200ms 100ms distribution normal on eth0
+final stream_status: playing
+final health_state: underrun
+final buffer_depth_ms: 240
+final output_buffer_ms: 300
+final jitter_buffer_chunks: 12
+final target_playout_latency_ms: 1200
+final jitter_ms: 20
+final underruns: 34
+final stale_drops: 146
+final overruns: 0
+final callback_starvations: 0
+final audio_callback_xruns: 0
+note: first clear reproducible jitter failure profile for TCP at 1200 ms
+```
+
+Exploratory bracket run:
+
+```text
+name: tcp-jitter-150ms-buffer-1200ms-quick-20260501T074634Z
+date: 2026-05-01
+version: v0.1.50
+duration: 180 seconds
+samples: 36
+config: global buffer_ms=1200, chunk_ms=20, auto_buffer=false, no stream buffer override
+impairment: tc netem delay 150ms 75ms distribution normal on eth0
+final stream_status: playing
+final health_state: stable
+final buffer_depth_ms: 640
+final output_buffer_ms: 300
+final jitter_buffer_chunks: 32
+final target_playout_latency_ms: 1200
+final jitter_ms: 39
+final underruns: 37
+final stale_drops: 148
+final overruns: 0
+final callback_starvations: 0
+final audio_callback_xruns: 0
+note: counters were cumulative from the prior 200 ms run; approximate delta was underruns +3 and stale_drops +2, ending stable
+```
+
 ---
 
 ## Profile C - random packet loss
@@ -187,6 +415,31 @@ Expected result:
 ```text
 TCP may avoid packet loss at the application layer but still show stalls
 underruns, stale drops, and output buffer collapse are the important signals
+```
+
+Exploratory run:
+
+```text
+name: tcp-loss-1pct-buffer-1200ms-quick-20260501T075405Z
+date: 2026-05-01
+version: v0.1.50
+duration: 180 seconds
+samples: 36
+config: global buffer_ms=1200, chunk_ms=20, auto_buffer=false, no stream buffer override
+impairment: tc netem loss 1% on eth0
+final stream_status: playing
+final health_state: stable
+final buffer_depth_ms: 940
+final output_buffer_ms: 300
+final jitter_buffer_chunks: 47
+final target_playout_latency_ms: 1200
+final jitter_ms: 0
+final underruns: 0
+final stale_drops: 0
+final overruns: 0
+final callback_starvations: 0
+final audio_callback_xruns: 0
+note: clean exploratory packet-loss result after reconnect/reset
 ```
 
 ---

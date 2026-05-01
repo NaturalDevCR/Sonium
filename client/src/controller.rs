@@ -1,10 +1,14 @@
 use socket2::{SockRef, TcpKeepalive};
+use std::sync::Arc;
 use std::time::Duration;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::tcp::{OwnedReadHalf, OwnedWriteHalf};
-use tokio::net::TcpStream;
+use tokio::net::{TcpStream, UdpSocket};
+use tokio::sync::mpsc as tokio_mpsc;
 use tokio::time::timeout;
 use tracing::{debug, info, warn};
+
+use sonium_transport::RtpPacket;
 
 use sonium_common::config::ClientConfig;
 use sonium_protocol::{
@@ -111,6 +115,12 @@ async fn connect_and_run(
 
     let time_provider = TimeProvider::new();
 
+    // Bind a local UDP socket for RTP media reception.
+    // Port 0 lets the OS assign an ephemeral port; we advertise it in Hello.
+    let udp_socket = Arc::new(UdpSocket::bind("0.0.0.0:0").await?);
+    let udp_port = udp_socket.local_addr()?.port();
+    debug!(udp_port, "UDP media socket bound");
+
     // 1. Send Hello
     let hostname = hostname::get()
         .map(|h| h.to_string_lossy().to_string())
@@ -120,9 +130,10 @@ async fn connect_and_run(
 
     let mut hello_msg = Hello::new(display_name, &client_id);
     hello_msg.hostname = display_name.to_owned();
+    hello_msg.udp_port = udp_port;
     let hello = Message::Hello(hello_msg);
     write_all_with_timeout(&mut writer, &hello.encode()).await?;
-    info!("Hello sent");
+    info!(udp_port, "Hello sent");
 
     // 2. Wait for CodecHeader, then ServerSettings
     let mut decoder: Option<ActiveDecoder> = None;
@@ -137,6 +148,10 @@ async fn connect_and_run(
     let mut server_latency_ms: i32 = 0;
 
     let mut pending_time: Option<(u16, i64)> = None; // (msg_id, sent_us)
+
+    // Channel for WireChunk payload bytes received via UDP RTP path.
+    let mut udp_chunk_rx: Option<tokio_mpsc::UnboundedReceiver<Vec<u8>>> = None;
+    let mut udp_recv_task: Option<tokio::task::JoinHandle<()>> = None;
 
     // Start periodic tasks
     let (incoming_tx, mut incoming_rx) = mpsc::unbounded_channel();
@@ -286,6 +301,31 @@ async fn connect_and_run(
                             }
                         }
                         debug!(volume = ss.volume, muted = ss.muted, buffer_ms = ss.buffer_ms, latency_ms = ss.latency, "ServerSettings applied");
+
+                        if ss.transport_mode == "rtp_udp" && udp_chunk_rx.is_none() {
+                            let (udp_tx, udp_rx) = tokio_mpsc::unbounded_channel::<Vec<u8>>();
+                            udp_chunk_rx = Some(udp_rx);
+                            let sock = udp_socket.clone();
+                            udp_recv_task = Some(tokio::spawn(async move {
+                                let mut buf = vec![0u8; 65_535];
+                                loop {
+                                    match sock.recv(&mut buf).await {
+                                        Ok(n) => {
+                                            if let Ok(pkt) = RtpPacket::decode(&buf[..n]) {
+                                                if udp_tx.send(pkt.payload).is_err() {
+                                                    break;
+                                                }
+                                            }
+                                        }
+                                        Err(e) => {
+                                            warn!("UDP receiver error: {e}");
+                                            break;
+                                        }
+                                    }
+                                }
+                            }));
+                            info!(transport = "rtp_udp", "UDP media receiver started");
+                        }
                     }
 
                     MessageType::WireChunk => {
@@ -329,10 +369,36 @@ async fn connect_and_run(
                     other => debug!("Unhandled message type: {other:?}"),
                 }
             }
+
+            // RTP/UDP media path: WireChunk payloads received from UDP socket
+            udp_payload = recv_optional_udp(&mut udp_chunk_rx) => {
+                if let Some(payload) = udp_payload {
+                    let chunk = sonium_protocol::messages::WireChunk::decode(&payload)?;
+                    if let (Some(dec), Some(_pl), Some(buf)) =
+                        (decoder.as_mut(), player.as_mut(), sync_buf.as_mut())
+                    {
+                        let mut samples = Vec::new();
+                        dec.decode(&chunk.data, &mut samples)?;
+                        apply_volume(&mut samples, volume, muted);
+                        if let Some(ref mut eq) = eq_processor {
+                            eq.apply(&mut samples);
+                        }
+                        let playout_us = chunk.timestamp.to_micros()
+                            + (server_buffer_ms as i64 * 1000)
+                            + (cfg.latency_ms as i64 * 1000)
+                            + (server_latency_ms as i64 * 1000);
+                        let now_server = time_provider.to_server_time(now_us());
+                        buf.push(PcmChunk::new(playout_us, samples, dec.sample_format()), now_server);
+                    }
+                }
+            }
         }
     };
 
     read_task.abort();
+    if let Some(task) = udp_recv_task {
+        task.abort();
+    }
     result
 }
 
@@ -425,6 +491,15 @@ async fn socket_reader(mut reader: OwnedReadHalf, tx: mpsc::UnboundedSender<Inco
         if tx.send(IncomingFrame::Message(hdr, payload)).is_err() {
             break;
         }
+    }
+}
+
+async fn recv_optional_udp(
+    rx: &mut Option<tokio_mpsc::UnboundedReceiver<Vec<u8>>>,
+) -> Option<Vec<u8>> {
+    match rx.as_mut() {
+        Some(r) => r.recv().await,
+        None => std::future::pending().await,
     }
 }
 

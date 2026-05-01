@@ -9,7 +9,7 @@ use anyhow::Context;
 use clap::Parser;
 use socket2::{SockRef, TcpKeepalive};
 use std::{path::PathBuf, sync::Arc};
-use tokio::net::{TcpListener, TcpStream};
+use tokio::net::{TcpListener, TcpStream, UdpSocket};
 use tokio::task::JoinHandle;
 use tokio_util::sync::CancellationToken;
 use tracing::{info, warn};
@@ -172,6 +172,9 @@ async fn main() -> anyhow::Result<()> {
     ));
     let registry = new_registry();
 
+    // Initialise runtime transport config from the loaded config file.
+    state.set_transport_config(cfg.server.transport.mode, cfg.server.transport.udp_port);
+
     // Restore persisted groups before any clients connect.
     state.restore_groups(saved_groups);
 
@@ -258,6 +261,23 @@ async fn main() -> anyhow::Result<()> {
         });
     }
 
+    // ── UDP socket for RTP/UDP media delivery (Phase 2) ──────────────────
+    let udp_socket: Option<Arc<UdpSocket>> = if cfg.server.transport.udp_port > 0 {
+        let udp_addr = format!("{}:{}", cfg.server.bind, cfg.server.transport.udp_port);
+        match UdpSocket::bind(&udp_addr).await {
+            Ok(sock) => {
+                info!("RTP/UDP media socket bound to {udp_addr}");
+                Some(Arc::new(sock))
+            }
+            Err(e) => {
+                warn!("Failed to bind UDP media socket on {udp_addr}: {e}");
+                None
+            }
+        }
+    } else {
+        None
+    };
+
     // ── TCP listener for audio clients ────────────────────────────────────
     let addr = format!("{}:{}", cfg.server.bind, cfg.server.stream_port);
     let listener = TcpListener::bind(&addr)
@@ -280,9 +300,10 @@ async fn main() -> anyhow::Result<()> {
                 let session_cfg = cfg.clone();
                 let state    = state.clone();
                 let cancel   = shutdown.clone();
+                let udp_sock = udp_socket.clone();
                 tokio::spawn(async move {
                     tokio::select! {
-                        result = session::handle(stream, peer, registry, session_cfg, state) => {
+                        result = session::handle(stream, peer, registry, session_cfg, state, udp_sock) => {
                             if let Err(e) = result {
                                 warn!(%peer, "Session error: {e}");
                             }

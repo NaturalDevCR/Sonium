@@ -86,6 +86,11 @@ pub enum Event {
         client_id: String,
         health: HealthReport,
     },
+    /// Emitted when the operator changes the active media transport mode.
+    TransportModeChanged {
+        mode: String,
+        server_udp_port: u16,
+    },
 }
 
 /// Broadcast channel wrapper for [`Event`]s.

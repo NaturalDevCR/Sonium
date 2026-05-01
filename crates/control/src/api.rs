@@ -15,6 +15,7 @@ use axum::{
     Extension, Router,
 };
 use serde::{Deserialize, Serialize};
+use sonium_transport::TransportMode;
 use std::sync::Arc;
 
 /// Shared state injected by `axum`.
@@ -51,6 +52,8 @@ pub fn router(state: AppState) -> Router {
         .route("/groups/:id", delete(delete_group))
         .route("/groups/:id", patch(patch_group))
         .route("/groups/:id/stream", patch(patch_group_stream))
+        .route("/server/transport", get(get_transport))
+        .route("/server/transport", patch(patch_transport))
         .route("/discover/scan", get(get_discover_scan))
         .route("/discover/local-subnet", get(get_discover_local_subnet))
         .layer(middleware::from_fn(require_operator));
@@ -346,6 +349,49 @@ async fn get_discover_local_subnet() -> impl IntoResponse {
     Json(LocalSubnetResponse {
         cidr: crate::discovery::local_ipv4_subnet(),
     })
+}
+
+// ── Transport ─────────────────────────────────────────────────────────────
+
+#[derive(Serialize)]
+struct TransportResponse {
+    mode: String,
+    server_udp_port: u16,
+}
+
+async fn get_transport(State(s): State<AppState>) -> impl IntoResponse {
+    Json(TransportResponse {
+        mode: s.transport_mode().to_string(),
+        server_udp_port: s.server_udp_port(),
+    })
+}
+
+#[derive(Deserialize)]
+struct PatchTransportBody {
+    mode: String,
+}
+
+async fn patch_transport(
+    State(s): State<AppState>,
+    Json(body): Json<PatchTransportBody>,
+) -> Response {
+    let mode = match body.mode.as_str() {
+        "tcp" => TransportMode::Tcp,
+        "rtp_udp" => TransportMode::RtpUdp,
+        "quic_dgram" => TransportMode::QuicDgram,
+        _ => {
+            return (
+                StatusCode::BAD_REQUEST,
+                format!(
+                    "unknown transport mode {:?}; valid: tcp, rtp_udp, quic_dgram",
+                    body.mode
+                ),
+            )
+                .into_response()
+        }
+    };
+    s.set_transport_mode(mode);
+    StatusCode::NO_CONTENT.into_response()
 }
 
 // ── Streams ───────────────────────────────────────────────────────────────

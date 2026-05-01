@@ -162,6 +162,13 @@ export interface RestartResponse {
   message: string;
 }
 
+export type TransportMode = 'tcp' | 'rtp_udp' | 'quic_dgram';
+
+export interface TransportResponse {
+  mode: TransportMode;
+  server_udp_port: number;
+}
+
 export interface ConfigReloadReport {
   added:            string[];
   removed:          string[];
@@ -187,7 +194,8 @@ export type Event =
   | { type: 'heartbeat';           uptime_s: number }
   | { type: 'stream_level';        stream_id: string; rms_db: number }
   | { type: 'stream_eq_changed';   stream_id: string; eq_bands: EqBand[]; enabled: boolean }
-  | { type: 'client_health';       client_id: string; health: HealthReport };
+  | { type: 'client_health';       client_id: string; health: HealthReport }
+  | { type: 'transport_mode_changed'; mode: TransportMode; server_udp_port: number };
 
 // ── HTTP helpers ──────────────────────────────────────────────────────────
 
@@ -319,6 +327,10 @@ export const api = {
 
   setGroupStream: (group_id: string, stream_id: string) =>
     patch(`/groups/${group_id}/stream`, { stream_id }),
+
+  // ── Transport ──────────────────────────────────────────────────────────
+  transport: () => get<TransportResponse>('/server/transport'),
+  setTransport: (mode: TransportMode) => patch('/server/transport', { mode }),
 
   // ── Users ───────────────────────────────────────────────────────────────
   users: () => get<UserView[]>('/users'),

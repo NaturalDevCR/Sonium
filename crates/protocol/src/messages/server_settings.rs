@@ -76,6 +76,13 @@ pub struct ServerSettings {
     /// Whether the client should stream diagnostic health reports to server.
     #[serde(default)]
     pub observability_enabled: bool,
+    /// Active media transport mode ("tcp", "rtp_udp", "quic_dgram").
+    /// Empty string means TCP (backward-compatible default).
+    #[serde(default)]
+    pub transport_mode: String,
+    /// Server UDP port for RTP/UDP media delivery (`0` = not available).
+    #[serde(default)]
+    pub server_udp_port: u16,
 }
 
 impl Default for ServerSettings {
@@ -88,6 +95,8 @@ impl Default for ServerSettings {
             eq_bands: vec![],
             eq_enabled: false,
             observability_enabled: false,
+            transport_mode: String::new(),
+            server_udp_port: 0,
         }
     }
 }
@@ -150,5 +159,28 @@ mod tests {
         let mut w = WireWrite::new();
         w.write_str("{{broken");
         assert!(ServerSettings::decode(&w.finish()).is_err());
+    }
+
+    #[test]
+    fn transport_fields_round_trip() {
+        let msg = ServerSettings {
+            transport_mode: "rtp_udp".into(),
+            server_udp_port: 1711,
+            ..Default::default()
+        };
+        let decoded = ServerSettings::decode(&msg.encode()).unwrap();
+        assert_eq!(decoded.transport_mode, "rtp_udp");
+        assert_eq!(decoded.server_udp_port, 1711);
+    }
+
+    #[test]
+    fn transport_fields_default_to_empty_when_absent() {
+        // JSON without transport fields must decode with defaults (backward compat).
+        let json = r#"{"buffer_ms":1000,"latency":0,"volume":100,"muted":false}"#;
+        let mut w = WireWrite::new();
+        w.write_str(json);
+        let decoded = ServerSettings::decode(&w.finish()).unwrap();
+        assert_eq!(decoded.transport_mode, "");
+        assert_eq!(decoded.server_udp_port, 0);
     }
 }

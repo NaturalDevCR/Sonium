@@ -5,6 +5,7 @@ members = [
     "crates/sync",
     "crates/codec",
     "crates/common",
+    "crates/transport",
     "crates/control",
     "server",
     "client",
@@ -14,7 +15,7 @@ members = [
 exclude = ["fuzz"]
 
 [workspace.package]
-version = "0.1.50"
+version = "0.1.51"
 edition = "2021"
 license = "GPL-3.0"
 

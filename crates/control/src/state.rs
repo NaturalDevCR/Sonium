@@ -18,6 +18,7 @@ use std::sync::Arc;
 use crate::persistence::{PersistedClient, PersistedGroup, PersistedStream, PersistenceStore};
 use crate::ws::EventBus;
 use sonium_protocol::messages::{EqBand, HealthReport};
+use sonium_transport::TransportMode;
 
 // ── Client ────────────────────────────────────────────────────────────────
 
@@ -136,6 +137,15 @@ fn default_chunk_ms() -> u32 {
     20
 }
 
+// ── Transport ─────────────────────────────────────────────────────────────
+
+/// Runtime-mutable transport configuration held in [`ServerState`].
+struct TransportState {
+    mode: TransportMode,
+    /// Server UDP port for RTP media (`0` = not configured).
+    server_udp_port: u16,
+}
+
 // ── ServerState ──────────────────────────────────────────────────────────
 
 /// Thread-safe in-memory state shared between the audio server and the
@@ -151,6 +161,8 @@ pub struct ServerState {
     saved_clients: Vec<PersistedClient>,
     /// Snapshot of stream settings loaded at startup.
     saved_streams: Vec<PersistedStream>,
+    /// Active media transport configuration (runtime-mutable via control API).
+    transport: parking_lot::Mutex<TransportState>,
 }
 
 impl ServerState {
@@ -250,6 +262,10 @@ impl ServerState {
             persistence,
             saved_clients,
             saved_streams,
+            transport: parking_lot::Mutex::new(TransportState {
+                mode: TransportMode::Tcp,
+                server_udp_port: 0,
+            }),
         }
     }
 
@@ -801,6 +817,39 @@ impl ServerState {
 
     pub fn events(&self) -> Arc<EventBus> {
         self.events.clone()
+    }
+
+    // ── Transport ─────────────────────────────────────────────────────────
+
+    /// Initialise transport config from the loaded config file.
+    /// Must be called once from `main` before accepting connections.
+    pub fn set_transport_config(&self, mode: TransportMode, server_udp_port: u16) {
+        let mut t = self.transport.lock();
+        t.mode = mode;
+        t.server_udp_port = server_udp_port;
+    }
+
+    /// Current active transport mode.
+    pub fn transport_mode(&self) -> TransportMode {
+        self.transport.lock().mode
+    }
+
+    /// Server UDP port for RTP media delivery (`0` = not configured).
+    pub fn server_udp_port(&self) -> u16 {
+        self.transport.lock().server_udp_port
+    }
+
+    /// Change the active transport mode and broadcast a `TransportModeChanged` event.
+    pub fn set_transport_mode(&self, mode: TransportMode) {
+        let udp_port = {
+            let mut t = self.transport.lock();
+            t.mode = mode;
+            t.server_udp_port
+        };
+        self.events.emit(crate::ws::Event::TransportModeChanged {
+            mode: mode.to_string(),
+            server_udp_port: udp_port,
+        });
     }
 }
 

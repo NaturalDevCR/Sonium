@@ -69,6 +69,7 @@ fn hello_full_wire_round_trip() {
         instance: 1,
         id: "kitchen-pi-1".into(),
         protocol_version: 2,
+        udp_port: 0,
     };
     let bytes = wire(&Message::Hello(orig.clone()));
     let (hdr, msg) = parse(&bytes);
@@ -130,6 +131,8 @@ fn server_settings_json_encoding() {
         eq_bands: vec![],
         eq_enabled: false,
         observability_enabled: false,
+        transport_mode: String::new(),
+        server_udp_port: 0,
     };
     let (_, msg) = parse(&wire(&Message::ServerSettings(ss)));
 

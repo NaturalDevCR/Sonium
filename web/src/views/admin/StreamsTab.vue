@@ -2,7 +2,7 @@
 import { ref, computed, watch, onMounted } from 'vue';
 import { useServerStore } from '@/stores/server';
 import { useAuthStore }   from '@/stores/auth';
-import { api }            from '@/lib/api';
+import { api, type TransportMode } from '@/lib/api';
 import StreamBadge        from '@/components/StreamBadge.vue';
 import { parse, stringify } from 'smol-toml';
 
@@ -346,6 +346,8 @@ const autoBufferMaxMs = ref(3000);
 const autoBufferStepUpMs = ref(120);
 const autoBufferStepDownMs = ref(40);
 const autoBufferCooldownMs = ref(8000);
+const transportMode = ref<TransportMode>('tcp');
+const transportUdpPort = ref(0);
 // Raw URI — stays in sync with computed, can be manually overridden.
 const rawUri         = ref('');
 const uriOverridden  = ref(false);
@@ -550,6 +552,13 @@ async function loadServerTuning() {
     autoBufferStepUpMs.value = Number(server.auto_buffer_step_up_ms ?? 120);
     autoBufferStepDownMs.value = Number(server.auto_buffer_step_down_ms ?? 40);
     autoBufferCooldownMs.value = Number(server.auto_buffer_cooldown_ms ?? 8000);
+    transportMode.value = (server.transport?.mode ?? 'tcp') as TransportMode;
+    transportUdpPort.value = Number(server.transport?.udp_port ?? 0);
+    const runtime = await api.transport().catch(() => null);
+    if (runtime) {
+      transportMode.value = runtime.mode;
+      transportUdpPort.value = Number(runtime.server_udp_port ?? transportUdpPort.value);
+    }
   } catch (e) {
     tuningInfo.value = `Could not read global tuning: ${String(e)}`;
   }
@@ -576,8 +585,14 @@ async function saveServerTuning() {
       1000,
       Number(autoBufferCooldownMs.value || 8000),
     );
+    cfg.server.transport = {
+      ...(cfg.server.transport || {}),
+      mode: transportMode.value,
+      udp_port: Math.max(0, Math.min(65535, Number(transportUdpPort.value || 0))),
+    };
     await api.saveConfigRaw(stringify(cfg));
-    tuningInfo.value = 'Global tuning saved. Restart Sonium server to apply.';
+    await api.setTransport(transportMode.value).catch(() => undefined);
+    tuningInfo.value = 'Global tuning saved. Restart Sonium server and reconnect clients to apply transport changes.';
     await loadServerTuning();
   } catch (e) {
     tuningInfo.value = `Could not save global tuning: ${String(e)}`;
@@ -596,6 +611,12 @@ function applyAggressiveLanPreset() {
   autoBufferStepDownMs.value = 60;
   autoBufferCooldownMs.value = 6000;
   tuningInfo.value = 'Preset applied: Aggressive LAN (target 500–800 ms). Save global tuning to persist.';
+}
+
+function applyRtpUdpPreset() {
+  transportMode.value = 'rtp_udp';
+  transportUdpPort.value = 1711;
+  tuningInfo.value = 'Preset applied: RTP/UDP on port 1711. Save global tuning and restart the server.';
 }
 
 function editStream(s: any) {
@@ -722,10 +743,14 @@ async function restartServer() {
         <p style="font-size:12px;color:var(--text-muted);margin-top:4px;">
           Stream-level <code>buffer_ms</code> and <code>chunk_ms</code> overrides always take priority over these global defaults.
         </p>
-        <div class="mt-3">
+        <div class="mt-3 flex items-center gap-2 flex-wrap">
           <button class="btn-ghost" @click="applyAggressiveLanPreset">
             <span class="mdi mdi-rocket-launch-outline"></span>
             Preset: Aggressive LAN (500–800 ms)
+          </button>
+          <button class="btn-ghost" @click="applyRtpUdpPreset">
+            <span class="mdi mdi-access-point-network"></span>
+            Preset: RTP/UDP
           </button>
         </div>
       </div>
@@ -744,6 +769,26 @@ async function restartServer() {
             <option :value="60">60</option>
           </select>
         </div>
+      </div>
+
+      <div class="idle-section">
+        <div class="grid grid-cols-2 gap-3">
+          <div>
+            <label class="param-label block mb-1.5">Media transport</label>
+            <select v-model="transportMode" class="field field-mono">
+              <option value="tcp">TCP</option>
+              <option value="rtp_udp">RTP/UDP</option>
+              <option value="quic_dgram">QUIC DATAGRAM</option>
+            </select>
+          </div>
+          <div>
+            <label class="param-label block mb-1.5">Server UDP port</label>
+            <input v-model.number="transportUdpPort" type="number" min="0" max="65535" step="1" class="field field-mono" />
+          </div>
+        </div>
+        <p class="param-desc mt-2">
+          TCP is the stable default. RTP/UDP requires a non-zero UDP port, server restart, and client reconnect. QUIC DATAGRAM is reserved for a later phase.
+        </p>
       </div>
 
       <div class="idle-section">

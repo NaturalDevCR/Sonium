@@ -13,11 +13,12 @@ name = "sonium_client_lib"
 path = "src/lib.rs"
 
 [dependencies]
-sonium-common   = { path = "../crates/common" }
-sonium-protocol = { path = "../crates/protocol" }
-sonium-codec    = { path = "../crates/codec" }
-sonium-sync     = { path = "../crates/sync" }
-sonium-control  = { path = "../crates/control" }
+sonium-common    = { path = "../crates/common" }
+sonium-protocol  = { path = "../crates/protocol" }
+sonium-codec     = { path = "../crates/codec" }
+sonium-sync      = { path = "../crates/sync" }
+sonium-control   = { path = "../crates/control" }
+sonium-transport = { path = "../crates/transport" }
 tokio           = { workspace = true }
 socket2         = { workspace = true }
 tracing         = { workspace = true }

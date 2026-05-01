@@ -5,8 +5,9 @@ edition.workspace = true
 license.workspace = true
 
 [dependencies]
-sonium-common   = { path = "../common" }
-sonium-protocol = { path = "../protocol" }
+sonium-common    = { path = "../common" }
+sonium-protocol  = { path = "../protocol" }
+sonium-transport = { path = "../transport" }
 
 tokio           = { workspace = true }
 serde           = { workspace = true }

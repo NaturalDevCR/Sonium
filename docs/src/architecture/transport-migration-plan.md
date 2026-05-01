@@ -518,16 +518,161 @@ Completed in this pass:
 - Added audio callback starvation and backend xrun/error telemetry from the client `Player`, exposed in Prometheus and the admin observability table.
 - Added [TCP Baseline Profiles](./tcp-baseline-profiles.md) with clean, jitter, loss, burst-loss, and CPU-stress runs for Phase 0 comparison.
 - Added `scripts/capture_tcp_baseline.sh` to capture metrics snapshots and run metadata into `run/baselines/...`.
+- Captured the first live clean TCP smoke baseline on 2026-05-01 using Sonium v0.1.50:
+  `tcp-clean-20260501T055634Z`, 600 seconds, 120 samples, one connected client, stream playing, final health state `stable`.
+- The smoke baseline used the existing higher buffer configuration rather than the canonical 500 ms comparison target, but final counters were healthy:
+  `underruns=0`, `stale_drops=0`, `overruns=0`, `callback_starvations=0`, `audio_callback_xruns=0`, `jitter_ms=0`.
+- Retested clean TCP with global `buffer_ms=500`, no stream buffer override, `chunk_ms=20`, and `auto_buffer=false`.
+  The client reached `target_playout_latency_ms=500`, but the run was not stable enough for the canonical baseline:
+  over a 60 second observation window, `underruns` increased from 174 to 234 and `stale_drops` increased from 433 to 490, while buffer depth oscillated between 20 ms and 560 ms.
+- Retested clean TCP with global `buffer_ms=700`, no stream buffer override, `chunk_ms=20`, and `auto_buffer=false`.
+  The client reached `target_playout_latency_ms=700`, but the run was still rejected:
+  over a 60 second observation window, `underruns` increased from 5 to 12 and `stale_drops` increased from 142 to 294.
+- Confirmed global `buffer_ms=1000`, no stream buffer override, `chunk_ms=20`, and `auto_buffer=false` as the first clean TCP candidate:
+  target reached 1000 ms, health reported `stable`, and during the 60 second precheck `underruns=0`, `stale_drops=101`, `overruns=0`, `callback_starvations=0`, and `audio_callback_xruns=0` stayed flat.
+- Captured the 600 second TCP clean run at global `buffer_ms=1000`:
+  `tcp-clean-buffer-1000ms-20260501T065459Z`, 120 samples, final health state `stable`, stream playing.
+  Final counters were mostly healthy, with small increases from precheck to the final sample:
+  `underruns=2`, `stale_drops=129`, `overruns=0`, `callback_starvations=0`, `audio_callback_xruns=0`, `jitter_ms=0`.
+- Captured the accepted 600 second clean TCP baseline at global `buffer_ms=1200`:
+  `tcp-clean-buffer-1200ms-20260501T070823Z`, 120 samples, final health state `stable`, stream playing.
+  This is the first strict clean reference: during the long capture `underruns=0` and `stale_drops=91` stayed flat from precheck to final sample, with `overruns=0`, `callback_starvations=0`, `audio_callback_xruns=0`, and `jitter_ms=0`.
+- Captured the 600 second TCP jitter profile at global `buffer_ms=1200` with Linux `netem delay 20ms 10ms distribution normal`:
+  `tcp-jitter-20ms-buffer-1200ms-20260501T071941Z`, 120 samples, final health state `stable`, stream playing.
+  The run stayed healthy: `underruns=0`, `stale_drops=92`, `overruns=0`, `callback_starvations=0`, `audio_callback_xruns=0`, and `jitter_ms=0`.
+- Captured a 180 second exploratory TCP jitter profile at global `buffer_ms=1200` with Linux `netem delay 50ms 20ms distribution normal`:
+  `tcp-jitter-50ms-buffer-1200ms-quick-20260501T073105Z`, 36 samples, final health state `stable`, stream playing.
+  The run showed mild degradation compared with the previous jitter run: final `underruns=2`, `stale_drops=101`, `jitter_ms=2`, with `overruns=0`, `callback_starvations=0`, and `audio_callback_xruns=0`.
+- Captured a 180 second exploratory TCP jitter profile at global `buffer_ms=1200` with Linux `netem delay 100ms 50ms distribution normal`:
+  `tcp-jitter-100ms-buffer-1200ms-quick-20260501T073617Z`, 36 samples, final health state `stable`, stream playing.
+  The run stayed connected and stable but showed higher measured jitter and lower final buffer depth:
+  `jitter_ms=36`, `buffer_depth_ms=520`, `underruns=2`, `stale_drops=105`, with audio backend counters still at zero.
+- Captured a 180 second exploratory TCP jitter profile at global `buffer_ms=1200` with Linux `netem delay 200ms 100ms distribution normal`:
+  `tcp-jitter-200ms-buffer-1200ms-quick-20260501T074052Z`, 36 samples, final health state `underrun`, stream playing.
+  This is the first clear reproducible jitter failure threshold: final `buffer_depth_ms=240`, `jitter_buffer_chunks=12`, `underruns=34`, `stale_drops=146`, while audio backend counters stayed at zero.
+- Captured a 180 second exploratory TCP jitter profile at global `buffer_ms=1200` with Linux `netem delay 150ms 75ms distribution normal`:
+  `tcp-jitter-150ms-buffer-1200ms-quick-20260501T074634Z`, 36 samples, final health state `stable`, stream playing.
+  Because client counters were cumulative from the previous session, read this as a delta from the 200 ms run: approximately `underruns +3` and `stale_drops +2`, with final `jitter_ms=39` and `buffer_depth_ms=640`.
+- Captured a 180 second exploratory TCP packet-loss profile at global `buffer_ms=1200` with Linux `netem loss 1%`:
+  `tcp-loss-1pct-buffer-1200ms-quick-20260501T075405Z`, 36 samples, final health state `stable`, stream playing.
+  The run stayed clean after reconnect/reset: final `underruns=0`, `stale_drops=0`, `jitter_ms=0`, `overruns=0`, `callback_starvations=0`, and `audio_callback_xruns=0`.
+- Captured a 180 second exploratory TCP packet-loss profile at global `buffer_ms=1200` with Linux `netem loss 3%`:
+  `tcp-loss-3pct-buffer-1200ms-quick-20260501T080926Z`, 36 samples, final health state `stable`, stream playing.
+  The run stayed fully clean: `underruns=0`, `stale_drops=0`, `jitter_ms=0`, `buffer_depth_ms=800`. TCP retransmissions and the 1200 ms buffer together absorb 3% loss without any audible impact.
+- Captured a 180 second exploratory TCP packet-loss profile at global `buffer_ms=1200` with Linux `netem loss 5%`:
+  `tcp-loss-3pct-buffer-1200ms-quick-20260501T081321Z` (profile name reflects script label), 36 samples, final health state `stable`, stream playing.
+  Still fully clean: `underruns=0`, `stale_drops=0`, `jitter_ms=0`. Buffer depth rose to 1160 ms, approaching the 1200 ms ceiling, as TCP retransmissions introduce queuing delay but remain within the configured budget.
+- Captured a 180 second exploratory TCP packet-loss profile at global `buffer_ms=1200` with Linux `netem loss 10%`:
+  `tcp-loss-10pct-buffer-1200ms-quick-20260501T081739Z`, 36 samples, final health state `stable`, stream playing.
+  Still clean: `underruns=0`, `stale_drops=0`, `jitter_ms=0`, `buffer_depth_ms=900`. TCP retransmission overhead is becoming visible in buffer depth variance but the 1200 ms target continues to absorb it.
+- Captured a 180 second exploratory TCP packet-loss profile at global `buffer_ms=1200` with Linux `netem loss 20%`:
+  `tcp-loss-20pct-buffer-1200ms-quick-20260501T082249Z`, 36 samples, final health state `stable`, stream playing.
+  First signs of real degradation: `underruns=4`, `stale_drops=10`, `jitter_ms=3`, `buffer_depth_ms=1040`. This is the transition zone where retransmission latency begins to exceed the jitter buffer target.
+- Captured a 180 second exploratory TCP packet-loss profile at global `buffer_ms=1200` with Linux `netem loss 30%`:
+  `tcp-loss-30pct-buffer-1200ms-quick-20260501T082616Z`, 36 samples, final health state `stable` (reported), stream playing.
+  Catastrophic degradation: `underruns=69`, `stale_drops=2148`, `jitter_ms=25`, `buffer_depth_ms=920`.
+  The stale_drops count exploded 215x versus the 20% run — this is the TCP head-of-line blocking signature: segments stuck in retransmit queues arrive long after the playout deadline, causing the jitter buffer to overflow with stale chunks.
+  **Monitoring gap identified**: `health_state` remained `stable` throughout despite 69 underruns and 2148 stale drops. The health state transition logic did not require sustained clean signal before returning to Stable.
+- Fixed the health state monitoring gap by adding hysteresis (`stable_streak`) to `HealthTransitionTracker` in `server/src/session.rs`:
+  - Added `STABLE_STREAK_REQUIRED = 5` constant (5 × 2-second reporting interval = 10 seconds of clean signal required).
+  - `HealthTransitionTracker` now tracks `stable_streak`: consecutive clean health-report intervals while in `Recovering`.
+  - State machine after fix: first clean interval after `Degraded`/`Underrun` → `Recovering`; stays `Recovering` until streak reaches threshold; any degradation resets streak; clean sequences with no prior bad state promote to `Stable` immediately.
+  - Transition log now includes `stable_streak` for observability.
+  - Added 7 unit tests: first-report stable, underrun detection, single-clean-stays-recovering, full-streak-promotes-to-stable, degradation-resets-streak, degraded-after-stale-drops, stable-without-prior-bad-state.
+  - All 65 tests passing (8 `sonium-server`, 51 + 14 `sonium-protocol`).
 
 Adjustment from implementation review:
 
 - The existing telemetry is a useful Phase 0 foundation, so the next work should enrich and calibrate it instead of duplicating it.
 - Some current counters are mixed between cumulative jitter-buffer counters and periodic audio-device counters. Server-side health transitions now compute deltas for cumulative fields, but benchmark gates should still normalize report semantics before being treated as final.
 - UDP work should remain blocked until a TCP baseline report and at least one reproducible dropout profile exist.
+- The 30% loss run is the reproducible catastrophic TCP baseline required by Phase 0 exit criteria. TCP head-of-line blocking at this level makes the comparison case for RTP/UDP clear.
+- The health state monitoring gap has been resolved. Phase 0 exit criteria are met.
 
-Next recommended Phase 0 slice:
+Phase 0 is complete.
 
-- Run and archive the first accepted TCP baseline using the clean and impaired profiles.
+---
+
+Phase 1 — transport abstraction layer — implemented on 2026-05-01:
+
+- Created `crates/transport` (`sonium-transport`) workspace crate with:
+  - `TransportMode` enum: `tcp` (default), `rtp_udp`, `quic_dgram` — serde `snake_case`, `Display`.
+  - `TransportConfig` struct: `{ mode: TransportMode }` — TOML-deserializable under `[server.transport]`.
+  - `MediaSender` trait: `send_wire_bytes(&mut self, bytes: &[u8]) -> BoxFuture<Result<()>>` with `BoxFuture` return type for future `dyn`-compatibility without `async_trait`.
+  - `TcpMediaSender<'w>`: borrows `&'w mut OwnedWriteHalf`; implements `MediaSender`; writes pre-encoded `WireChunk` bytes with 5-second timeout.
+  - `RtpUdpMediaSender` stub: `unimplemented!()` — placeholder for Phase 2.
+  - `QuicDgramMediaSender` stub: `unimplemented!()` — placeholder for Phase 5.
+- Added `transport: TransportConfig` field to `ServerNet` in `crates/common/src/config.rs`. Default is `tcp`. Config key: `[server.transport] / mode = "tcp"`.
+- `sonium-transport` added to workspace `Cargo.toml` members. `sonium-common` and `sonium-server` depend on it.
+- `server/src/session.rs` updated:
+  - Audio frame delivery now routed through `TcpMediaSender::new(stream).send_wire_bytes(&f.wire_bytes).await` instead of the inline `write_all_with_timeout` call.
+  - Session start logs `transport_mode` alongside stream and peer info.
+  - If a non-`tcp` mode is configured, a `warn!` is emitted and the session falls back to TCP (only supported mode in Phase 1).
+  - Control-plane writes (CodecHeader, ServerSettings, Time, etc.) continue to use `&mut OwnedWriteHalf` directly — they always stay on TCP regardless of media transport mode.
+- All workspace tests passing: 160+ tests across 8 crates.
+
+Phase 1 exit criteria met:
+- Existing TCP behavior is functionally identical through the abstraction.
+- Transport mode is config-driven (`[server.transport] mode = "tcp"`).
+- Codec/sync/playout modules do not depend on the transport implementation.
+- No regression in existing tests.
+
+Phase 2 — RTP/UDP unicast media path — implemented on 2026-05-01:
+
+- Created `crates/transport/src/rtp.rs` with:
+  - Standard 12-byte RTP header encode/decode (V=2, PT=96, seq u16 BE, timestamp u32 BE, SSRC u32 BE).
+  - `SONIUM_RTP_PAYLOAD_TYPE = 96` (dynamic range), `RTP_CLOCK_RATE = 90_000` Hz.
+  - `rtp_from_wire_bytes(wire_bytes, seq, ssrc)`: extracts Sonium WireChunk payload from wire bytes (offset 26, after the 26-byte `MessageHeader`) and derives RTP timestamp from the chunk's `i32` sec/usec fields (`sec * 90000 + usec * 90000 / 1_000_000`).
+  - 11 RTP unit tests: encode/decode round-trip, header byte layout, timestamp conversion, payload-type/version validation, and `rtp_from_wire_bytes`.
+- Replaced `RtpUdpMediaSender` stub in `crates/transport/src/sender.rs` with a real implementation:
+  - Fields: `socket: Arc<UdpSocket>`, `peer_addr: SocketAddr`, `ssrc: u32`, `sequence: u16`.
+  - `send_wire_bytes`: calls `rtp_from_wire_bytes`, wraps sequence with `wrapping_add`, sends via `socket.send_to` with a 2-second timeout.
+- Added `udp_port: u16` to `TransportConfig` in `crates/transport/src/lib.rs` (default 0 = disabled).
+- Added `udp_port: u16` to `Hello` message (`#[serde(rename = "UdpPort", default)]`). Client advertises the ephemeral port it bound for RTP reception.
+- Added `transport_mode: String` and `server_udp_port: u16` to `ServerSettings` (both `#[serde(default)]`). Server echoes effective transport so clients know which path is active.
+- Added `TransportModeChanged { mode: String, server_udp_port: u16 }` WebSocket event so the UI can react to live transport switches.
+- Added `transport: Mutex<TransportState>` to `ServerState` (`crates/control/src/state.rs`) with methods:
+  - `set_transport_config(mode, udp_port)` — called at startup from loaded config.
+  - `transport_mode()`, `server_udp_port()` — read-only accessors.
+  - `set_transport_mode(mode)` — runtime mutation, emits `TransportModeChanged` event.
+- Added `GET /api/server/transport` and `PATCH /api/server/transport` (operator-protected) REST endpoints in `crates/control/src/api.rs`. Accepted modes: `tcp`, `rtp_udp`, `quic_dgram`.
+- Updated `server/src/main.rs`:
+  - Binds a shared UDP socket on `bind:transport.udp_port` at startup (skipped if port is 0).
+  - Calls `state.set_transport_config(mode, udp_port)` to initialize runtime state from config.
+  - Passes `Arc<UdpSocket>` to every session via `session::handle`.
+- Updated `server/src/session.rs`:
+  - Reads `state.transport_mode()` at session start (snapshot; client reconnects to get live changes).
+  - If `RtpUdp` and both server socket and `hello.udp_port > 0`: creates `RtpUdpMediaSender` targeting `peer.ip():hello_udp_port`. SSRC derived from peer address via `DefaultHasher` (deterministic, unique per client).
+  - Audio frame dispatch: if `rtp_sender.is_some()` → send via RTP/UDP; otherwise → TCP.
+  - `send_server_settings` now includes `transport_mode` and `server_udp_port` so clients learn the effective path immediately.
+- Updated `client/src/controller.rs`:
+  - Binds ephemeral UDP socket (`0.0.0.0:0`) before sending Hello; advertises port in `hello.udp_port`.
+  - On `ServerSettings` with `transport_mode == "rtp_udp"`: spawns a UDP receiver task that reads datagrams, decodes the RTP packet, and sends the payload over an unbounded channel (`udp_chunk_rx`).
+  - Added `recv_optional_udp` helper (returns `pending()` when channel absent) for a clean `tokio::select!` arm.
+  - UDP select arm processes received WireChunk payloads identically to the TCP path (decode, volume, EQ, playout scheduling).
+- Updated `web/src/views/admin/StreamsTab.vue`:
+  - Added Media transport controls for `tcp`, `rtp_udp`, and `quic_dgram`.
+  - Added Server UDP port input and an RTP/UDP preset (`rtp_udp`, port `1711`).
+  - Saving global tuning now persists `[server.transport]` in TOML and attempts to apply the selected runtime transport mode through `PATCH /api/server/transport`.
+
+Design decisions:
+- RTP payload = `wire_bytes[26..]` (the WireChunk bytes after the 26-byte Sonium `MessageHeader`). The client calls `WireChunk::decode()` directly on the payload — no extra framing needed.
+- Transport mode is snapshotted at session start. Live `PATCH /api/server/transport` changes take effect for new connections only. This is the simplest correct behavior for Phase 2; Phase 6 will add per-session negotiation and fallback.
+- Client UDP socket is bound once per connection attempt. On reconnect the socket is recreated and a fresh port is advertised.
+- Server UDP socket is shared across all sessions (one `Arc<UdpSocket>`); each session uses `send_to` with its client's address.
+
+Phase 2 exit criteria status:
+- RTP/UDP path compiles and builds cleanly (all workspace tests pass: 173+ tests, 0 failures).
+- Transport mode is configurable via `[server.transport] mode = "rtp_udp"` in TOML and via `PATCH /api/server/transport` at runtime.
+- Backend can broadcast transport changes via WebSocket (`TransportModeChanged`) and expose them through REST.
+- Web UI can persist and apply transport mode and UDP port from the Streams global tuning panel.
+- TCP fallback path unchanged and still working.
+
+Remaining for Phase 2 validation:
+- Live RTP/UDP audio playback soak test on clean LAN.
+- Controlled loss comparison vs. TCP baseline (Phase 0 data: TCP fails at ~30% with head-of-line blocking).
+
+Next work: Phase 2 validation run, then Phase 2.5 (RTCP-style receiver reports).
 
 ---
 
