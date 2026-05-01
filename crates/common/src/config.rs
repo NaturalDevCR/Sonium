@@ -26,6 +26,22 @@ pub struct ServerNet {
     /// Sonium as a drop-in replacement on an existing Snapcast setup.
     /// Ports must also be set to 1704/1780 manually for full compatibility.
     pub snapcast_compat: bool,
+    /// Global jitter buffer suggested to connected clients unless a stream overrides it.
+    pub buffer_ms: u32,
+    /// Global encoded audio chunk duration unless a stream overrides it.
+    pub chunk_ms: u32,
+    /// Enable server-side automatic jitter buffer tuning per client session.
+    pub auto_buffer: bool,
+    /// Lower clamp for auto-tuned buffer target.
+    pub auto_buffer_min_ms: u32,
+    /// Upper clamp for auto-tuned buffer target.
+    pub auto_buffer_max_ms: u32,
+    /// Buffer increase step used when health degrades.
+    pub auto_buffer_step_up_ms: u32,
+    /// Buffer decrease step used during stable playback.
+    pub auto_buffer_step_down_ms: u32,
+    /// Minimum delay between auto-buffer adjustments.
+    pub auto_buffer_cooldown_ms: u64,
 }
 
 /// One audio source that the server encodes and broadcasts.
@@ -59,8 +75,8 @@ pub struct StreamSource {
     pub source: String,
     pub codec: String,
     pub sample_format: SampleFormat,
-    /// Milliseconds of jitter buffer suggested to connected clients.
-    pub buffer_ms: u32,
+    /// Optional per-stream jitter buffer override.
+    pub buffer_ms: Option<u32>,
     /// Encoded audio frame duration in milliseconds. Smaller chunks reduce
     /// scheduling latency; larger chunks reduce packet overhead.
     pub chunk_ms: Option<u32>,
@@ -96,6 +112,14 @@ impl Default for ServerNet {
             control_port: 1711,
             mdns: true,
             snapcast_compat: false,
+            buffer_ms: 1000,
+            chunk_ms: 20,
+            auto_buffer: false,
+            auto_buffer_min_ms: 400,
+            auto_buffer_max_ms: 3000,
+            auto_buffer_step_up_ms: 120,
+            auto_buffer_step_down_ms: 40,
+            auto_buffer_cooldown_ms: 8_000,
         }
     }
 }
@@ -108,7 +132,7 @@ impl Default for StreamSource {
             source: "-".into(),
             codec: "opus".into(),
             sample_format: SampleFormat::default(),
-            buffer_ms: 1000,
+            buffer_ms: None,
             chunk_ms: None,
             idle_timeout_ms: None,
             silence_on_idle: false,
@@ -139,6 +163,14 @@ impl ServerConfig {
     /// Returns the first stream, or a default `StreamSource` if none are configured.
     pub fn default_stream(&self) -> StreamSource {
         self.streams.first().cloned().unwrap_or_default()
+    }
+
+    pub fn effective_buffer_ms(&self, stream: &StreamSource) -> u32 {
+        stream.buffer_ms.unwrap_or(self.server.buffer_ms)
+    }
+
+    pub fn effective_chunk_ms(&self, stream: &StreamSource) -> u32 {
+        stream.chunk_ms.unwrap_or(self.server.chunk_ms)
     }
 }
 

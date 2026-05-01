@@ -10,7 +10,7 @@ pub mod wire_chunk;
 pub use client_info::ClientInfo;
 pub use codec_header::CodecHeader;
 pub use error::ErrorMsg;
-pub use health_report::HealthReport;
+pub use health_report::{jitter_warning_ms, low_buffer_warning_ms, AudioHealthState, HealthReport};
 pub use hello::Hello;
 pub use server_settings::{EqBand, FilterType, ServerSettings};
 pub use time::TimeMsg;

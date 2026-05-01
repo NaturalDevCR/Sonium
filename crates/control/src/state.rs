@@ -107,6 +107,12 @@ pub struct StreamInfo {
     pub format: String,
     pub source: String,
     pub buffer_ms: u32,
+    #[serde(default)]
+    pub buffer_ms_overridden: bool,
+    #[serde(default = "default_chunk_ms")]
+    pub chunk_ms: u32,
+    #[serde(default)]
+    pub chunk_ms_overridden: bool,
     pub idle_timeout_ms: Option<u32>,
     pub silence_on_idle: bool,
     pub status: StreamStatus,
@@ -124,6 +130,10 @@ pub enum StreamStatus {
     Playing,
     Idle,
     Error,
+}
+
+fn default_chunk_ms() -> u32 {
+    20
 }
 
 // ── ServerState ──────────────────────────────────────────────────────────
@@ -170,6 +180,9 @@ impl ServerState {
                     format: "Unknown".into(),
                     source: "Unknown".into(),
                     buffer_ms: 1000,
+                    buffer_ms_overridden: false,
+                    chunk_ms: 20,
+                    chunk_ms_overridden: false,
                     idle_timeout_ms: None,
                     silence_on_idle: false,
                     status: StreamStatus::Idle,
@@ -189,6 +202,9 @@ impl ServerState {
                     format: "Unknown".into(),
                     source: "Unknown".into(),
                     buffer_ms: 1000,
+                    buffer_ms_overridden: false,
+                    chunk_ms: 20,
+                    chunk_ms_overridden: false,
                     idle_timeout_ms: None,
                     silence_on_idle: false,
                     status: StreamStatus::Idle,
@@ -718,6 +734,9 @@ impl ServerState {
         format: impl Into<String>,
         source: impl Into<String>,
         buffer_ms: u32,
+        buffer_ms_overridden: bool,
+        chunk_ms: u32,
+        chunk_ms_overridden: bool,
         idle_timeout_ms: Option<u32>,
         silence_on_idle: bool,
     ) {
@@ -734,6 +753,9 @@ impl ServerState {
                 stream.format = format.clone();
                 stream.source = source.clone();
                 stream.buffer_ms = buffer_ms;
+                stream.buffer_ms_overridden = buffer_ms_overridden;
+                stream.chunk_ms = chunk_ms;
+                stream.chunk_ms_overridden = chunk_ms_overridden;
                 stream.idle_timeout_ms = idle_timeout_ms;
                 stream.silence_on_idle = silence_on_idle;
             })
@@ -753,6 +775,9 @@ impl ServerState {
                     format,
                     source,
                     buffer_ms,
+                    buffer_ms_overridden,
+                    chunk_ms,
+                    chunk_ms_overridden,
                     idle_timeout_ms,
                     silence_on_idle,
                     status: StreamStatus::Idle,

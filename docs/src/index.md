@@ -17,13 +17,21 @@ hero:
       link: /getting-started/configuration
 
 features:
+  - title: Experimental, not production-ready
+    details: Sonium is usable for testing, but still has known audio stability, sync, and operational gaps.
   - title: Server and client binaries
     details: The server ingests PCM audio and hosts the web UI. Clients discover or connect to the server and play synchronized audio.
   - title: Works on your LAN
     details: mDNS discovery, reconnects, per-client latency, volume, EQ, and groups are built into the control plane.
   - title: Built for operators
-    details: Docker, systemd, GitHub releases, Prometheus metrics, config editing, and hot reload are first-class workflows.
+    details: Docker, systemd, GitHub releases, Prometheus metrics, config editing, log filters, and supervised restart requests are first-class workflows.
 ---
+
+::: danger Not production-ready
+Sonium is an early project. It can drop audio, misbehave under low buffers, and
+change between releases. Do not use it for production, venues, alarms, or
+unattended audio systems yet.
+:::
 
 ## The Mental Model
 

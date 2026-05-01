@@ -21,6 +21,9 @@ use sonium_common::SoniumError;
 /// Size of the fixed header in bytes.
 pub const HEADER_SIZE: usize = 26;
 
+/// Hard upper bound for any payload accepted from the wire.
+pub const MAX_PAYLOAD_SIZE: usize = 1024 * 1024;
+
 /// Discriminant that identifies the payload type of a message.
 #[repr(u16)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -78,6 +81,32 @@ impl std::fmt::Display for MessageType {
         };
         f.write_str(s)
     }
+}
+
+pub fn max_payload_size(msg_type: MessageType) -> usize {
+    match msg_type {
+        MessageType::Base => 0,
+        MessageType::CodecHeader => 256 * 1024,
+        MessageType::WireChunk => MAX_PAYLOAD_SIZE,
+        MessageType::ServerSettings => 64 * 1024,
+        MessageType::Time => 64,
+        MessageType::Hello => 16 * 1024,
+        MessageType::ClientInfo => 4 * 1024,
+        MessageType::ErrorMsg => 64 * 1024,
+        MessageType::HealthReport => 1024,
+    }
+}
+
+pub fn validate_payload_size(hdr: &MessageHeader) -> sonium_common::error::Result<usize> {
+    let size = hdr.payload_size as usize;
+    let max = max_payload_size(hdr.msg_type);
+    if size > max {
+        return Err(SoniumError::Protocol(format!(
+            "{} payload too large: {size} > {max}",
+            hdr.msg_type
+        )));
+    }
+    Ok(size)
 }
 
 /// A `(seconds, microseconds)` timestamp embedded in every message header.
@@ -348,5 +377,14 @@ mod tests {
         let hdr = MessageHeader::new(MessageType::WireChunk, u32::MAX);
         let back = MessageHeader::from_bytes(&hdr.to_bytes()).unwrap();
         assert_eq!(back.payload_size, u32::MAX);
+    }
+
+    #[test]
+    fn payload_size_limits_reject_unbounded_allocations() {
+        let hdr = MessageHeader::new(
+            MessageType::Hello,
+            (max_payload_size(MessageType::Hello) + 1) as u32,
+        );
+        assert!(validate_payload_size(&hdr).is_err());
     }
 }

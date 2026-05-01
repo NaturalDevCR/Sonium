@@ -4,6 +4,10 @@
 It streams synchronized audio to any number of speakers over your local network —
 no cloud, no subscription, no configuration file required to get started.
 
+> **Early project warning:** Sonium is not production-ready. It still has known
+> audio stability, low-latency buffering, upgrade, and diagnostics gaps. Use it
+> for experimentation and local testing, not for unattended or commercial audio.
+
 ## Why Sonium?
 
 Most self-hosted multiroom audio solutions were designed years ago and show it:
@@ -17,7 +21,7 @@ Sonium is built from scratch for correctness, performance, and ease of use:
 | Auto-discovery | No | **mDNS built-in** |
 | Web interface | Third-party only | **Bundled** with drag-and-drop |
 | Reconnection | Manual restart | **Automatic** with backoff |
-| Installation | Build from source | **Single static binary** per platform |
+| Installation | Build from source | **Release packages + Linux installer + Desktop Agent** |
 | Language | C / C++ | **Rust** — memory-safe, cross-platform |
 | Clock precision | Software only (~1 ms) | **PTP-ready** — pluggable `TimeSource` for nanosecond sync |
 | Codecs | Limited | **Opus + FLAC + PCM** out of the box |
@@ -27,20 +31,24 @@ Sonium is built from scratch for correctness, performance, and ease of use:
 
 - **Zero required config** — `sonium-server` runs immediately. Point a browser at `http://server:1711` and you're done.
 - **Multi-codec** — Opus for bandwidth efficiency, FLAC for lossless quality, PCM for zero-latency.
+- **Multiple source types** — FIFO/file, TCP, external `pipe://` processes, ffmpeg radio templates, and meta streams.
+- **Recovering radio/process streams** — external sources restart with backoff if their stdout closes.
 - **Tokio async** — handles hundreds of clients on a Raspberry Pi without threads-per-client overhead.
 - **Pluggable clock sync** — NTP-like software sync today, PTPv2 hardware timestamping tomorrow.
-- **Single binary per role** — `sonium-server` and `sonium-client`, each under 10 MB stripped.
+- **Admin UI** — users, roles, groups, streams, config editing, dependency checks, logs, and supervised restart requests.
+- **Desktop Agent** — tray app for macOS and Windows client instances.
 - **Snapcast migration path** — optional compatibility mode lets existing Snapcast clients connect
   to a Sonium server during migration (see [configuration](./getting-started/configuration.md)).
 
 ## Current status
 
-Sonium is in active early development. The wire protocol, clock-sync, and codec
-crates are feature-complete and tested. The full audio playback path with CPAL
-integration is functional.
+Sonium is in active early development. The protocol, codec, control API, web UI,
+installer, and CPAL playback path are functional, but the project is still being
+hardened around real-world jitter, low-latency operation, device behavior, and
+operator workflows.
 
-> **Not production-ready yet.** Sonium is approaching its first stable release.
-> Follow the [roadmap](./contributing/roadmap.md) for progress.
+> **Not production-ready yet.** Expect dropouts, bugs, and occasional breaking
+> changes. Follow the [roadmap](./contributing/roadmap.md) for progress.
 
 ## Quick look
 

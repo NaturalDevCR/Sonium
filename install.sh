@@ -333,14 +333,14 @@ stream_port = ${STREAM_PORT}
 control_port = ${CONTROL_PORT}
 mdns = true
 snapcast_compat = false
+buffer_ms = 1000
+chunk_ms = 20
 
 [[streams]]
 id = "default"
 display_name = "Main"
 source = "${FIFO_PATH}"
 codec = "opus"
-buffer_ms = 1000
-chunk_ms = 20
 silence_on_idle = true
 
 [log]

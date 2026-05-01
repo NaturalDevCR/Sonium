@@ -3,6 +3,13 @@
 Open-source multiroom audio for local networks. Sonium runs one server that
 receives audio and a lightweight client on every playback device.
 
+> [!WARNING]
+> **Sonium is not production-ready.** It is an early, fast-moving project with
+> known audio stability gaps, sync edge cases, rough upgrade paths, and
+> incomplete hardening. It is suitable for experiments, local testing, and
+> helping shape the project. Do not rely on it for venues, unattended installs,
+> alarms, commercial environments, or any setup where audio dropouts matter.
+
 [![CI](https://github.com/NaturalDevCR/Sonium/actions/workflows/ci.yml/badge.svg)](https://github.com/NaturalDevCR/Sonium/actions/workflows/ci.yml)
 [![Docs](https://github.com/NaturalDevCR/Sonium/actions/workflows/docs.yml/badge.svg)](https://naturaldevcr.github.io/Sonium/)
 [![License: GPL-3.0](https://img.shields.io/badge/License-GPL--3.0-blue.svg)](https://www.gnu.org/licenses/gpl-3.0.html)
@@ -19,6 +26,23 @@ music source -> sonium-server -> LAN -> sonium-client -> speaker
   and coordinates groups, volume, latency, EQ, and stream selection.
 - `sonium-client` runs on each playback device, discovers or connects to the
   server, syncs time, decodes audio, and writes to local speakers.
+
+## What Works Today
+
+- Built-in web UI with control view and admin dashboard.
+- Users, roles, JWT auth, first-run/admin setup, and role-aware UI.
+- Groups, per-client volume/mute/latency, EQ, and live stream switching.
+- Multiple configured streams, including FIFO/files, TCP, `pipe://` external
+  processes, ffmpeg-style radio sources, and meta streams.
+- External stream recovery: `pipe://` sources restart with backoff if their
+  stdout closes.
+- System/admin tooling: dependency checks, raw TOML editing, log viewer with
+  time filters, and restart requests when systemd permissions are installed.
+- Local-time structured logs with ANSI disabled for easier journal/UI reading.
+- Sonium Desktop Agent for macOS/Windows to configure client instances.
+- Client audio output through CPAL with a dedicated audio thread, underrun
+  crossfade, device hotplug recovery, output prefill, and manual stream
+  `chunk_ms` control.
 
 ## Install
 
@@ -71,14 +95,14 @@ bind = "0.0.0.0"
 stream_port = 1710
 control_port = 1711
 mdns = true
+buffer_ms = 1000
+chunk_ms = 20
 
 [[streams]]
 id = "default"
 display_name = "Main"
 source = "/tmp/sonium.fifo"
 codec = "opus"
-buffer_ms = 1000
-chunk_ms = 20
 silence_on_idle = true
 
 [log]
@@ -116,9 +140,43 @@ Full docs: [naturaldevcr.github.io/Sonium](https://naturaldevcr.github.io/Sonium
 
 ## Current Status
 
-Sonium is in active early development. The core audio path, web UI, REST API,
-metrics, Docker server flow, release packaging, multi-codec support, and client
-sync loop are under active iteration.
+Sonium is usable for experimentation, but still rough. The web UI, auth,
+configuration flow, multi-stream model, release packaging, and client playback
+loop are all active development surfaces. Expect bugs and occasional breaking
+changes between releases.
+
+### Known Challenges
+
+- **Low-latency reliability:** buffers below ~1000 ms can still produce
+  dropouts on some machines/networks. Recent client-side output prefill and
+  `chunk_ms` support help, but this needs more real-world tuning.
+- **Clock sync precision:** software sync works, but sub-millisecond sync across
+  varied hardware is not proven yet.
+- **Source supervision:** `pipe://` sources now recover, but we still need better
+  diagnostics for ffmpeg/network-radio failure modes.
+- **Upgrade/installer edges:** Linux systemd installs work best through the
+  installer; hand-written services may miss the sudoers restart permission.
+- **Observability:** logs are clearer and filterable, but there is no complete
+  troubleshooting workflow for buffer underruns, network jitter, or device
+  callback timing.
+- **Compatibility:** Snapcast discovery/migration pieces exist, but full
+  drop-in compatibility is not guaranteed.
+
+### Roadmap
+
+- Stabilize client playback under lower buffer sizes: adaptive output prefill,
+  better jitter metrics, and automatic buffer recommendations.
+- Make stream tuning friendlier: optional auto mode for `buffer_ms`/`chunk_ms`,
+  while keeping manual controls for advanced users.
+- Improve diagnostics: surface underruns, stale drops, jitter, process restarts,
+  and ffmpeg stderr in the admin UI.
+- Harden restart/config flows: clearer prompts, permission checks, and safer
+  partial reloads when a full server restart is not needed.
+- Validate synchronization on real multi-device hardware, including Raspberry Pi
+  and mixed macOS/Linux clients.
+- Continue packaging polish for Linux, macOS, and Windows Desktop Agent.
+- Longer term: PTP/hardware timestamp support, relay/cross-subnet modes, TLS,
+  and richer source integrations.
 
 ## License
 

@@ -15,18 +15,23 @@
 use std::net::SocketAddr;
 use std::sync::atomic::{AtomicU16, Ordering};
 use std::sync::Arc;
-use tokio::io::{AsyncReadExt, AsyncWriteExt};
+use std::time::{Duration, Instant};
+use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
 use tokio::net::tcp::{OwnedReadHalf, OwnedWriteHalf};
 use tokio::net::TcpStream;
 use tokio::sync::broadcast;
 use tokio::sync::mpsc;
+use tokio::time::timeout;
 use tracing::{debug, info, instrument, warn};
 
 use sonium_common::config::ServerConfig;
 use sonium_control::{ws::Event, ServerState};
 use sonium_protocol::{
-    header::HEADER_SIZE,
-    messages::{Message, ServerSettings, TimeMsg},
+    header::{validate_payload_size, HEADER_SIZE},
+    messages::{
+        jitter_warning_ms, low_buffer_warning_ms, AudioHealthState, HealthReport, Message,
+        ServerSettings, TimeMsg,
+    },
     MessageHeader, MessageType, Timestamp,
 };
 
@@ -34,6 +39,159 @@ use crate::broadcaster::{lookup, AudioFrame, BroadcasterRegistry};
 use crate::metrics;
 
 static MSG_SEQ: AtomicU16 = AtomicU16::new(1);
+const READ_TIMEOUT: Duration = Duration::from_secs(20);
+const WRITE_TIMEOUT: Duration = Duration::from_secs(5);
+
+#[derive(Debug)]
+struct AutoBufferTuner {
+    enabled: bool,
+    min_ms: u32,
+    max_ms: u32,
+    step_up_ms: u32,
+    step_down_ms: u32,
+    cooldown: Duration,
+    last_adjust: Instant,
+    last_underrun: u32,
+    last_stale: u32,
+}
+
+impl AutoBufferTuner {
+    fn from_config(cfg: &ServerConfig) -> Self {
+        let min_ms = cfg.server.auto_buffer_min_ms.max(40);
+        let max_ms = cfg.server.auto_buffer_max_ms.max(min_ms);
+        Self {
+            enabled: cfg.server.auto_buffer,
+            min_ms,
+            max_ms,
+            step_up_ms: cfg.server.auto_buffer_step_up_ms.max(20),
+            step_down_ms: cfg.server.auto_buffer_step_down_ms.max(10),
+            cooldown: Duration::from_millis(cfg.server.auto_buffer_cooldown_ms.max(1_000)),
+            last_adjust: Instant::now(),
+            last_underrun: 0,
+            last_stale: 0,
+        }
+    }
+
+    fn on_health(&mut self, report: &HealthReport, current_buffer_ms: u32) -> Option<u32> {
+        if !self.enabled {
+            self.last_underrun = report.underrun_count;
+            self.last_stale = report.stale_drop_count;
+            return None;
+        }
+
+        let now = Instant::now();
+        let underrun_increased = report.underrun_count > self.last_underrun;
+        let stale_increased = report.stale_drop_count > self.last_stale;
+        let high_jitter = report.jitter_ms > (current_buffer_ms.saturating_mul(7) / 10).max(80);
+        let low_jitter = report.jitter_ms < (current_buffer_ms.saturating_mul(35) / 100).max(40);
+
+        self.last_underrun = report.underrun_count;
+        self.last_stale = report.stale_drop_count;
+
+        if now.duration_since(self.last_adjust) < self.cooldown {
+            return None;
+        }
+
+        if (underrun_increased || stale_increased || high_jitter) && current_buffer_ms < self.max_ms
+        {
+            self.last_adjust = now;
+            return Some((current_buffer_ms + self.step_up_ms).min(self.max_ms));
+        }
+
+        if !underrun_increased && !stale_increased && low_jitter && current_buffer_ms > self.min_ms
+        {
+            self.last_adjust = now;
+            return Some(
+                current_buffer_ms
+                    .saturating_sub(self.step_down_ms)
+                    .max(self.min_ms),
+            );
+        }
+
+        None
+    }
+}
+
+#[derive(Debug, Default)]
+struct HealthTransitionTracker {
+    last_report: Option<HealthReport>,
+    last_state: Option<AudioHealthState>,
+}
+
+impl HealthTransitionTracker {
+    fn observe(
+        &mut self,
+        client_id: &str,
+        report: &HealthReport,
+        current_buffer_ms: u32,
+    ) -> AudioHealthState {
+        let mut state =
+            classify_health_report(report, self.last_report.as_ref(), current_buffer_ms);
+
+        if matches!(
+            self.last_state,
+            Some(AudioHealthState::Degraded | AudioHealthState::Underrun)
+        ) && state == AudioHealthState::Stable
+        {
+            state = AudioHealthState::Recovering;
+        }
+
+        if self.last_state != Some(state) {
+            debug!(
+                %client_id,
+                transport = "tcp",
+                state = %state,
+                buffer_depth_ms = report.buffer_depth_ms,
+                jitter_ms = report.jitter_ms,
+                underruns = report.underrun_count,
+                stale_drops = report.stale_drop_count,
+                overruns = report.overrun_count,
+                callback_starvations = report.callback_starvation_count,
+                callback_xruns = report.audio_callback_xrun_count,
+                clock_offset_ms = report.latency_ms,
+                "Client health transition"
+            );
+        }
+
+        self.last_report = Some(report.clone());
+        self.last_state = Some(state);
+        state
+    }
+}
+
+fn classify_health_report(
+    report: &HealthReport,
+    previous: Option<&HealthReport>,
+    current_buffer_ms: u32,
+) -> AudioHealthState {
+    let Some(previous) = previous else {
+        return report.snapshot_state(current_buffer_ms);
+    };
+
+    let playout_queue_ms = report.total_playout_queue_ms();
+    if playout_queue_ms == 0 {
+        return AudioHealthState::Buffering;
+    }
+
+    let underrun_delta = report
+        .underrun_count
+        .saturating_sub(previous.underrun_count);
+    let stale_delta = report
+        .stale_drop_count
+        .saturating_sub(previous.stale_drop_count);
+    let high_jitter = report.jitter_ms > jitter_warning_ms(current_buffer_ms);
+    let low_buffer = playout_queue_ms < low_buffer_warning_ms(current_buffer_ms);
+
+    if underrun_delta > 0 {
+        AudioHealthState::Underrun
+    } else if stale_delta > 0 || report.overrun_count > 0 || high_jitter || low_buffer {
+        AudioHealthState::Degraded
+    } else if report.callback_starvation_count > 0 || report.audio_callback_xrun_count > 0 {
+        AudioHealthState::Degraded
+    } else {
+        AudioHealthState::Stable
+    }
+}
 
 enum IncomingClientFrame {
     Message(MessageHeader, Vec<u8>),
@@ -123,7 +281,7 @@ async fn session_loop(
     // Send CodecHeader if stream is already active.
     if let Some(b) = &bc {
         if let Some(hdr) = b.codec_header() {
-            stream.write_all(&hdr).await?;
+            write_all_with_timeout(stream, &hdr).await?;
         }
     }
 
@@ -140,11 +298,13 @@ async fn session_loop(
     let init_buffer = bc
         .as_ref()
         .map(|b| b.buffer_ms)
-        .unwrap_or_else(|| cfg.default_stream().buffer_ms);
+        .unwrap_or(cfg.server.buffer_ms);
+    let mut current_buffer_ms = init_buffer;
+    let mut auto_buffer_tuner = AutoBufferTuner::from_config(&cfg);
 
     send_server_settings(
         stream,
-        init_buffer,
+        current_buffer_ms,
         init_vol.0,
         init_vol.1,
         init_latency,
@@ -161,6 +321,7 @@ async fn session_loop(
 
     let (incoming_tx, mut incoming_rx) = mpsc::unbounded_channel();
     let read_task = tokio::spawn(socket_reader(reader, incoming_tx));
+    let mut health_tracker = HealthTransitionTracker::default();
 
     let result = loop {
         tokio::select! {
@@ -172,7 +333,16 @@ async fn session_loop(
                 };
                 match incoming {
                     IncomingClientFrame::Message(hdr, payload) => {
-                        handle_client_msg(stream, &state, client_id, hdr, &payload).await?;
+                        handle_client_msg(
+                            stream,
+                            &state,
+                            client_id,
+                            hdr,
+                            &payload,
+                            &mut current_buffer_ms,
+                            &mut auto_buffer_tuner,
+                            &mut health_tracker,
+                        ).await?;
                     }
                     IncomingClientFrame::Closed(reason) => {
                         info!(%peer, %reason, "Client reader closed");
@@ -185,7 +355,7 @@ async fn session_loop(
             frame = recv_audio(&mut audio_rx) => {
                 match frame {
                     Ok(f) => {
-                        if let Err(e) = stream.write_all(&f.wire_bytes).await {
+                        if let Err(e) = write_all_with_timeout(stream, &f.wire_bytes).await {
                             warn!(%peer, error = %e, "Audio frame write failed");
                             break Ok(());
                         }
@@ -213,6 +383,8 @@ async fn session_loop(
                                 &mut audio_rx, &mut stream_id, &mut bc,
                                 &new_sid,
                             ).await?;
+                            current_buffer_ms =
+                                bc.as_ref().map(|x| x.buffer_ms).unwrap_or(cfg.server.buffer_ms);
                         }
                     }
 
@@ -224,6 +396,8 @@ async fn session_loop(
                             &mut audio_rx, &mut stream_id, &mut bc,
                             &new_sid,
                         ).await?;
+                        current_buffer_ms =
+                            bc.as_ref().map(|x| x.buffer_ms).unwrap_or(cfg.server.buffer_ms);
                     }
 
                     Ok(Event::StreamRestarted { stream_id: sid })
@@ -239,6 +413,8 @@ async fn session_loop(
                             &mut audio_rx, &mut stream_id, &mut bc,
                             &current_sid,
                         ).await?;
+                        current_buffer_ms =
+                            bc.as_ref().map(|x| x.buffer_ms).unwrap_or(cfg.server.buffer_ms);
                     }
 
                     Ok(Event::StreamRemoved { stream_id: sid })
@@ -257,8 +433,7 @@ async fn session_loop(
                         let lat = c.as_ref().map(|c| c.latency_ms).unwrap_or(0);
                         let obs = c.as_ref().map(|c| c.observability_enabled).unwrap_or(false);
                         let (eq, en) = state.get_stream_eq(&stream_id).unwrap_or_default();
-                        let current_buffer = bc.as_ref().map(|b| b.buffer_ms).unwrap_or_else(|| cfg.default_stream().buffer_ms);
-                        send_server_settings(stream, current_buffer, volume, muted, lat, eq, en, obs).await?;
+                        send_server_settings(stream, current_buffer_ms, volume, muted, lat, eq, en, obs).await?;
                         debug!(%peer, volume, muted, "Volume settings pushed to client");
                     }
 
@@ -268,8 +443,7 @@ async fn session_loop(
                         let (vol, muted) = state.get_volume(client_id).unwrap_or((100, false));
                         let obs = state.get_client(client_id).map(|c| c.observability_enabled).unwrap_or(false);
                         let (eq, en) = state.get_stream_eq(&stream_id).unwrap_or_default();
-                        let current_buffer = bc.as_ref().map(|b| b.buffer_ms).unwrap_or_else(|| cfg.default_stream().buffer_ms);
-                        send_server_settings(stream, current_buffer, vol, muted, latency_ms, eq, en, obs).await?;
+                        send_server_settings(stream, current_buffer_ms, vol, muted, latency_ms, eq, en, obs).await?;
                         debug!(%peer, latency_ms, "Latency settings pushed to client");
                     }
 
@@ -286,8 +460,7 @@ async fn session_loop(
                         let c = state.get_client(client_id);
                         let lat = c.as_ref().map(|c| c.latency_ms).unwrap_or(0);
                         let obs = c.as_ref().map(|c| c.observability_enabled).unwrap_or(false);
-                        let current_buffer = bc.as_ref().map(|b| b.buffer_ms).unwrap_or_else(|| cfg.default_stream().buffer_ms);
-                        send_server_settings(stream, current_buffer, vol, muted, lat, eq_bands, enabled, obs).await?;
+                        send_server_settings(stream, current_buffer_ms, vol, muted, lat, eq_bands, enabled, obs).await?;
                         debug!(%peer, stream_id, "Stream EQ settings pushed to client");
                     }
 
@@ -324,7 +497,7 @@ async fn switch_stream(
     if let Some(bc) = &new_bc {
         // Send the new stream's CodecHeader so the client re-initialises its decoder.
         if let Some(hdr) = bc.codec_header() {
-            wire.write_all(&hdr).await?;
+            write_all_with_timeout(wire, &hdr).await?;
         }
         *audio_rx = Some(bc.subscribe());
     } else {
@@ -367,9 +540,11 @@ async fn send_server_settings(
     };
     let mut hdr = MessageHeader::new(MessageType::ServerSettings, 0);
     hdr.id = next_id();
-    stream
-        .write_all(&Message::ServerSettings(settings).encode_with_header(hdr))
-        .await?;
+    write_all_with_timeout(
+        stream,
+        &Message::ServerSettings(settings).encode_with_header(hdr),
+    )
+    .await?;
     Ok(())
 }
 
@@ -379,6 +554,9 @@ async fn handle_client_msg(
     client_id: &str,
     hdr: MessageHeader,
     payload: &[u8],
+    current_buffer_ms: &mut u32,
+    auto_buffer_tuner: &mut AutoBufferTuner,
+    health_tracker: &mut HealthTransitionTracker,
 ) -> anyhow::Result<()> {
     match hdr.msg_type {
         MessageType::Time => {
@@ -391,9 +569,11 @@ async fn handle_client_msg(
             reply.id = next_id();
             reply.refers_to = hdr.id;
             reply.received = now;
-            stream
-                .write_all(&Message::Time(TimeMsg { latency: diff }).encode_with_header(reply))
-                .await?;
+            write_all_with_timeout(
+                stream,
+                &Message::Time(TimeMsg { latency: diff }).encode_with_header(reply),
+            )
+            .await?;
         }
         MessageType::ClientInfo => {
             if let Ok(Message::ClientInfo(ci)) = Message::from_payload(&hdr, payload) {
@@ -402,6 +582,35 @@ async fn handle_client_msg(
         }
         MessageType::HealthReport => {
             if let Ok(Message::HealthReport(health)) = Message::from_payload(&hdr, payload) {
+                let health_state = health_tracker.observe(client_id, &health, *current_buffer_ms);
+                metrics::observe_client_health(client_id, "tcp", &health, health_state);
+
+                if let Some(next_buffer_ms) =
+                    auto_buffer_tuner.on_health(&health, *current_buffer_ms)
+                {
+                    let (volume, muted) = state.get_volume(client_id).unwrap_or((100, false));
+                    let c = state.get_client(client_id);
+                    let latency_ms = c.as_ref().map(|x| x.latency_ms).unwrap_or(0);
+                    let obs = c.as_ref().map(|x| x.observability_enabled).unwrap_or(false);
+                    let stream_id = state
+                        .client_stream_id(client_id)
+                        .unwrap_or_else(|| "default".into());
+                    let (eq_bands, eq_enabled) =
+                        state.get_stream_eq(&stream_id).unwrap_or_default();
+                    send_server_settings(
+                        stream,
+                        next_buffer_ms,
+                        volume,
+                        muted,
+                        latency_ms,
+                        eq_bands,
+                        eq_enabled,
+                        obs,
+                    )
+                    .await?;
+                    *current_buffer_ms = next_buffer_ms;
+                    debug!(%client_id, buffer_ms = next_buffer_ms, "Auto buffer adjusted");
+                }
                 if state
                     .get_client(client_id)
                     .map(|c| c.observability_enabled)
@@ -419,7 +628,7 @@ async fn handle_client_msg(
 async fn socket_reader(mut reader: OwnedReadHalf, tx: mpsc::UnboundedSender<IncomingClientFrame>) {
     loop {
         let mut hdr_buf = [0u8; HEADER_SIZE];
-        if let Err(e) = reader.read_exact(&mut hdr_buf).await {
+        if let Err(e) = read_exact_with_timeout(&mut reader, &mut hdr_buf).await {
             let _ = tx.send(IncomingClientFrame::Closed(e.to_string()));
             break;
         }
@@ -432,8 +641,16 @@ async fn socket_reader(mut reader: OwnedReadHalf, tx: mpsc::UnboundedSender<Inco
             }
         };
 
-        let mut payload = vec![0u8; hdr.payload_size as usize];
-        if let Err(e) = reader.read_exact(&mut payload).await {
+        let payload_size = match validate_payload_size(&hdr) {
+            Ok(size) => size,
+            Err(e) => {
+                let _ = tx.send(IncomingClientFrame::Closed(e.to_string()));
+                break;
+            }
+        };
+
+        let mut payload = vec![0u8; payload_size];
+        if let Err(e) = read_exact_with_timeout(&mut reader, &mut payload).await {
             let _ = tx.send(IncomingClientFrame::Closed(format!(
                 "error reading payload: {e}"
             )));
@@ -448,9 +665,32 @@ async fn socket_reader(mut reader: OwnedReadHalf, tx: mpsc::UnboundedSender<Inco
 
 async fn read_message(stream: &mut TcpStream) -> anyhow::Result<Message> {
     let mut hdr_buf = [0u8; HEADER_SIZE];
-    stream.read_exact(&mut hdr_buf).await?;
+    read_exact_with_timeout(stream, &mut hdr_buf).await?;
     let hdr = MessageHeader::from_bytes(&hdr_buf)?;
-    let mut payload = vec![0u8; hdr.payload_size as usize];
-    stream.read_exact(&mut payload).await?;
+    let payload_size = validate_payload_size(&hdr)?;
+    let mut payload = vec![0u8; payload_size];
+    read_exact_with_timeout(stream, &mut payload).await?;
     Ok(Message::from_payload(&hdr, &payload)?)
+}
+
+async fn read_exact_with_timeout<R>(reader: &mut R, buf: &mut [u8]) -> anyhow::Result<()>
+where
+    R: AsyncRead + Unpin,
+{
+    match timeout(READ_TIMEOUT, reader.read_exact(buf)).await {
+        Ok(Ok(_)) => Ok(()),
+        Ok(Err(e)) => Err(e.into()),
+        Err(_) => Err(anyhow::anyhow!("read timed out after {:?}", READ_TIMEOUT)),
+    }
+}
+
+async fn write_all_with_timeout<W>(writer: &mut W, buf: &[u8]) -> anyhow::Result<()>
+where
+    W: AsyncWrite + Unpin,
+{
+    match timeout(WRITE_TIMEOUT, writer.write_all(buf)).await {
+        Ok(Ok(())) => Ok(()),
+        Ok(Err(e)) => Err(e.into()),
+        Err(_) => Err(anyhow::anyhow!("write timed out after {:?}", WRITE_TIMEOUT)),
+    }
 }

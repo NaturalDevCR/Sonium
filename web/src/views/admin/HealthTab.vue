@@ -142,6 +142,7 @@ async function setObservability(clientId: string, enabled: boolean) {
                 <th class="px-4 py-3 text-xs font-semibold text-slate-500 uppercase tracking-wider">Client</th>
                 <th class="px-4 py-3 text-xs font-semibold text-slate-500 uppercase tracking-wider">Diagnostics</th>
                 <th class="px-4 py-3 text-xs font-semibold text-slate-500 uppercase tracking-wider">Health</th>
+                <th class="px-4 py-3 text-xs font-semibold text-slate-500 uppercase tracking-wider">Callback</th>
                 <th class="px-4 py-3 text-xs font-semibold text-slate-500 uppercase tracking-wider">Buffer</th>
                 <th class="px-4 py-3 text-xs font-semibold text-slate-500 uppercase tracking-wider text-right">Jitter</th>
                 <th class="px-4 py-3 text-xs font-semibold text-slate-500 uppercase tracking-wider text-right">Offset</th>
@@ -193,6 +194,22 @@ async function setObservability(clientId: string, enabled: boolean) {
                   </div>
                 </td>
                 <td class="px-4 py-4">
+                  <div class="flex gap-4">
+                    <div class="flex flex-col">
+                      <span class="text-[10px] text-slate-500 uppercase">Late</span>
+                      <span class="text-sm" :class="client.health?.callback_starvation_count ? 'text-amber-400 font-bold' : 'text-slate-300'">
+                        {{ client.health?.callback_starvation_count ?? 0 }}
+                      </span>
+                    </div>
+                    <div class="flex flex-col">
+                      <span class="text-[10px] text-slate-500 uppercase">Xrun</span>
+                      <span class="text-sm" :class="client.health?.audio_callback_xrun_count ? 'text-red-400 font-bold' : 'text-slate-300'">
+                        {{ client.health?.audio_callback_xrun_count ?? 0 }}
+                      </span>
+                    </div>
+                  </div>
+                </td>
+                <td class="px-4 py-4">
                   <div class="flex items-center gap-2">
                     <div class="flex-1 h-1.5 bg-slate-800 rounded-full overflow-hidden max-w-[60px]">
                       <div 
@@ -215,7 +232,7 @@ async function setObservability(clientId: string, enabled: boolean) {
                 </td>
               </tr>
               <tr v-if="clients.length === 0">
-                <td colspan="6" class="px-4 py-8 text-center text-slate-500 text-sm italic">
+                <td colspan="7" class="px-4 py-8 text-center text-slate-500 text-sm italic">
                   No online clients available for diagnostics.
                 </td>
               </tr>

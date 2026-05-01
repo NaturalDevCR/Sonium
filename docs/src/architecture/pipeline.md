@@ -10,9 +10,9 @@ Source application  (Spotify, MPD, ffmpeg, …)
          │
          │  raw PCM: interleaved i16 LE, 48 kHz, stereo
          ▼
-    StreamReader         reads exactly one frame (20 ms) at a time
+    StreamReader         reads one configured chunk at a time
          │
-         │  Vec<i16>  960 frames × 2 channels = 1920 samples
+         │  Vec<i16>  default 20 ms: 960 frames × 2 channels = 1920 samples
          ▼
        Encoder           sonium-codec::Encoder trait
          │
@@ -49,7 +49,7 @@ Message::from_payload()
     │
     ├─ CodecHeader  ─► instantiate Decoder + Player
     │
-    ├─ ServerSettings ─► update volume / mute / buffer_ms
+    ├─ ServerSettings ─► update volume / mute / buffer_ms / latency
     │
     ├─ WireChunk
     │     │
@@ -67,18 +67,19 @@ Message::from_payload()
          │
          │  PcmChunk
          ▼
-    Player::write(samples)        CPAL → OS audio driver → DAC → speaker
+    Player::write(samples)        output prefill ring → CPAL → OS audio driver → DAC → speaker
 ```
 
 ## Frame sizes
 
 | Codec | Frame duration | Bytes per frame (stereo, 48 kHz) |
 |-------|---------------|----------------------------------|
-| Opus  | 20 ms         | ~250–3 200 (bitrate-dependent)  |
-| PCM   | 20 ms         | 3 840 (960 frames × 2 ch × 2 B) |
+| Opus  | 10, 20, 40, or 60 ms | bitrate-dependent |
+| PCM   | configurable, default 20 ms | 3 840 at 20 ms (960 frames × 2 ch × 2 B) |
 
-Opus compresses roughly 8–16× compared to PCM.  The default bitrate is 128
-kbps for stereo, giving frames of about 320 bytes.
+Opus compresses roughly 8–16× compared to PCM. `chunk_ms = 20` is the default.
+Smaller chunks reduce scheduling granularity, while larger chunks reduce packet
+rate and overhead.
 
 ## Timestamp precision
 
@@ -100,9 +101,10 @@ the difference between the server clock and the local clock.
 | Server → network | < 1 ms (LAN) |
 | Network jitter absorbed by buffer | `buffer_ms` (default 1 000 ms) |
 | Decoder | < 0.5 ms |
-| OS audio output queue | 5–20 ms |
-| **Total end-to-end** | **~1 010–1 025 ms** |
+| Client output prefill + OS audio queue | ~120–300 ms plus driver queue |
+| **Total end-to-end** | **roughly `buffer_ms` + output/device latency** |
 
-The large `buffer_ms` value is intentional — it guarantees sync even on
-congested networks.  Reduce it to `100–200 ms` for lower latency if your
-network is reliable.
+The large default `buffer_ms` value is intentional. Sonium still needs more
+real-world tuning before very low buffers are reliable. Recent clients keep a
+small explicit output prefill so the audio callback is less likely to underrun
+when the async network/decoder task jitters.

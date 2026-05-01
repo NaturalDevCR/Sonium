@@ -50,6 +50,11 @@ export interface HealthReport {
   buffer_depth_ms:  number;
   jitter_ms:        number;
   latency_ms:       number;
+  output_buffer_ms?: number;
+  jitter_buffer_chunks?: number;
+  target_playout_latency_ms?: number;
+  callback_starvation_count?: number;
+  audio_callback_xrun_count?: number;
 }
 
 export interface Client {
@@ -96,6 +101,9 @@ export interface Stream {
   format:       string;
   source:       string;
   buffer_ms:    number;
+  buffer_ms_overridden?: boolean;
+  chunk_ms:     number;
+  chunk_ms_overridden?: boolean;
   idle_timeout_ms?: number | null;
   silence_on_idle: boolean;
   status:       'playing' | 'idle' | 'error';

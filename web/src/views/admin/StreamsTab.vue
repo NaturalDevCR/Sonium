@@ -10,6 +10,7 @@ const store = useServerStore();
 const auth  = useAuthStore();
 
 onMounted(() => store.loadAll());
+onMounted(() => loadServerTuning());
 
 // ── Param system ──────────────────────────────────────────────────────────
 
@@ -322,6 +323,8 @@ const addName    = ref('');
 const addCodec   = ref('opus');
 const addBufMs   = ref(1000);
 const addChunkMs = ref(20);
+const addBufferGlobal = ref(true);
+const addChunkGlobal = ref(true);
 const addIdleEnabled = ref(false);
 const addIdleMs      = ref(3000);
 const addSilence     = ref(false);
@@ -333,6 +336,16 @@ const restartNotice = ref('');
 const saveBlocking = computed(() => saving.value);
 const isEditMode = ref(false);
 const editIdOriginal = ref('');
+const tuningInfo = ref('');
+const tuningSaving = ref(false);
+const autoBufferEnabled = ref(false);
+const globalBufferMs = ref(1000);
+const globalChunkMs = ref(20);
+const autoBufferMinMs = ref(400);
+const autoBufferMaxMs = ref(3000);
+const autoBufferStepUpMs = ref(120);
+const autoBufferStepDownMs = ref(40);
+const autoBufferCooldownMs = ref(8000);
 // Raw URI — stays in sync with computed, can be manually overridden.
 const rawUri         = ref('');
 const uriOverridden  = ref(false);
@@ -380,8 +393,8 @@ const tomlSnippet = computed(() => {
   if (addName.value.trim()) lines.push(`display_name = "${esc(addName.value.trim())}"`);
   lines.push(`source    = "${esc(effectiveSource.value)}"`);
   lines.push(`codec     = "${esc(addCodec.value)}"`);
-  lines.push(`buffer_ms = ${addBufMs.value}`);
-  if (addChunkMs.value !== 20) lines.push(`chunk_ms  = ${addChunkMs.value}`);
+  if (!addBufferGlobal.value) lines.push(`buffer_ms = ${addBufMs.value}`);
+  if (!addChunkGlobal.value) lines.push(`chunk_ms  = ${addChunkMs.value}`);
   if (addIdleEnabled.value) {
     lines.push(`idle_timeout_ms = ${addIdleMs.value}`);
     if (addSilence.value) lines.push(`silence_on_idle = true`);
@@ -511,6 +524,8 @@ function closeDialog() {
   addId.value   = '';
   addName.value = '';
   addInfo.value = '';
+  addBufferGlobal.value = true;
+  addChunkGlobal.value = true;
   addChunkMs.value = 20;
   addIdleEnabled.value = false;
   addSilence.value = false;
@@ -521,6 +536,68 @@ function closeDialog() {
   selectType(sourceTypes[0]);
 }
 
+async function loadServerTuning() {
+  tuningInfo.value = '';
+  try {
+    const raw = await api.configRaw().catch(() => '');
+    const cfg: any = raw ? parse(raw) : {};
+    const server = cfg.server || {};
+    globalBufferMs.value = Number(server.buffer_ms ?? 1000);
+    globalChunkMs.value = Number(server.chunk_ms ?? 20);
+    autoBufferEnabled.value = Boolean(server.auto_buffer ?? false);
+    autoBufferMinMs.value = Number(server.auto_buffer_min_ms ?? 400);
+    autoBufferMaxMs.value = Number(server.auto_buffer_max_ms ?? 3000);
+    autoBufferStepUpMs.value = Number(server.auto_buffer_step_up_ms ?? 120);
+    autoBufferStepDownMs.value = Number(server.auto_buffer_step_down_ms ?? 40);
+    autoBufferCooldownMs.value = Number(server.auto_buffer_cooldown_ms ?? 8000);
+  } catch (e) {
+    tuningInfo.value = `Could not read global tuning: ${String(e)}`;
+  }
+}
+
+async function saveServerTuning() {
+  tuningSaving.value = true;
+  tuningInfo.value = '';
+  try {
+    const raw = await api.configRaw().catch(() => '');
+    const cfg: any = raw ? parse(raw) : {};
+    if (!cfg.server) cfg.server = {};
+    cfg.server.buffer_ms = Math.max(100, Number(globalBufferMs.value || 1000));
+    cfg.server.chunk_ms = Math.max(10, Number(globalChunkMs.value || 20));
+    cfg.server.auto_buffer = !!autoBufferEnabled.value;
+    cfg.server.auto_buffer_min_ms = Math.max(100, Number(autoBufferMinMs.value || 400));
+    cfg.server.auto_buffer_max_ms = Math.max(
+      cfg.server.auto_buffer_min_ms,
+      Number(autoBufferMaxMs.value || 3000),
+    );
+    cfg.server.auto_buffer_step_up_ms = Math.max(20, Number(autoBufferStepUpMs.value || 120));
+    cfg.server.auto_buffer_step_down_ms = Math.max(10, Number(autoBufferStepDownMs.value || 40));
+    cfg.server.auto_buffer_cooldown_ms = Math.max(
+      1000,
+      Number(autoBufferCooldownMs.value || 8000),
+    );
+    await api.saveConfigRaw(stringify(cfg));
+    tuningInfo.value = 'Global tuning saved. Restart Sonium server to apply.';
+    await loadServerTuning();
+  } catch (e) {
+    tuningInfo.value = `Could not save global tuning: ${String(e)}`;
+  } finally {
+    tuningSaving.value = false;
+  }
+}
+
+function applyAggressiveLanPreset() {
+  globalBufferMs.value = 700;
+  globalChunkMs.value = 20;
+  autoBufferEnabled.value = true;
+  autoBufferMinMs.value = 500;
+  autoBufferMaxMs.value = 900;
+  autoBufferStepUpMs.value = 90;
+  autoBufferStepDownMs.value = 60;
+  autoBufferCooldownMs.value = 6000;
+  tuningInfo.value = 'Preset applied: Aggressive LAN (target 500–800 ms). Save global tuning to persist.';
+}
+
 function editStream(s: any) {
   isEditMode.value = true;
   editIdOriginal.value = s.id;
@@ -529,6 +606,8 @@ function editStream(s: any) {
   addCodec.value = s.codec || 'opus';
   addBufMs.value = s.buffer_ms || 1000;
   addChunkMs.value = s.chunk_ms || 20;
+  addBufferGlobal.value = !s.buffer_ms_overridden;
+  addChunkGlobal.value = !s.chunk_ms_overridden;
   addIdleEnabled.value = !!s.idle_timeout_ms;
   addIdleMs.value = s.idle_timeout_ms || 3000;
   addSilence.value = !!s.silence_on_idle;
@@ -552,9 +631,9 @@ async function submitAdd() {
       id: addId.value.trim(),
       source: effectiveSource.value,
       codec: addCodec.value,
-      buffer_ms: addBufMs.value,
     };
-    if (addChunkMs.value !== 20) streamData.chunk_ms = addChunkMs.value;
+    if (!addBufferGlobal.value) streamData.buffer_ms = addBufMs.value;
+    if (!addChunkGlobal.value) streamData.chunk_ms = addChunkMs.value;
     if (addName.value.trim()) streamData.display_name = addName.value.trim();
     if (addIdleEnabled.value) {
       streamData.idle_timeout_ms = addIdleMs.value;
@@ -637,6 +716,87 @@ async function restartServer() {
     </Transition>
 
     <!-- Stream list -->
+    <div v-if="auth.isAdmin" class="card p-5 space-y-4">
+      <div>
+        <h2 class="font-semibold" style="font-size:14px;color:var(--text-primary);">Global latency tuning</h2>
+        <p style="font-size:12px;color:var(--text-muted);margin-top:4px;">
+          Stream-level <code>buffer_ms</code> and <code>chunk_ms</code> overrides always take priority over these global defaults.
+        </p>
+        <div class="mt-3">
+          <button class="btn-ghost" @click="applyAggressiveLanPreset">
+            <span class="mdi mdi-rocket-launch-outline"></span>
+            Preset: Aggressive LAN (500–800 ms)
+          </button>
+        </div>
+      </div>
+
+      <div class="grid grid-cols-2 gap-3">
+        <div>
+          <label class="param-label block mb-1.5">Global buffer (ms)</label>
+          <input v-model.number="globalBufferMs" type="number" min="100" max="10000" step="100" class="field field-mono" />
+        </div>
+        <div>
+          <label class="param-label block mb-1.5">Global chunk (ms)</label>
+          <select v-model.number="globalChunkMs" class="field field-mono">
+            <option :value="10">10</option>
+            <option :value="20">20</option>
+            <option :value="40">40</option>
+            <option :value="60">60</option>
+          </select>
+        </div>
+      </div>
+
+      <div class="idle-section">
+        <label class="boolean-row">
+          <span class="toggle-wrap">
+            <input v-model="autoBufferEnabled" type="checkbox" class="sr-only" />
+            <span class="toggle" :class="autoBufferEnabled ? 'toggle-on' : ''"></span>
+          </span>
+          <span>
+            <span class="param-label">Automatic buffer tuning</span>
+            <span class="param-desc block">Adjusts buffer per client from health telemetry (underruns, stale drops, jitter)</span>
+          </span>
+        </label>
+
+        <div v-if="autoBufferEnabled" class="idle-extra">
+          <div class="grid grid-cols-3 gap-3">
+            <div>
+              <label class="param-label block mb-1.5">Min (ms)</label>
+              <input v-model.number="autoBufferMinMs" type="number" min="100" max="10000" step="50" class="field field-mono" />
+            </div>
+            <div>
+              <label class="param-label block mb-1.5">Max (ms)</label>
+              <input v-model.number="autoBufferMaxMs" type="number" min="100" max="10000" step="50" class="field field-mono" />
+            </div>
+            <div>
+              <label class="param-label block mb-1.5">Cooldown (ms)</label>
+              <input v-model.number="autoBufferCooldownMs" type="number" min="1000" max="60000" step="500" class="field field-mono" />
+            </div>
+          </div>
+          <div class="grid grid-cols-2 gap-3 mt-3">
+            <div>
+              <label class="param-label block mb-1.5">Step up (ms)</label>
+              <input v-model.number="autoBufferStepUpMs" type="number" min="20" max="1000" step="10" class="field field-mono" />
+            </div>
+            <div>
+              <label class="param-label block mb-1.5">Step down (ms)</label>
+              <input v-model.number="autoBufferStepDownMs" type="number" min="10" max="1000" step="10" class="field field-mono" />
+            </div>
+          </div>
+        </div>
+      </div>
+
+      <div class="flex items-center justify-between">
+        <p v-if="tuningInfo" style="font-size:12px;" :style="{ color: tuningInfo.startsWith('Could not') ? 'var(--red)' : 'var(--text-muted)' }">
+          {{ tuningInfo }}
+        </p>
+        <button class="btn-primary ml-auto" :disabled="tuningSaving" @click="saveServerTuning">
+          <span class="mdi" :class="tuningSaving ? 'mdi-loading spin' : 'mdi-content-save-outline'"></span>
+          {{ tuningSaving ? 'Saving…' : 'Save global tuning' }}
+        </button>
+      </div>
+    </div>
+
     <div class="card">
       <div v-if="store.streams.length === 0"
            class="px-5 py-12 text-center" style="color:var(--text-muted);">
@@ -905,16 +1065,25 @@ async function restartServer() {
                         <label class="param-label block mb-1.5">Buffer (ms)</label>
                         <input v-model.number="addBufMs" type="number"
                                min="100" max="10000" step="100"
-                               class="field field-mono" />
+                               class="field field-mono"
+                               :disabled="addBufferGlobal" />
+                        <label class="mini-check mt-2">
+                          <input v-model="addBufferGlobal" type="checkbox" />
+                          <span>Use global</span>
+                        </label>
                       </div>
                       <div>
                         <label class="param-label block mb-1.5">Chunk (ms)</label>
-                        <select v-model.number="addChunkMs" class="field field-mono">
+                        <select v-model.number="addChunkMs" class="field field-mono" :disabled="addChunkGlobal">
                           <option :value="10">10</option>
                           <option :value="20">20</option>
                           <option :value="40">40</option>
                           <option :value="60">60</option>
                         </select>
+                        <label class="mini-check mt-2">
+                          <input v-model="addChunkGlobal" type="checkbox" />
+                          <span>Use global</span>
+                        </label>
                       </div>
                     </div>
 
@@ -1229,6 +1398,19 @@ async function restartServer() {
   font-size: 11px; color: var(--text-muted); margin-top: 1px;
 }
 .req { color: var(--accent); margin-left: 2px; }
+
+.mini-check {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 11px;
+  color: var(--text-muted);
+}
+.mini-check input { accent-color: var(--accent); }
+:deep(.field:disabled), .field:disabled {
+  opacity: 0.55;
+  cursor: not-allowed;
+}
 
 .param-two-col {
   display: grid;

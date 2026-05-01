@@ -11,7 +11,8 @@ Sonium ships as two binaries:
 
 The Linux installer downloads the right release package, writes
 `/etc/sonium/sonium.toml`, creates `/tmp/sonium.fifo`, and optionally installs a
-systemd service.
+systemd service. It also installs a narrowly scoped sudoers rule so the web UI
+can restart `sonium-server.service` after admin-approved config changes.
 
 ```bash
 curl -fsSL https://github.com/NaturalDevCR/Sonium/releases/latest/download/install.sh | sudo bash
@@ -24,6 +25,7 @@ sudo bash install.sh --version v0.1.0
 sudo bash install.sh --prefix /opt/sonium
 sudo bash install.sh --no-service
 sudo bash install.sh --server-only
+sudo bash install.sh --client-only
 ```
 
 After installation:
@@ -32,6 +34,10 @@ After installation:
 systemctl status sonium-server
 journalctl -u sonium-server -f
 ```
+
+If the admin UI says restart is not permitted, the service was likely installed
+before restart permissions existed or was written by hand. Re-run the installer
+or add an equivalent sudoers rule for the Sonium service user.
 
 Feed audio:
 
@@ -45,9 +51,17 @@ Run a client:
 sonium-client --discover
 ```
 
+## Desktop Agent
+
+For macOS and Windows playback machines, the recommended client experience is
+the Sonium Desktop Agent from the
+[GitHub Releases](https://github.com/NaturalDevCR/Sonium/releases) page. It runs
+in the tray/menu bar and lets you configure client instances, output devices,
+latency, and background startup without editing config files.
+
 ## GitHub Release Packages
 
-Download a package from the
+Download CLI packages from the
 [GitHub Releases](https://github.com/NaturalDevCR/Sonium/releases) page.
 
 | Platform | Package |

@@ -3,7 +3,7 @@ use std::sync::atomic::{AtomicU32, AtomicUsize, Ordering};
 use std::sync::mpsc::{self, Receiver, SyncSender};
 use std::sync::{Arc, Mutex};
 use std::thread;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
 use tracing::{debug, info, warn};
@@ -27,6 +27,16 @@ use sonium_common::{SampleFormat, SoniumError};
 struct HealthState {
     underrun_count: AtomicU32,
     overrun_count: AtomicU32,
+    callback_starvation_count: AtomicU32,
+    audio_callback_xrun_count: AtomicU32,
+}
+
+#[derive(Debug, Clone, Copy, Default)]
+pub struct PlayerHealth {
+    pub underrun_count: u32,
+    pub overrun_count: u32,
+    pub callback_starvation_count: u32,
+    pub audio_callback_xrun_count: u32,
 }
 
 pub struct Player {
@@ -125,10 +135,19 @@ impl Player {
     }
 
     /// Return and reset health metrics.
-    pub fn take_health(&self) -> (u32, u32) {
-        let underruns = self.health.underrun_count.swap(0, Ordering::Relaxed);
-        let overruns = self.health.overrun_count.swap(0, Ordering::Relaxed);
-        (underruns, overruns)
+    pub fn take_health(&self) -> PlayerHealth {
+        PlayerHealth {
+            underrun_count: self.health.underrun_count.swap(0, Ordering::Relaxed),
+            overrun_count: self.health.overrun_count.swap(0, Ordering::Relaxed),
+            callback_starvation_count: self
+                .health
+                .callback_starvation_count
+                .swap(0, Ordering::Relaxed),
+            audio_callback_xrun_count: self
+                .health
+                .audio_callback_xrun_count
+                .swap(0, Ordering::Relaxed),
+        }
     }
 }
 
@@ -264,8 +283,6 @@ fn try_open_stream(
 
     // ~2 ms fade at the stream's sample rate (per channel).
     let fade_samples = (fmt.rate as usize * fmt.channels as usize * 2) / 1000;
-    let err_fn = |err| warn!("CPAL stream error: {err}");
-
     let stream = build_stream_for_format(
         &device,
         supported.sample_format(),
@@ -273,7 +290,6 @@ fn try_open_stream(
         ring.clone(),
         health.clone(),
         fade_samples,
-        err_fn,
     )
     .or_else(|e| {
         warn!(
@@ -287,7 +303,6 @@ fn try_open_stream(
             ring.clone(),
             health.clone(),
             fade_samples,
-            err_fn,
         )
     })
     .map_err(|e| format!("build_output_stream: {e}"))?;
@@ -303,75 +318,142 @@ fn build_stream_for_format(
     ring: Arc<Mutex<VecDeque<i16>>>,
     health: Arc<HealthState>,
     fade_samples: usize,
-    err_fn: impl Fn(cpal::StreamError) + Send + 'static + Copy,
 ) -> Result<cpal::Stream, cpal::BuildStreamError> {
     match sample_format {
         cpal::SampleFormat::I16 => {
             let mut fade = FadeState::new(fade_samples);
+            let mut timing = CallbackTiming::new(config.channels, config.sample_rate.0);
+            let data_health = health.clone();
+            let err_health = health.clone();
             device.build_output_stream(
                 config,
                 move |data: &mut [i16], _: &cpal::OutputCallbackInfo| {
+                    timing.observe(data.len(), &data_health);
                     let mut ring = ring.lock().unwrap();
                     for sample in data.iter_mut() {
                         if let Some(s) = ring.pop_front() {
                             *sample = fade.feed(s);
                         } else {
                             if fade.phase == FadePhase::Playing {
-                                health.underrun_count.fetch_add(1, Ordering::Relaxed);
+                                data_health.underrun_count.fetch_add(1, Ordering::Relaxed);
                             }
                             *sample = fade.drain();
                         }
                     }
                 },
-                err_fn,
+                move |err| {
+                    err_health
+                        .audio_callback_xrun_count
+                        .fetch_add(1, Ordering::Relaxed);
+                    warn!("CPAL stream error: {err}");
+                },
                 None,
             )
         }
         cpal::SampleFormat::U16 => {
             let mut fade = FadeState::new(fade_samples);
+            let mut timing = CallbackTiming::new(config.channels, config.sample_rate.0);
+            let data_health = health.clone();
+            let err_health = health.clone();
             device.build_output_stream(
                 config,
                 move |data: &mut [u16], _: &cpal::OutputCallbackInfo| {
+                    timing.observe(data.len(), &data_health);
                     let mut ring = ring.lock().unwrap();
                     for sample in data.iter_mut() {
                         let s16 = if let Some(s) = ring.pop_front() {
                             fade.feed(s)
                         } else {
                             if fade.phase == FadePhase::Playing {
-                                health.underrun_count.fetch_add(1, Ordering::Relaxed);
+                                data_health.underrun_count.fetch_add(1, Ordering::Relaxed);
                             }
                             fade.drain()
                         };
                         *sample = (s16 as i32 + 32768) as u16;
                     }
                 },
-                err_fn,
+                move |err| {
+                    err_health
+                        .audio_callback_xrun_count
+                        .fetch_add(1, Ordering::Relaxed);
+                    warn!("CPAL stream error: {err}");
+                },
                 None,
             )
         }
         cpal::SampleFormat::F32 => {
             let mut fade = FadeState::new(fade_samples);
+            let mut timing = CallbackTiming::new(config.channels, config.sample_rate.0);
+            let data_health = health.clone();
+            let err_health = health.clone();
             device.build_output_stream(
                 config,
                 move |data: &mut [f32], _: &cpal::OutputCallbackInfo| {
+                    timing.observe(data.len(), &data_health);
                     let mut ring = ring.lock().unwrap();
                     for sample in data.iter_mut() {
                         let s16 = if let Some(s) = ring.pop_front() {
                             fade.feed(s)
                         } else {
                             if fade.phase == FadePhase::Playing {
-                                health.underrun_count.fetch_add(1, Ordering::Relaxed);
+                                data_health.underrun_count.fetch_add(1, Ordering::Relaxed);
                             }
                             fade.drain()
                         };
                         *sample = s16 as f32 / 32768.0;
                     }
                 },
-                err_fn,
+                move |err| {
+                    err_health
+                        .audio_callback_xrun_count
+                        .fetch_add(1, Ordering::Relaxed);
+                    warn!("CPAL stream error: {err}");
+                },
                 None,
             )
         }
         _ => Err(cpal::BuildStreamError::StreamConfigNotSupported),
+    }
+}
+
+struct CallbackTiming {
+    channels: usize,
+    sample_rate: u32,
+    last_started: Option<Instant>,
+}
+
+impl CallbackTiming {
+    fn new(channels: cpal::ChannelCount, sample_rate: u32) -> Self {
+        Self {
+            channels: usize::from(channels).max(1),
+            sample_rate: sample_rate.max(1),
+            last_started: None,
+        }
+    }
+
+    fn observe(&mut self, sample_count: usize, health: &HealthState) {
+        let now = Instant::now();
+        if let Some(last_started) = self.last_started {
+            let elapsed = now.saturating_duration_since(last_started);
+            let expected = self.expected_duration(sample_count);
+            let threshold = expected
+                .checked_mul(3)
+                .unwrap_or_else(|| Duration::from_secs(1))
+                .max(Duration::from_millis(50));
+
+            if elapsed > threshold {
+                health
+                    .callback_starvation_count
+                    .fetch_add(1, Ordering::Relaxed);
+            }
+        }
+        self.last_started = Some(now);
+    }
+
+    fn expected_duration(&self, sample_count: usize) -> Duration {
+        let frames = sample_count / self.channels;
+        let micros = ((frames as u128) * 1_000_000u128 / u128::from(self.sample_rate)).max(1);
+        Duration::from_micros(micros.min(u128::from(u64::MAX)) as u64)
     }
 }
 

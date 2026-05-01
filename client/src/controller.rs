@@ -1,12 +1,14 @@
+use socket2::{SockRef, TcpKeepalive};
 use std::time::Duration;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::tcp::{OwnedReadHalf, OwnedWriteHalf};
 use tokio::net::TcpStream;
+use tokio::time::timeout;
 use tracing::{debug, info, warn};
 
 use sonium_common::config::ClientConfig;
 use sonium_protocol::{
-    header::HEADER_SIZE,
+    header::{validate_payload_size, HEADER_SIZE},
     messages::{EqBand, HealthReport, Hello, Message, TimeMsg},
     MessageHeader, MessageType,
 };
@@ -23,6 +25,9 @@ enum IncomingFrame {
     Message(MessageHeader, Vec<u8>),
     Closed(String),
 }
+
+const READ_TIMEOUT: Duration = Duration::from_secs(20);
+const WRITE_TIMEOUT: Duration = Duration::from_secs(5);
 
 #[derive(Debug, Clone, serde::Serialize)]
 pub enum ConnectionStatus {
@@ -56,12 +61,21 @@ pub async fn run_with_status(
             .as_ref()
             .map(|tx| tx.send(ConnectionStatus::Connecting));
 
-        match connect_and_run(&server_addr, &cfg, health_tx.clone(), status_tx.clone()).await {
+        match connect_and_run(
+            &server_addr,
+            &cfg,
+            health_tx.clone(),
+            status_tx.clone(),
+            &mut backoff,
+        )
+        .await
+        {
             Ok(()) => {
                 let _ = status_tx
                     .as_ref()
                     .map(|tx| tx.send(ConnectionStatus::Disconnected));
                 info!("Disconnected cleanly");
+                backoff = Duration::from_millis(500);
             }
             Err(e) => {
                 let _ = status_tx
@@ -83,9 +97,12 @@ async fn connect_and_run(
     cfg: &ClientConfig,
     health_tx: Option<mpsc::UnboundedSender<HealthReport>>,
     status_tx: Option<mpsc::UnboundedSender<ConnectionStatus>>,
+    backoff: &mut Duration,
 ) -> anyhow::Result<()> {
     let stream = TcpStream::connect(addr).await?;
     stream.set_nodelay(true)?;
+    configure_tcp_stream(&stream);
+    *backoff = Duration::from_millis(500);
     let (reader, mut writer) = stream.into_split();
     let _ = status_tx
         .as_ref()
@@ -104,7 +121,7 @@ async fn connect_and_run(
     let mut hello_msg = Hello::new(display_name, &client_id);
     hello_msg.hostname = display_name.to_owned();
     let hello = Message::Hello(hello_msg);
-    writer.write_all(&hello.encode()).await?;
+    write_all_with_timeout(&mut writer, &hello.encode()).await?;
     info!("Hello sent");
 
     // 2. Wait for CodecHeader, then ServerSettings
@@ -168,17 +185,28 @@ async fn connect_and_run(
                 let report_msg = if let Some(buf) = sync_buf.as_mut() {
                     let now_server = time_provider.to_server_time(now_us());
                     let mut report = buf.get_report(now_server);
-                    let (u, o) = player.as_ref().map(|p| p.take_health()).unwrap_or((0, 0));
-                    report.underrun_count += u;
+                    let player_health = player.as_ref().map(|p| p.take_health()).unwrap_or_default();
+                    report.underrun_count += player_health.underrun_count;
 
                     let jitter = (buf.jitter_us() / 1000) as u32;
+                    let output_buffer_ms = player
+                        .as_ref()
+                        .map(|p| (p.buffered_us().max(0) / 1000) as u32)
+                        .unwrap_or(0);
+                    let target_playout_latency_ms =
+                        (server_buffer_ms + cfg.latency_ms + server_latency_ms).max(0) as u32;
                     sonium_protocol::messages::HealthReport::new(
                         report.underrun_count,
-                        o, // overrun_count from player
+                        player_health.overrun_count,
                         report.stale_drop_count,
                         report.buffer_depth_ms as u32,
                         jitter,
                         (time_provider.offset_us() / 1000) as i32,
+                    )
+                    .with_queue_metrics(output_buffer_ms, buf.len() as u32, target_playout_latency_ms)
+                    .with_callback_metrics(
+                        player_health.callback_starvation_count,
+                        player_health.audio_callback_xrun_count,
                     )
                 } else {
                     // Send idle report to keep status "Connected"
@@ -193,7 +221,7 @@ async fn connect_and_run(
                 }
 
                 let msg = Message::HealthReport(report_msg).encode();
-                if let Err(e) = writer.write_all(&msg).await {
+                if let Err(e) = write_all_with_timeout(&mut writer, &msg).await {
                     warn!("Failed to send health report: {e}");
                     break Ok(());
                 }
@@ -313,6 +341,26 @@ fn output_prefill_us(total_buffer_ms: i32) -> i64 {
     ms as i64 * 1000
 }
 
+fn configure_tcp_stream(stream: &TcpStream) {
+    let sock = SockRef::from(stream);
+    if let Err(e) = sock.set_keepalive(true) {
+        warn!("Could not enable TCP keepalive: {e}");
+    }
+
+    // Expedited Forwarding DSCP (46) shifted into the IPv4 TOS byte. Routers
+    // may ignore it, but honoring networks can prioritize latency-sensitive audio.
+    if let Err(e) = sock.set_tos_v4(46 << 2) {
+        warn!("Could not set TCP DSCP/TOS priority: {e}");
+    }
+
+    let keepalive = TcpKeepalive::new()
+        .with_time(Duration::from_secs(30))
+        .with_interval(Duration::from_secs(10));
+    if let Err(e) = sock.set_tcp_keepalive(&keepalive) {
+        warn!("Could not configure TCP keepalive: {e}");
+    }
+}
+
 async fn send_time_request(
     stream: &mut OwnedWriteHalf,
     sync_seq: &mut u16,
@@ -323,15 +371,31 @@ async fn send_time_request(
     hdr.id = *sync_seq;
     let sent_us = hdr.sent.to_micros();
     let msg = Message::Time(TimeMsg::zero()).encode_with_header(hdr);
-    stream.write_all(&msg).await?;
+    write_all_with_timeout(stream, &msg).await?;
     *pending_time = Some((*sync_seq, sent_us));
     Ok(())
+}
+
+async fn read_exact_with_timeout(reader: &mut OwnedReadHalf, buf: &mut [u8]) -> anyhow::Result<()> {
+    match timeout(READ_TIMEOUT, reader.read_exact(buf)).await {
+        Ok(Ok(_)) => Ok(()),
+        Ok(Err(e)) => Err(e.into()),
+        Err(_) => Err(anyhow::anyhow!("read timed out after {:?}", READ_TIMEOUT)),
+    }
+}
+
+async fn write_all_with_timeout(writer: &mut OwnedWriteHalf, buf: &[u8]) -> anyhow::Result<()> {
+    match timeout(WRITE_TIMEOUT, writer.write_all(buf)).await {
+        Ok(Ok(())) => Ok(()),
+        Ok(Err(e)) => Err(e.into()),
+        Err(_) => Err(anyhow::anyhow!("write timed out after {:?}", WRITE_TIMEOUT)),
+    }
 }
 
 async fn socket_reader(mut reader: OwnedReadHalf, tx: mpsc::UnboundedSender<IncomingFrame>) {
     loop {
         let mut hdr_buf = [0u8; HEADER_SIZE];
-        if let Err(e) = reader.read_exact(&mut hdr_buf).await {
+        if let Err(e) = read_exact_with_timeout(&mut reader, &mut hdr_buf).await {
             let _ = tx.send(IncomingFrame::Closed(e.to_string()));
             break;
         }
@@ -344,8 +408,16 @@ async fn socket_reader(mut reader: OwnedReadHalf, tx: mpsc::UnboundedSender<Inco
             }
         };
 
-        let mut payload = vec![0u8; hdr.payload_size as usize];
-        if let Err(e) = reader.read_exact(&mut payload).await {
+        let payload_size = match validate_payload_size(&hdr) {
+            Ok(size) => size,
+            Err(e) => {
+                let _ = tx.send(IncomingFrame::Closed(e.to_string()));
+                break;
+            }
+        };
+
+        let mut payload = vec![0u8; payload_size];
+        if let Err(e) = read_exact_with_timeout(&mut reader, &mut payload).await {
             let _ = tx.send(IncomingFrame::Closed(format!("error reading payload: {e}")));
             break;
         }

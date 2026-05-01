@@ -1,7 +1,8 @@
 # Web UI
 
-Sonium ships a built-in admin UI served directly from the control port (`1711`).
-No separate process, no separate install — open a browser and you're done.
+Sonium ships a built-in web UI served directly from the control port (`1711`).
+No separate process, no separate install. The root view is the day-to-day
+control surface; `/admin` is the administrator dashboard.
 
 ## Technology stack
 
@@ -22,16 +23,17 @@ web/
   tsconfig.json
   src/
     main.ts           Mount Vue app, bootstrap store
-    App.vue           Root component (dashboard layout)
+    App.vue           Root router shell
     lib/
       api.ts          REST client + WebSocket + TypeScript types
     stores/
       server.ts       Pinia store — mirrors ServerState from the Rust backend
     components/
-      ClientCard.vue      Per-client: volume slider, mute, group picker
-      GroupCard.vue       Per-group: stream picker, client list, delete
       StreamBadge.vue     Colored status pill
-      NewGroupModal.vue   Create-group dialog
+    views/
+      ControlView.vue     Main control surface
+      AdminView.vue       Admin shell
+      admin/              Dashboard, streams, groups, clients, health, system, config, users
 ```
 
 ## State architecture
@@ -85,11 +87,17 @@ served as the SPA `index.html` (catch-all SPA routing).
 
 ## Features
 
-- **Dashboard** — live count of connected clients, groups, streams, server uptime
-- **Client cards** — volume slider (debounced 150 ms), mute toggle, group picker,
-  latency display; cards fade when client disconnects
-- **Group cards** — stream picker, connected client chips, delete button
-  (the built-in `default` group cannot be deleted)
-- **Streams panel** — codec, format, and live status for every configured stream
-- **New Group modal** — create a named group and assign a stream in one step
+- **Control view** — group cards, stream selector, client volume/mute controls,
+  group master volume, and role-aware controls.
+- **Admin dashboard** — live count of connected clients, groups, streams, and uptime.
+- **Streams tab** — source templates, URI builder, meta-stream chains, buffer and
+  `chunk_ms` controls, plus a restart prompt after saving config changes.
+- **Health tab** — client health/observability and filterable server logs.
+- **System tab** — OS/audio stack info, dependency checks, package actions,
+  time-window log viewer, and supervised restart request.
+- **Config tab** — raw TOML editor with validation and restart button.
+- **Users tab** — create/edit/delete users and roles.
 - **Dark theme** — CSS custom properties, no external CSS framework
+
+Admins land on `/admin` after login. Non-admin users land on the control view
+unless they were following a specific redirect.

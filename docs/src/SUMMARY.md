@@ -18,6 +18,8 @@
 - [Workspace Layout](./architecture/workspace.md)
 - [Clock Synchronization](./architecture/sync.md)
 - [Audio Pipeline](./architecture/pipeline.md)
+- [Real-Time Transport Migration Plan](./architecture/transport-migration-plan.md)
+- [TCP Baseline Profiles](./architecture/tcp-baseline-profiles.md)
 - [Web UI](./architecture/web-ui.md)
 
 ---

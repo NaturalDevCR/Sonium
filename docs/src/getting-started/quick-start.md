@@ -48,6 +48,7 @@ display_name = "Main"
 source = "/tmp/sonium.fifo"
 codec = "opus"
 buffer_ms = 1000
+chunk_ms = 20
 silence_on_idle = true
 
 [log]
@@ -105,6 +106,8 @@ In the web UI, you should see:
 - the default group
 - stream status and level activity when audio is flowing
 - controls for volume, mute, latency, group assignment, and EQ
+- admin tools for stream config, log filtering, and restart prompts if you log in
+  as an admin
 
 If the client connects but you hear nothing, check the local audio device:
 
@@ -113,3 +116,11 @@ sonium-client --discover --device "USB"
 ```
 
 The device value is a case-insensitive substring of the output device name.
+
+## Stability note
+
+For now, keep `buffer_ms = 1000` while validating a setup. Lower values are a
+goal, but Sonium can still stutter on some client devices or networks when the
+buffer is reduced. If you experiment with lower latency, try `chunk_ms = 10` or
+`20` first and watch the admin observability counters for underruns and stale
+drops.

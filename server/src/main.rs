@@ -7,8 +7,9 @@ mod streamreader;
 
 use anyhow::Context;
 use clap::Parser;
+use socket2::{SockRef, TcpKeepalive};
 use std::{path::PathBuf, sync::Arc};
-use tokio::net::TcpListener;
+use tokio::net::{TcpListener, TcpStream};
 use tokio::task::JoinHandle;
 use tokio_util::sync::CancellationToken;
 use tracing::{info, warn};
@@ -176,8 +177,19 @@ async fn main() -> anyhow::Result<()> {
 
     // ── One stream reader per configured source ───────────────────────────
     for stream_cfg in &cfg.streams {
+        let buffer_ms_overridden = stream_cfg.buffer_ms.is_some();
+        let chunk_ms_overridden = stream_cfg.chunk_ms.is_some();
+        let effective_buffer_ms = cfg.effective_buffer_ms(stream_cfg);
+        let effective_chunk_ms = cfg.effective_chunk_ms(stream_cfg);
+        let mut runtime_stream = stream_cfg.clone();
+        runtime_stream.buffer_ms = Some(effective_buffer_ms);
+        runtime_stream.chunk_ms = Some(effective_chunk_ms);
         let (cancel, handle) = spawn_stream(
-            stream_cfg.clone(),
+            runtime_stream,
+            effective_buffer_ms,
+            buffer_ms_overridden,
+            effective_chunk_ms,
+            chunk_ms_overridden,
             registry.clone(),
             state.clone(),
             shutdown.clone(),
@@ -260,6 +272,7 @@ async fn main() -> anyhow::Result<()> {
             accept = listener.accept() => {
                 let (stream, peer) = accept?;
                 let _ = stream.set_nodelay(true);
+                configure_tcp_stream(&stream);
                 info!(%peer, "New client connected");
                 let registry = registry.clone();
                 let session_cfg = cfg.clone();
@@ -294,15 +307,39 @@ async fn main() -> anyhow::Result<()> {
     Ok(())
 }
 
+fn configure_tcp_stream(stream: &TcpStream) {
+    let sock = SockRef::from(stream);
+    if let Err(e) = sock.set_keepalive(true) {
+        warn!("Could not enable TCP keepalive: {e}");
+    }
+
+    // Expedited Forwarding DSCP (46) shifted into the IPv4 TOS byte. Routers
+    // may ignore it, but honoring networks can prioritize latency-sensitive audio.
+    if let Err(e) = sock.set_tos_v4(46 << 2) {
+        warn!("Could not set TCP DSCP/TOS priority: {e}");
+    }
+
+    let keepalive = TcpKeepalive::new()
+        .with_time(Duration::from_secs(30))
+        .with_interval(Duration::from_secs(10));
+    if let Err(e) = sock.set_tcp_keepalive(&keepalive) {
+        warn!("Could not configure TCP keepalive: {e}");
+    }
+}
+
 fn spawn_stream(
     stream_cfg: StreamSource,
+    effective_buffer_ms: u32,
+    buffer_ms_overridden: bool,
+    effective_chunk_ms: u32,
+    chunk_ms_overridden: bool,
     registry: Arc<BroadcasterRegistry>,
     state: Arc<ServerState>,
     shutdown: CancellationToken,
 ) -> (CancellationToken, JoinHandle<()>) {
     let bc = Arc::new(broadcaster::Broadcaster::new(
         &stream_cfg.id,
-        stream_cfg.buffer_ms,
+        effective_buffer_ms,
     ));
     register(&registry, bc.clone());
 
@@ -312,7 +349,10 @@ fn spawn_stream(
         &stream_cfg.codec,
         format!("{}", stream_cfg.sample_format),
         &stream_cfg.source,
-        stream_cfg.buffer_ms,
+        effective_buffer_ms,
+        buffer_ms_overridden,
+        effective_chunk_ms,
+        chunk_ms_overridden,
         stream_cfg.idle_timeout_ms,
         stream_cfg.silence_on_idle,
     );

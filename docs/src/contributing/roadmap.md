@@ -1,171 +1,137 @@
 # Roadmap
 
-Sonium is developed in phases, each delivering independent value.
+Sonium is moving quickly, but it is still an experimental project. This roadmap
+is intentionally realistic: it lists what works, what is still shaky, and what
+needs to be solved before Sonium can be recommended for production use.
 
----
+::: danger Not production-ready
+Do not deploy Sonium where dropouts, restarts, or configuration mistakes would
+matter. It is currently best suited for local testing, development, and
+adventurous home-lab experiments.
+:::
 
-## Completed
+## Working today
 
-### Fase 0 — Foundation ✅
+- Rust workspace with separate protocol, codec, sync, control, server, client,
+  and desktop-agent packages.
+- Binary protocol with typed messages, unit tests, and fuzzing groundwork.
+- Opus, FLAC, and PCM stream support.
+- Server stream readers for stdin/FIFO/file paths, TCP, `pipe://` external
+  processes, and meta streams.
+- External `pipe://` recovery with restart backoff when a child process closes.
+- Groups, per-client volume/mute/latency, EQ, and live stream switching.
+- Vue web UI with control view, admin dashboard, stream editor, raw config
+  editor, users, dependency checks, logs, and restart prompts.
+- Authentication with Argon2 users, JWT sessions, and admin/operator/viewer
+  roles.
+- mDNS discovery, optional Snapcast mDNS advertising, and subnet scanning.
+- Linux installer, systemd service, restart sudoers rule, Docker server flow,
+  GitHub release packages, and macOS/Windows Desktop Agent builds.
+- Client playback through CPAL with dedicated audio thread, output ring buffer,
+  underrun crossfade, hotplug retry, and output prefill.
+- Local-time structured logs and UI log filtering by recent time window.
 
-- Cargo workspace with all crates (`sonium-protocol`, `sonium-codec`, `sonium-sync`, `sonium-common`, `sonium-control`, `sonium-server`, `sonium-client`)
-- Protocol crate: compact binary wire format (little-endian), all message types, full round-trip unit tests
-- Codec crate: Opus encoder/decoder + PCM passthrough
-- Sync crate: NTP-like clock offset estimation with 200-sample median filter + jitter buffer
-- Server skeleton: TCP listener, broadcaster, session handler, stream reader
-- Client skeleton: auto-reconnect, Hello, codec detection, clock sync, player stub
-- Documentation site
+## Known unresolved challenges
 
-### Fase 1 — Protocol hardening ✅
+### Low-latency playback reliability
 
-- Fuzz testing with `cargo-fuzz` — 3 targets: `fuzz_message_parser`, `fuzz_wire_chunk`, `fuzz_codec_header`
-- Seed corpus of 13 hand-crafted binary payloads
+Sonium can still stutter at lower `buffer_ms` values on some setups. Recent work
+added client output prefill and manual `chunk_ms`, but the system still needs
+more telemetry and real-world tuning before it behaves as confidently as mature
+multiroom systems at 500-800 ms buffers.
 
-### Fase 2 — Clock sync hardening ✅
+### Automatic buffer tuning
 
-- Thread-priority tuning (dedicated OS thread + `thread-priority` elevation)
-- `TimeSource` trait for PTPv2 groundwork (`NtpTimeSource` default implementation)
-- Two-process loopback test rig (`tests/loopback/`)
+Today users tune `buffer_ms`, client latency, and `chunk_ms` manually. A better
+experience would observe jitter, underruns, stale drops, device callback timing,
+and network behavior, then recommend or automatically adjust safe values while
+still allowing manual override.
 
-### Fase 3 — Server MVP ✅
+### Clock sync validation
 
-- Stream reader: `stdin`, named FIFO, external process (`pipe://`)
-- PCM + Opus + FLAC encoders; FLAC decoder — lossless round-trip verified
-- Multiple streams per server (one reader + broadcaster per `[[streams]]` entry)
-- Graceful shutdown (`CancellationToken` + SIGINT/SIGTERM)
-- Integration test suite (14 tests, `tower::ServiceExt::oneshot` + real TCP for WS)
+The NTP-like software sync path works in tests, but Sonium has not yet been
+validated across enough real devices, operating systems, DACs, and network
+conditions to claim stable sub-millisecond sync.
 
-### Fase 4 — Client MVP with real audio output ✅
+### Source diagnostics
 
-- CPAL integration (Linux ALSA/PipeWire, macOS CoreAudio)
-- Ring buffer + dedicated audio thread (avoids `!Send` on CoreAudio)
-- Advanced underrun recovery (4-phase crossfade state machine)
-- USB DAC hotplug with exponential backoff retry
+Radio streams and ffmpeg processes can fail for many reasons: server disconnects,
+HTTP stalls, codec changes, stderr-only failures, DNS issues, TLS errors, or
+upstream silence. Sonium now restarts `pipe://` sources, but it still needs a
+proper operator-facing source health view.
 
-### Fase 5 — Hardening ✅
+### Safe configuration reloads
 
-- Auto-reconnect after server restart (exponential backoff 500 ms → 30 s)
-- `tracing` structured logging: `EnvFilter`, `#[instrument]` on sessions and stream readers
-- CLI flags and `SONIUM_*` env vars for all config values (server + client)
+Some config changes still require a full server restart. The UI now prompts for
+that and the installer can grant a narrow restart permission, but Sonium should
+eventually support more partial reloads without dropping clients.
 
-### Fase 6 — Multiple streams and groups ✅
+### Packaging and upgrade hardening
 
-- Client groups with full CRUD (create, rename, delete, move clients)
-- **Live stream switching** — sessions react to `EventBus` events (`ClientGroupChanged`, `GroupStreamChanged`) without dropping the TCP connection; new `CodecHeader` sent on switch
-- Per-client volume / mute via REST + WebSocket events
-- Per-session volume scaling + mute in the wire path (zero-copy at volume 100)
+Release packaging works, but upgrade paths are still young. Older systemd units,
+manual installs, and distro differences can miss permissions or dependencies.
+The installer and Desktop Agent need more migration checks.
 
-### Fase 7 — Web UI ✅
+### Snapcast compatibility
 
-- Embedded Vue 3 + Pinia SPA via `rust-embed` — no separate process
-- Real-time WebSocket events (`EventBus` → `/api/events`)
-- Per-client volume sliders + mute toggle
-- Group management with drag-and-drop client assignment
-- Dark theme, responsive layout
+Sonium has a migration path and optional Snapcast mDNS advertising, but full
+drop-in protocol compatibility with every Snapcast client/version is not
+guaranteed.
 
-### Fase 8 — Zero-config discovery ✅
+## Near-term roadmap
 
-- mDNS advertisement (`_sonium._tcp`, `_sonium-http._tcp`)
-- Optional `_snapcast._tcp` when `snapcast_compat = true`
-- Client auto-discover (`--discover` + interactive menu)
-- Subnet scanner for cross-VLAN networks
+1. **Playback stability**
 
-### Fase 11 — Authentication & authorization ✅
+   - Add richer health telemetry for output buffer depth, underruns, stale
+     chunk drops, jitter, and source restarts.
+   - Improve client-side adaptive output prefill.
+   - Use telemetry to warn when a stream buffer is too low for the current
+     network/device.
 
-- Server-side user accounts with Argon2 password hashing (`crates/control/src/auth.rs`)
-- JWT bearer tokens (24 h TTL) signed with per-instance secret persisted in `users.json`
-- Role-based access control: **admin** · **operator** · **viewer**
-- `POST /api/auth/setup` — first-run admin creation (blocked once any user exists)
-- `POST /api/auth/login` → JWT token response
-- `GET /api/auth/me` — current user info
-- `GET/POST/PUT/DELETE /api/users` — full user management (admin only)
-- Axum middleware: `require_viewer` (read routes) + `require_operator` (write routes)
-- Auto-generated default admin account on first boot (password printed to log once)
+2. **Stream tuning UX**
 
-### Fase 12 — Admin UI ✅
+   - Add an optional automatic mode for `buffer_ms` and `chunk_ms`.
+   - Keep manual controls for advanced users and debugging.
+   - Document practical tuning recipes for radio, local files, Bluetooth
+     sinks, and low-latency LAN tests.
 
-Full-featured admin panel served at `/admin` (Vue 3 + Pinia, embedded via `rust-embed`):
+3. **Operator diagnostics**
 
-| Tab | What's implemented |
-|---|---|
-| **Dashboard** | Live stats (online clients, groups, playing streams, uptime via WS heartbeat) |
-| **Streams** | Add streams with 18 source-type templates; URI builder; meta-stream chain editor |
-| **Groups** | Create/delete groups, move clients, assign streams, per-client volume |
-| **Clients** | Per-client status, latency offset editor, group selector, subnet scanner |
-| **Config** | Raw TOML editor with validation + save via `PUT /api/config/raw` |
-| **Users** | Create/edit/delete users, role assignment |
-| **System** | OS/audio stack info, dependency checker (ffmpeg, shairport-sync, librespot, mpd), package install/update/remove, server log tail |
+   - Surface ffmpeg stderr and child-process exit status in the admin UI.
+   - Add clearer stream health states: starting, playing, idle, recovering,
+     failed.
+   - Add troubleshooting panels that explain likely causes and next actions.
 
-### Fase 13 — Control PWA ✅ (core)
+4. **Config and restart flow**
 
-Mobile-first progressive web app served at `/` (Vue 3 + Pinia):
+   - Expand partial reload support where safe.
+   - Preflight restart permissions in the UI before asking the user to restart.
+   - Make config changes show exactly whether they apply immediately or require
+     restart.
 
-- Per-group cards: stream badge, stream selector, per-client volume sliders + mute
-- Group master volume (when 2+ clients)
-- Live drag-free client assignment via inline selects
-- Create-group FAB with modal
-- Role-aware UI (operator controls vs viewer read-only)
-- Real-time updates via WebSocket (`/api/events`)
-- Dark theme, responsive layout, safe-area insets for mobile
+5. **Hardware validation**
 
-### Fase 14 — Config API ✅
+   - Test mixed Linux/macOS/Windows clients on the same LAN.
+   - Validate Raspberry Pi and USB DAC behavior.
+   - Measure drift and sync error with real microphones/loopback capture.
 
-- `GET /api/config/raw` → current `sonium.toml` as plain text
-- `PUT /api/config/raw` → validates TOML + `ServerConfig` shape before writing; returns 422 on error
-- Config tab in Admin UI provides the editor; changes require server restart for stream/port changes
+## Longer-term roadmap
 
----
+- PTPv2/hardware timestamp support through the existing `TimeSource` abstraction.
+- Cross-subnet relays and remote-site streaming.
+- TLS/HTTPS and stronger deployment profiles.
+- More source integrations: AirPlay, Spotify Connect, MPD/library workflows.
+- Better per-room DSP, normalization, and calibration tools.
+- More polished installers and auto-update flows for the Desktop Agent.
 
-## In progress / hardware-blocked
+## Production-readiness bar
 
-### Wire compatibility validation 🔄
+Before calling Sonium production-ready, we should be able to demonstrate:
 
-- Interop test: Sonium server ↔ real Snapcast client
-  — _blocked on hardware test setup; not a blocker for other work_
-
-### Clock sync precision 🔄
-
-- Raspberry Pi LAN test — **goal:** < 1 ms desync
-  — _requires Pi hardware; not a blocker_
-
----
-
-## Planned
-
-### Fase 15 — State persistence
-
-- Persist groups, client volume/mute/latency/group assignments to `sonium-state.json`
-- Restored automatically on server restart
-- Reconnecting clients recover their previous settings without operator intervention
-
-### Fase 9 — Cross-platform
-
-- Windows: WASAPI audio, MSI installer
-- Android: evaluation of `oboe-rs` vs thin Kotlin wrapper
-- macOS: notarized `.app` bundle (CoreAudio already works via CPAL)
-
-### Fase 10 — Advanced features
-
-| Feature                  | Notes                                                                                          |
-| ------------------------ | ---------------------------------------------------------------------------------------------- |
-| **PTPv2 hardware clock** | IEEE 1588v2 via `/dev/ptp0` — nanosecond sync. `TimeSource` trait is ready.                   |
-| Cross-subnet relay       | Stream to remote networks. Subnet scanner groundwork already exists.                           |
-| TLS + HTTPS              | Self-signed cert generation + Let's Encrypt via ACME                                           |
-| Plugin sources           | Spotify Connect, AirPlay, Tidal                                                                |
-| Volume normalization     | Per-track EBU R128 / ReplayGain                                                                |
-| Per-room EQ              | FIR filters via `fundsp`                                                                       |
-| Mobile control app       | Flutter or React Native                                                                        |
-| Snapcast compat UI toggle| Web UI toggle for `snapcast_compat` mode without editing config files                         |
-
----
-
-## PTPv2 detail
-
-Commodity hardware (USB adapters ~$10) supports PTPv2 with **nanosecond-level**
-accuracy — orders of magnitude better than software NTP. No existing open-source
-multiroom audio system takes advantage of this
-([relevant discussion](https://github.com/badaix/snapcast/issues/1478)).
-
-Sonium's `TimeSource` trait (Fase 2) makes the audio pipeline agnostic to clock
-source. Plugging in a PTP-backed `TimeSource` requires no changes to encoder,
-decoder, or jitter buffer.
+- Stable playback for many hours from common sources, including internet radio.
+- Predictable behavior at documented buffer targets.
+- Clear admin diagnostics for every common failure mode.
+- Safe upgrades across at least one previous minor version.
+- Measured sync behavior on real multi-device hardware.
+- Recovery from server restart, network drop, client sleep/wake, and device
+  hotplug without manual cleanup.
