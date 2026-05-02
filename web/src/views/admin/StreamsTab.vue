@@ -341,6 +341,7 @@ const tuningSaving = ref(false);
 const autoBufferEnabled = ref(false);
 const globalBufferMs = ref(1000);
 const globalChunkMs = ref(20);
+const outputPrefillMs = ref(0);
 const autoBufferMinMs = ref(400);
 const autoBufferMaxMs = ref(3000);
 const autoBufferStepUpMs = ref(120);
@@ -348,6 +349,24 @@ const autoBufferStepDownMs = ref(40);
 const autoBufferCooldownMs = ref(8000);
 const transportMode = ref<TransportMode>('tcp');
 const transportUdpPort = ref(0);
+const latencyPresetCards = [
+  {
+    name: 'Stable TCP',
+    body: 'Safest baseline: 1200 ms network buffer with automatic device prefill.',
+  },
+  {
+    name: 'Balanced TCP',
+    body: 'Lower-latency LAN target: 800 ms network buffer plus 280 ms device prefill.',
+  },
+  {
+    name: 'Adaptive Wi-Fi',
+    body: 'TCP mode that can grow from 800 to 1400 ms when health reports show drops.',
+  },
+  {
+    name: 'RTP/UDP lab',
+    body: 'Experimental UDP media path on port 1712 for loss, PLC, and transport testing.',
+  },
+];
 // Raw URI — stays in sync with computed, can be manually overridden.
 const rawUri         = ref('');
 const uriOverridden  = ref(false);
@@ -546,6 +565,7 @@ async function loadServerTuning() {
     const server = cfg.server || {};
     globalBufferMs.value = Number(server.buffer_ms ?? 1000);
     globalChunkMs.value = Number(server.chunk_ms ?? 20);
+    outputPrefillMs.value = Number(server.output_prefill_ms ?? 0);
     autoBufferEnabled.value = Boolean(server.auto_buffer ?? false);
     autoBufferMinMs.value = Number(server.auto_buffer_min_ms ?? 400);
     autoBufferMaxMs.value = Number(server.auto_buffer_max_ms ?? 3000);
@@ -578,6 +598,10 @@ async function saveServerTuning() {
     if (!cfg.server) cfg.server = {};
     cfg.server.buffer_ms = Math.max(100, Number(globalBufferMs.value || 1000));
     cfg.server.chunk_ms = Math.max(10, Number(globalChunkMs.value || 20));
+    cfg.server.output_prefill_ms = Math.max(
+      0,
+      Math.min(1000, Number(outputPrefillMs.value || 0)),
+    );
     cfg.server.auto_buffer = !!autoBufferEnabled.value;
     cfg.server.auto_buffer_min_ms = Math.max(100, Number(autoBufferMinMs.value || 400));
     cfg.server.auto_buffer_max_ms = Math.max(
@@ -606,22 +630,51 @@ async function saveServerTuning() {
   }
 }
 
-function applyAggressiveLanPreset() {
-  globalBufferMs.value = 700;
+function applyStableTcpPreset() {
+  transportMode.value = 'tcp';
+  globalBufferMs.value = 1200;
+  outputPrefillMs.value = 0;
+  globalChunkMs.value = 20;
+  autoBufferEnabled.value = false;
+  tuningInfo.value = 'Preset applied: Stable TCP. Uses 1200 ms network buffer with automatic device prefill.';
+}
+
+function applyBalancedTcpPreset() {
+  transportMode.value = 'tcp';
+  globalBufferMs.value = 800;
+  outputPrefillMs.value = 280;
+  globalChunkMs.value = 20;
+  autoBufferEnabled.value = false;
+  tuningInfo.value = 'Preset applied: Balanced TCP. Uses 800 ms network buffer and 280 ms device prefill.';
+}
+
+function applyAdaptiveWifiPreset() {
+  transportMode.value = 'tcp';
+  globalBufferMs.value = 900;
+  outputPrefillMs.value = 300;
   globalChunkMs.value = 20;
   autoBufferEnabled.value = true;
-  autoBufferMinMs.value = 500;
-  autoBufferMaxMs.value = 900;
-  autoBufferStepUpMs.value = 90;
-  autoBufferStepDownMs.value = 60;
+  autoBufferMinMs.value = 800;
+  autoBufferMaxMs.value = 1400;
+  autoBufferStepUpMs.value = 160;
+  autoBufferStepDownMs.value = 40;
   autoBufferCooldownMs.value = 6000;
-  tuningInfo.value = 'Preset applied: Aggressive LAN (target 500–800 ms). Save global tuning to persist.';
+  tuningInfo.value = 'Preset applied: Adaptive Wi-Fi TCP. Allows controlled buffer growth when drops appear.';
 }
 
 function applyRtpUdpPreset() {
   transportMode.value = 'rtp_udp';
   transportUdpPort.value = 1712;
-  tuningInfo.value = 'Preset applied: RTP/UDP on UDP port 1712. Save global tuning and restart the server.';
+  globalBufferMs.value = 1200;
+  outputPrefillMs.value = 300;
+  globalChunkMs.value = 20;
+  autoBufferEnabled.value = true;
+  autoBufferMinMs.value = 1200;
+  autoBufferMaxMs.value = 2400;
+  autoBufferStepUpMs.value = 200;
+  autoBufferStepDownMs.value = 50;
+  autoBufferCooldownMs.value = 4000;
+  tuningInfo.value = 'Preset applied: RTP/UDP lab. Save global tuning and restart the server.';
 }
 
 function editStream(s: any) {
@@ -749,21 +802,41 @@ async function restartServer() {
           Stream-level <code>buffer_ms</code> and <code>chunk_ms</code> overrides always take priority over these global defaults.
         </p>
         <div class="mt-3 flex items-center gap-2 flex-wrap">
-          <button class="btn-ghost" @click="applyAggressiveLanPreset">
-            <span class="mdi mdi-rocket-launch-outline"></span>
-            Preset: Aggressive LAN (500–800 ms)
+          <button class="btn-ghost" @click="applyStableTcpPreset">
+            <span class="mdi mdi-shield-check-outline"></span>
+            Stable TCP
+          </button>
+          <button class="btn-ghost" @click="applyBalancedTcpPreset">
+            <span class="mdi mdi-speedometer-medium"></span>
+            Balanced TCP
+          </button>
+          <button class="btn-ghost" @click="applyAdaptiveWifiPreset">
+            <span class="mdi mdi-wifi-cog"></span>
+            Adaptive Wi-Fi
           </button>
           <button class="btn-ghost" @click="applyRtpUdpPreset">
             <span class="mdi mdi-access-point-network"></span>
-            Preset: RTP/UDP
+            RTP/UDP lab
           </button>
+        </div>
+        <div class="mt-3 grid grid-cols-1 lg:grid-cols-4 gap-2">
+          <div v-for="preset in latencyPresetCards" :key="preset.name" class="preset-note">
+            <div class="preset-note-title">{{ preset.name }}</div>
+            <p>{{ preset.body }}</p>
+          </div>
         </div>
       </div>
 
-      <div class="grid grid-cols-2 gap-3">
+      <div class="grid grid-cols-1 lg:grid-cols-3 gap-3">
         <div>
-          <label class="param-label block mb-1.5">Global buffer (ms)</label>
+          <label class="param-label block mb-1.5">Network buffer (ms)</label>
           <input v-model.number="globalBufferMs" type="number" min="100" max="10000" step="100" class="field field-mono" />
+          <p class="param-desc mt-1">Jitter buffer target sent to clients.</p>
+        </div>
+        <div>
+          <label class="param-label block mb-1.5">Device prefill (ms)</label>
+          <input v-model.number="outputPrefillMs" type="number" min="0" max="1000" step="20" class="field field-mono" />
+          <p class="param-desc mt-1">0 = automatic; try 260–300 ms for 800 ms TCP.</p>
         </div>
         <div>
           <label class="param-label block mb-1.5">Global chunk (ms)</label>
@@ -773,6 +846,7 @@ async function restartServer() {
             <option :value="40">40</option>
             <option :value="60">60</option>
           </select>
+          <p class="param-desc mt-1">Encoded frame duration.</p>
         </div>
       </div>
 
@@ -1454,6 +1528,24 @@ async function restartServer() {
 }
 .param-desc {
   font-size: 11px; color: var(--text-muted); margin-top: 1px;
+}
+.preset-note {
+  min-height: 74px;
+  padding: 10px 11px;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: rgba(15, 23, 42, 0.32);
+}
+.preset-note-title {
+  margin-bottom: 4px;
+  font-size: 11px;
+  font-weight: 700;
+  color: var(--text-secondary);
+}
+.preset-note p {
+  font-size: 11px;
+  line-height: 1.35;
+  color: var(--text-muted);
 }
 .req { color: var(--accent); margin-left: 2px; }
 

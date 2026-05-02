@@ -97,6 +97,7 @@ control_port = 1711
 mdns = true
 buffer_ms = 1000
 chunk_ms = 20
+output_prefill_ms = 0
 
 [[streams]]
 id = "default"

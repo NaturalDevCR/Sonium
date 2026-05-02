@@ -474,6 +474,7 @@ async fn session_loop(
         init_observability,
         effective_mode.to_string(),
         server_udp_port,
+        cfg.server.output_prefill_ms,
     )
     .await?;
 
@@ -506,6 +507,7 @@ async fn session_loop(
                                 health_tracker: &mut health_tracker,
                                 transport_mode: effective_mode.to_string(),
                                 server_udp_port,
+                                output_prefill_ms: cfg.server.output_prefill_ms,
                             },
                             hdr,
                             &payload,
@@ -606,7 +608,7 @@ async fn session_loop(
                         let lat = c.as_ref().map(|c| c.latency_ms).unwrap_or(0);
                         let obs = c.as_ref().map(|c| c.observability_enabled).unwrap_or(false);
                         let (eq, en) = state.get_stream_eq(&stream_id).unwrap_or_default();
-                        send_server_settings(stream, current_buffer_ms, volume, muted, lat, eq, en, obs, effective_mode.to_string(), server_udp_port).await?;
+                        send_server_settings(stream, current_buffer_ms, volume, muted, lat, eq, en, obs, effective_mode.to_string(), server_udp_port, cfg.server.output_prefill_ms).await?;
                         debug!(%peer, volume, muted, "Volume settings pushed to client");
                     }
 
@@ -616,7 +618,7 @@ async fn session_loop(
                         let (vol, muted) = state.get_volume(client_id).unwrap_or((100, false));
                         let obs = state.get_client(client_id).map(|c| c.observability_enabled).unwrap_or(false);
                         let (eq, en) = state.get_stream_eq(&stream_id).unwrap_or_default();
-                        send_server_settings(stream, current_buffer_ms, vol, muted, latency_ms, eq, en, obs, effective_mode.to_string(), server_udp_port).await?;
+                        send_server_settings(stream, current_buffer_ms, vol, muted, latency_ms, eq, en, obs, effective_mode.to_string(), server_udp_port, cfg.server.output_prefill_ms).await?;
                         debug!(%peer, latency_ms, "Latency settings pushed to client");
                     }
 
@@ -633,7 +635,7 @@ async fn session_loop(
                         let c = state.get_client(client_id);
                         let lat = c.as_ref().map(|c| c.latency_ms).unwrap_or(0);
                         let obs = c.as_ref().map(|c| c.observability_enabled).unwrap_or(false);
-                        send_server_settings(stream, current_buffer_ms, vol, muted, lat, eq_bands, enabled, obs, effective_mode.to_string(), server_udp_port).await?;
+                        send_server_settings(stream, current_buffer_ms, vol, muted, lat, eq_bands, enabled, obs, effective_mode.to_string(), server_udp_port, cfg.server.output_prefill_ms).await?;
                         debug!(%peer, stream_id, "Stream EQ settings pushed to client");
                     }
 
@@ -703,9 +705,11 @@ async fn send_server_settings(
     observability_enabled: bool,
     transport_mode: String,
     server_udp_port: u16,
+    output_prefill_ms: u32,
 ) -> anyhow::Result<()> {
     let settings = ServerSettings {
         buffer_ms: buffer_ms as i32,
+        output_prefill_ms,
         latency: latency_ms,
         volume,
         muted,
@@ -734,6 +738,7 @@ struct ClientMsgContext<'a> {
     health_tracker: &'a mut HealthTransitionTracker,
     transport_mode: String,
     server_udp_port: u16,
+    output_prefill_ms: u32,
 }
 
 async fn handle_client_msg(
@@ -804,6 +809,7 @@ async fn handle_client_msg(
                         obs,
                         ctx.transport_mode.clone(),
                         ctx.server_udp_port,
+                        ctx.output_prefill_ms,
                     )
                     .await?;
                     *ctx.current_buffer_ms = next_buffer_ms;

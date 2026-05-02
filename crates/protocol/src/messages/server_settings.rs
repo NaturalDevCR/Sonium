@@ -60,6 +60,9 @@ fn default_true() -> bool {
 pub struct ServerSettings {
     /// Requested jitter buffer size in milliseconds.
     pub buffer_ms: i32,
+    /// Requested local output-device prefill in milliseconds (`0` = client derives it).
+    #[serde(default)]
+    pub output_prefill_ms: u32,
     /// Additional client-specific latency offset in milliseconds
     /// (positive = play later, useful to compensate for Bluetooth delay).
     pub latency: i32,
@@ -89,6 +92,7 @@ impl Default for ServerSettings {
     fn default() -> Self {
         Self {
             buffer_ms: 1000,
+            output_prefill_ms: 0,
             latency: 0,
             volume: 100,
             muted: false,
@@ -182,5 +186,16 @@ mod tests {
         let decoded = ServerSettings::decode(&w.finish()).unwrap();
         assert_eq!(decoded.transport_mode, "");
         assert_eq!(decoded.server_udp_port, 0);
+        assert_eq!(decoded.output_prefill_ms, 0);
+    }
+
+    #[test]
+    fn output_prefill_round_trip() {
+        let msg = ServerSettings {
+            output_prefill_ms: 280,
+            ..Default::default()
+        };
+        let decoded = ServerSettings::decode(&msg.encode()).unwrap();
+        assert_eq!(decoded.output_prefill_ms, 280);
     }
 }

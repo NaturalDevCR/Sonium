@@ -31,6 +31,11 @@ pub struct ServerNet {
     pub buffer_ms: u32,
     /// Global encoded audio chunk duration unless a stream overrides it.
     pub chunk_ms: u32,
+    /// Local output-device prefill in milliseconds (`0` = derive from buffer_ms).
+    ///
+    /// This is intentionally separate from `buffer_ms`: `buffer_ms` absorbs
+    /// network jitter, while this keeps the client's audio backend ring fed.
+    pub output_prefill_ms: u32,
     /// Enable server-side automatic jitter buffer tuning per client session.
     pub auto_buffer: bool,
     /// Lower clamp for auto-tuned buffer target.
@@ -119,6 +124,7 @@ impl Default for ServerNet {
             snapcast_compat: false,
             buffer_ms: 1000,
             chunk_ms: 20,
+            output_prefill_ms: 0,
             auto_buffer: false,
             auto_buffer_min_ms: 400,
             auto_buffer_max_ms: 3000,

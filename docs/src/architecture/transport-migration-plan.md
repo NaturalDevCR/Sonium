@@ -741,6 +741,10 @@ Live v0.1.55 Wi-Fi validation:
   - Live TCP testing still showed heavy stuttering because the stricter `SyncBuffer::pop_ready` timestamp-only release policy from the first Snapcast-inspired fix remained active.
   - Production `pop_ready` was restored to the earlier depth-tolerant behavior: buffering can start once target depth is available, and playing can keep the local output ring fed once low-water depth exists.
   - The stricter callback-only methods remain available for a future opt-in backend-clock experiment, but the default TCP path now prioritizes the previously validated stable ring-buffer behavior.
+- TCP latency tuning follow-up:
+  - Live `v0.1.60` fixed-buffer tests showed `1200ms` stable, `800ms` marginal but usable, and `600/500ms` unstable with large underrun counts.
+  - Added explicit `output_prefill_ms` so network jitter depth and local audio-device prefill can be tuned separately. `0` preserves the previous automatic `buffer_ms / 4` behavior.
+  - Added web UI presets for Stable TCP, Balanced TCP, Adaptive Wi-Fi, and RTP/UDP lab so these modes are selectable without hand-editing TOML.
 
 ---
 

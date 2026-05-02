@@ -125,6 +125,7 @@ fn wire_chunk_timestamp_survives_full_wire() {
 fn server_settings_json_encoding() {
     let ss = ServerSettings {
         buffer_ms: 500,
+        output_prefill_ms: 280,
         latency: 150,
         volume: 80,
         muted: true,
@@ -138,6 +139,7 @@ fn server_settings_json_encoding() {
 
     if let Message::ServerSettings(s) = msg {
         assert_eq!(s.buffer_ms, 500);
+        assert_eq!(s.output_prefill_ms, 280);
         assert_eq!(s.latency, 150);
         assert_eq!(s.volume, 80);
         assert!(s.muted);

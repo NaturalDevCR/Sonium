@@ -17,6 +17,7 @@ mdns            = true        # Advertise via mDNS for zero-config discovery
 snapcast_compat = false       # Set true to also advertise _snapcast._tcp mDNS
 buffer_ms       = 1000        # Global jitter buffer default
 chunk_ms        = 20          # Global encoded chunk default
+output_prefill_ms = 0         # Local audio-device prefill; 0 = automatic
 auto_buffer             = false # Enable dynamic buffer tuning from health telemetry
 auto_buffer_min_ms      = 400   # Lower clamp for auto mode
 auto_buffer_max_ms      = 3000  # Upper clamp for auto mode
@@ -44,7 +45,7 @@ silence_on_idle = true   # Optional: emit silence while idle
 level = "info"  # "trace" | "debug" | "info" | "warn" | "error"
 ```
 
-### Stream buffering and chunk size
+### Latency tuning
 
 `buffer_ms` is the client-side playout buffer target. Larger values tolerate
 more network jitter and scheduling delays, but increase end-to-end latency.
@@ -52,6 +53,20 @@ Configure it globally under `[server]`; add `buffer_ms` inside a `[[streams]]`
 entry only when that stream needs a different value. `1000` ms is currently the
 safest default. Lower values may work on clean LANs, but Sonium is still being
 tuned and may stutter below that on some systems.
+
+`output_prefill_ms` is separate from `buffer_ms`. `buffer_ms` absorbs network
+jitter; `output_prefill_ms` keeps the client's local audio-device ring fed.
+Use `0` for the automatic value derived from `buffer_ms`. When testing lower TCP
+latency, a useful starting point is `buffer_ms = 800` with
+`output_prefill_ms = 280`.
+
+Suggested presets:
+
+| Preset | Settings | Use when |
+| --- | --- | --- |
+| Stable TCP | `buffer_ms = 1200`, `output_prefill_ms = 0`, `auto_buffer = false` | First reliable baseline |
+| Balanced TCP | `buffer_ms = 800`, `output_prefill_ms = 280`, `auto_buffer = false` | Lower latency on a clean LAN |
+| Adaptive Wi-Fi | `buffer_ms = 900`, `output_prefill_ms = 300`, `auto_buffer = true`, min/max `800..1400` | Wi-Fi clients with occasional drops |
 
 `chunk_ms` controls the duration of each encoded audio chunk. Smaller chunks can
 reduce scheduling latency and smooth delivery, but increase packet and CPU
