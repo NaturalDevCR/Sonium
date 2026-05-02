@@ -17,11 +17,11 @@ use sonium_protocol::{
     MessageHeader, MessageType,
 };
 use sonium_sync::time_provider::now_us;
-use sonium_sync::{PcmChunk, SyncBuffer, TimeProvider};
+use sonium_sync::{PcmChunk, TimeProvider};
 
 use crate::decoder::ActiveDecoder;
 use crate::eq::SmoothedEqProcessor;
-use crate::player::Player;
+use crate::player::{PlaybackHandle, Player};
 
 use tokio::sync::mpsc;
 
@@ -149,7 +149,7 @@ async fn connect_and_run(
     // 2. Wait for CodecHeader, then ServerSettings
     let mut decoder: Option<ActiveDecoder> = None;
     let mut player: Option<Player> = None;
-    let mut sync_buf: Option<SyncBuffer> = None;
+    let mut playback: Option<PlaybackHandle> = None;
     let mut volume: u8 = 100;
     let mut muted = false;
     let mut eq_bands: Vec<EqBand> = vec![];
@@ -173,7 +173,6 @@ async fn connect_and_run(
     // Start periodic tasks
     let (incoming_tx, mut incoming_rx) = mpsc::unbounded_channel();
     let read_task = tokio::spawn(socket_reader(reader, incoming_tx));
-    let mut audio_tick = tokio::time::interval(tokio::time::Duration::from_millis(5));
     let mut sync_tick = tokio::time::interval(tokio::time::Duration::from_secs(1));
     let mut health_tick = tokio::time::interval(tokio::time::Duration::from_secs(2));
     let mut sync_seq: u16 = 0;
@@ -181,29 +180,6 @@ async fn connect_and_run(
 
     let result = loop {
         tokio::select! {
-            // Audio pump: ensure SyncBuffer is drained even if network is quiet
-            _ = audio_tick.tick() => {
-                if time_provider.sample_count() == 0 {
-                    continue;
-                }
-                if let (Some(pl), Some(buf)) = (player.as_mut(), sync_buf.as_mut()) {
-                    let now_server = time_provider.to_server_time(now_us());
-                    let target_output_us = output_prefill_us(
-                        server_buffer_ms + cfg.latency_ms + server_latency_ms,
-                    );
-                    while pl.buffered_us() < target_output_us {
-                        let sink_ready_at = now_server + pl.buffered_us();
-                        let Some(chunk) = buf.pop_ready(sink_ready_at) else {
-                            break;
-                        };
-                        if let Err(e) = pl.write(&chunk.samples) {
-                            warn!("Audio pump write error: {e}");
-                            break;
-                        }
-                    }
-                }
-            }
-
             // Sync clock with server
             _ = sync_tick.tick() => {
                 if let Err(e) = send_time_request(&mut writer, &mut sync_seq, &mut pending_time).await {
@@ -214,13 +190,13 @@ async fn connect_and_run(
 
             // Health report
             _ = health_tick.tick() => {
-                let report_msg = if let Some(buf) = sync_buf.as_mut() {
+                let report_msg = if let Some(playback) = playback.as_ref() {
                     let now_server = time_provider.to_server_time(now_us());
-                    let mut report = buf.get_report(now_server);
+                    let mut report = playback.get_report(now_server);
                     let player_health = player.as_ref().map(|p| p.take_health()).unwrap_or_default();
                     report.underrun_count += player_health.underrun_count;
 
-                    let jitter = (buf.jitter_us() / 1000) as u32;
+                    let jitter = (playback.jitter_us() / 1000) as u32;
                     let output_buffer_ms = player
                         .as_ref()
                         .map(|p| (p.buffered_us().max(0) / 1000) as u32)
@@ -235,7 +211,7 @@ async fn connect_and_run(
                         jitter,
                         (time_provider.offset_us() / 1000) as i32,
                     )
-                    .with_queue_metrics(output_buffer_ms, buf.len() as u32, target_playout_latency_ms)
+                    .with_queue_metrics(output_buffer_ms, playback.len() as u32, target_playout_latency_ms)
                     .with_callback_metrics(
                         player_health.callback_starvation_count,
                         player_health.audio_callback_xrun_count,
@@ -285,12 +261,13 @@ async fn connect_and_run(
                         info!(codec = %ch.codec, "CodecHeader received");
                         let dec = ActiveDecoder::from_codec(&ch.codec, &ch.header_data)?;
                         let fmt = dec.sample_format();
-                        let p   = Player::new(fmt, cfg.device.as_deref())?;
-                        let buf = SyncBuffer::new(fmt);
+                        let playback_handle = PlaybackHandle::new(fmt, time_provider.offset_handle());
+                        playback_handle.set_target_buffer_ms(server_buffer_ms + cfg.latency_ms + server_latency_ms);
+                        let p   = Player::new(fmt, cfg.device.as_deref(), Some(playback_handle.clone()))?;
                         eq_processor = Some(SmoothedEqProcessor::new(eq_enabled, &eq_bands, fmt.rate, fmt.channels as usize));
                         decoder  = Some(dec);
                         player   = Some(p);
-                        sync_buf = Some(buf);
+                        playback = Some(playback_handle);
                         let _ = status_tx
                             .as_ref()
                             .map(|tx| tx.send(ConnectionStatus::Ready));
@@ -304,8 +281,8 @@ async fn connect_and_run(
                         eq_enabled = ss.eq_enabled;
                         server_buffer_ms = ss.buffer_ms;
                         server_latency_ms = ss.latency;
-                        if let Some(buf) = sync_buf.as_mut() {
-                            buf.set_target_buffer_ms(server_buffer_ms + cfg.latency_ms + server_latency_ms);
+                        if let Some(playback) = playback.as_ref() {
+                            playback.set_target_buffer_ms(server_buffer_ms + cfg.latency_ms + server_latency_ms);
                         }
                         if let Some(pl) = player.as_mut() {
                             pl.set_buffer_limit_ms((server_buffer_ms + cfg.latency_ms + server_latency_ms).max(80));
@@ -376,8 +353,8 @@ async fn connect_and_run(
 
                     MessageType::WireChunk => {
                         let chunk = sonium_protocol::messages::WireChunk::decode(&payload)?;
-                        if let (Some(dec), Some(_pl), Some(buf)) =
-                            (decoder.as_mut(), player.as_mut(), sync_buf.as_mut())
+                        if let (Some(dec), Some(_pl), Some(playback)) =
+                            (decoder.as_mut(), player.as_mut(), playback.as_ref())
                         {
                             let mut samples = Vec::new();
                             dec.decode(&chunk.data, &mut samples)?;
@@ -393,7 +370,7 @@ async fn connect_and_run(
                                 + (server_latency_ms as i64 * 1000);
 
                             let now_server = time_provider.to_server_time(now_us());
-                            buf.push(PcmChunk::new(playout_us, samples, dec.sample_format()), now_server);
+                            playback.push(PcmChunk::new(playout_us, samples, dec.sample_format()), now_server);
                         }
                     }
 
@@ -443,8 +420,8 @@ async fn connect_and_run(
                         }
 
                         let chunk = sonium_protocol::messages::WireChunk::decode(&payload)?;
-                        if let (Some(dec), Some(_pl), Some(buf)) =
-                            (decoder.as_mut(), player.as_mut(), sync_buf.as_mut())
+                        if let (Some(dec), Some(_pl), Some(playback)) =
+                            (decoder.as_mut(), player.as_mut(), playback.as_ref())
                         {
                             if skipped > 0 {
                                 let conceal_count = skipped.min(MAX_CONCEALMENT_PACKETS_PER_GAP);
@@ -476,8 +453,11 @@ async fn connect_and_run(
                                 let now_server = time_provider.to_server_time(now_us());
                                 // Mirror the stale-drop threshold from SyncBuffer::pop_ready so
                                 // we never insert a frame that would be discarded immediately.
+                                let target_buffer_us =
+                                    i64::from(server_buffer_ms + cfg.latency_ms + server_latency_ms)
+                                        * 1000;
                                 let stale_threshold_us =
-                                    (buf.target_buffer_us() / 2).clamp(100_000, 2_000_000);
+                                    (target_buffer_us / 2).clamp(100_000, 2_000_000);
                                 for i in 0..conceal_count {
                                     let playout_us = current_playout_us
                                         - (first_missing_back - i64::from(i)) * interval_us;
@@ -493,7 +473,7 @@ async fn connect_and_run(
                                     if let Some(ref mut eq) = eq_processor {
                                         eq.apply(&mut samples);
                                     }
-                                    buf.push(
+                                    playback.push(
                                         PcmChunk::new(playout_us, samples, dec.sample_format()),
                                         now_server,
                                     );
@@ -513,7 +493,7 @@ async fn connect_and_run(
                                 + (cfg.latency_ms as i64 * 1000)
                                 + (server_latency_ms as i64 * 1000);
                             let now_server = time_provider.to_server_time(now_us());
-                            buf.push(PcmChunk::new(playout_us, samples, dec.sample_format()), now_server);
+                            playback.push(PcmChunk::new(playout_us, samples, dec.sample_format()), now_server);
                         }
                         last_rtp_sequence = Some(sequence);
                         last_rtp_timestamp = Some(timestamp);
@@ -532,11 +512,6 @@ async fn connect_and_run(
         task.abort();
     }
     result
-}
-
-fn output_prefill_us(total_buffer_ms: i32) -> i64 {
-    let ms = (total_buffer_ms / 4).clamp(120, 300);
-    ms as i64 * 1000
 }
 
 fn configure_tcp_stream(stream: &TcpStream) {

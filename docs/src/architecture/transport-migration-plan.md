@@ -725,6 +725,13 @@ Live v0.1.55 Wi-Fi validation:
   - Sonium's `SyncBuffer::pop_ready` still allowed future chunks to be released when internal buffer depth crossed a low-water threshold. That kept the output ring full, but it could also play ahead of the server timestamp timeline and then recover through stale drops or health-state churn.
   - First Snapcast-inspired parity fix: `SyncBuffer` now releases chunks only when their playout timestamp is due within `lead_us`; queue depth alone no longer authorizes early playout. The output ring still provides device-side prefill, but the timestamp timeline is the source of truth.
   - Remaining Snapcast lessons for later Phase 3 work: expose real device/DAC latency where CPAL supports it, add soft drift correction by dropping/duplicating/resampling tiny frame counts instead of hard sync, and keep underflow-aware device latency adaptation separate from network jitter adaptation.
+- Snapcast TCP parity implementation:
+  - The client now supports audio-callback-driven playout: decoded chunks are pushed into a shared server-timestamped `PlaybackTimeline`, and the CPAL output callback pulls exactly the frames that should be audible at the callback's predicted DAC time.
+  - CPAL `OutputCallbackInfo` is used to estimate device/output latency (`playback - callback`). In this mode `sonium_client_output_buffer_ms` represents the local output/DAC latency instead of the old software ring-buffer depth.
+  - The 5 ms controller-side audio pump is no longer the timing authority for normal playback. The controller only decodes and queues chunks; the audio backend clock drives playout, matching Snapcast's core architecture more closely.
+  - If a chunk is due partway through an output callback, the callback emits silence until that exact media timestamp, then starts the chunk. This preserves timestamp continuity instead of draining future audio early.
+  - A first soft drift correction is in place: when callback playout is repeatedly late by more than 2 ms, the timeline drops one PCM frame at a controlled cadence to converge without a hard stale-drop reset.
+  - Local backend latency is now separated from network jitter-buffer target: network depth remains in `buffer_depth_ms`/`target_playout_latency_ms`, while backend output latency is reported separately.
 
 ---
 

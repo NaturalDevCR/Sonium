@@ -1,5 +1,5 @@
 use std::collections::VecDeque;
-use std::sync::atomic::{AtomicU32, AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicI64, AtomicU32, AtomicUsize, Ordering};
 use std::sync::mpsc::{self, Receiver, SyncSender};
 use std::sync::{Arc, Mutex};
 use std::thread;
@@ -9,12 +9,16 @@ use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
 use tracing::{debug, info, warn};
 
 use sonium_common::{SampleFormat, SoniumError};
+use sonium_sync::time_provider::now_us;
+use sonium_sync::{PcmChunk, SyncBuffer};
 
 /// Audio output backed by the system default device via CPAL.
 ///
 /// The CPAL stream lives on a dedicated OS thread to avoid `!Send` issues on
 /// macOS (CoreAudio streams must be created and used on the same thread).
-/// PCM samples are exchanged through a shared lock-free ring buffer.
+/// PCM samples are normally pulled from a server-timestamped playback timeline
+/// directly inside the audio callback.  A legacy ring-buffer write path remains
+/// for simple fallback use.
 ///
 /// **Hotplug recovery:** when a device error occurs (e.g. USB DAC
 /// disconnected), the audio thread automatically retries opening the stream
@@ -44,37 +48,230 @@ pub struct Player {
     fmt: SampleFormat,
     health: Arc<HealthState>,
     max_samples: Arc<AtomicUsize>,
+    playback: Option<PlaybackHandle>,
+    latest_output_latency_us: Arc<AtomicI64>,
     /// Dropping this disconnects the audio thread's park channel, stopping it.
     _keepalive: SyncSender<()>,
 }
 
+#[derive(Clone)]
+struct AudioState {
+    ring: Arc<Mutex<VecDeque<i16>>>,
+    health: Arc<HealthState>,
+    playback: Option<PlaybackHandle>,
+    latest_output_latency_us: Arc<AtomicI64>,
+}
+
+#[derive(Clone)]
+pub struct PlaybackHandle {
+    inner: Arc<Mutex<PlaybackTimeline>>,
+    offset_us: Arc<AtomicI64>,
+    latest_output_latency_us: Arc<AtomicI64>,
+}
+
+impl PlaybackHandle {
+    pub fn new(fmt: SampleFormat, offset_us: Arc<AtomicI64>) -> Self {
+        Self {
+            inner: Arc::new(Mutex::new(PlaybackTimeline::new(fmt))),
+            offset_us,
+            latest_output_latency_us: Arc::new(AtomicI64::new(0)),
+        }
+    }
+
+    pub fn push(&self, chunk: PcmChunk, arrival_us: i64) {
+        self.inner.lock().unwrap().buffer.push(chunk, arrival_us);
+    }
+
+    pub fn set_target_buffer_ms(&self, buffer_ms: i32) {
+        self.inner
+            .lock()
+            .unwrap()
+            .buffer
+            .set_target_buffer_ms(buffer_ms);
+    }
+
+    pub fn buffer_depth_us(&self) -> i64 {
+        self.inner.lock().unwrap().buffer.buffer_depth_us()
+    }
+
+    pub fn len(&self) -> usize {
+        self.inner.lock().unwrap().buffer.len()
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.inner.lock().unwrap().buffer.is_empty()
+    }
+
+    pub fn jitter_us(&self) -> i64 {
+        self.inner.lock().unwrap().buffer.jitter_us()
+    }
+
+    pub fn clear(&self) {
+        let mut inner = self.inner.lock().unwrap();
+        inner.buffer.clear();
+        inner.current = None;
+    }
+
+    pub fn get_report(&self, now_server_us: i64) -> sonium_sync::buffer::SyncReport {
+        self.inner.lock().unwrap().buffer.get_report(now_server_us)
+    }
+
+    fn fill_i16(
+        &self,
+        out: &mut [i16],
+        info: &cpal::OutputCallbackInfo,
+        health: &HealthState,
+        fade: &mut FadeState,
+    ) {
+        let output_latency_us = output_latency_us(info).unwrap_or_else(|| {
+            let frames = out.len() / self.inner.lock().unwrap().fmt.channels as usize;
+            frames_to_us(frames, self.inner.lock().unwrap().fmt.rate)
+        });
+        self.latest_output_latency_us
+            .store(output_latency_us, Ordering::Relaxed);
+        let dac_server_us = now_us() + self.offset_us.load(Ordering::Relaxed) + output_latency_us;
+        self.inner
+            .lock()
+            .unwrap()
+            .fill_i16(out, dac_server_us, health, fade);
+    }
+
+    pub fn latest_output_latency_us(&self) -> i64 {
+        self.latest_output_latency_us.load(Ordering::Relaxed)
+    }
+}
+
+struct PlaybackTimeline {
+    buffer: SyncBuffer,
+    current: Option<PcmChunk>,
+    fmt: SampleFormat,
+    drift: DriftCorrector,
+}
+
+impl PlaybackTimeline {
+    fn new(fmt: SampleFormat) -> Self {
+        Self {
+            buffer: SyncBuffer::new(fmt),
+            current: None,
+            fmt,
+            drift: DriftCorrector::default(),
+        }
+    }
+
+    fn fill_i16(
+        &mut self,
+        out: &mut [i16],
+        dac_server_us: i64,
+        health: &HealthState,
+        fade: &mut FadeState,
+    ) {
+        let channels = self.fmt.channels as usize;
+        let mut sample_pos = 0usize;
+        let mut produced_frames = 0usize;
+
+        while sample_pos < out.len() {
+            let frame_server_us = dac_server_us + frames_to_us(produced_frames, self.fmt.rate);
+
+            if self.current.is_none() {
+                self.current = self.buffer.pop_due_exact(frame_server_us);
+            }
+
+            let Some(chunk) = self.current.as_mut() else {
+                let remaining_frames = (out.len() - sample_pos) / channels;
+                let silence_frames = self
+                    .buffer
+                    .next_playout_us()
+                    .and_then(|next| {
+                        if next > frame_server_us {
+                            Some(us_to_frames(next - frame_server_us, self.fmt.rate))
+                        } else {
+                            None
+                        }
+                    })
+                    .unwrap_or(remaining_frames)
+                    .clamp(1, remaining_frames);
+                if fade.phase == FadePhase::Playing {
+                    health.underrun_count.fetch_add(1, Ordering::Relaxed);
+                }
+                let silence_samples = silence_frames * channels;
+                for sample in &mut out[sample_pos..sample_pos + silence_samples] {
+                    *sample = fade.drain();
+                }
+                sample_pos += silence_samples;
+                produced_frames += silence_frames;
+                continue;
+            };
+
+            let age_us = frame_server_us - chunk.current_playout_us();
+            if self.drift.should_drop_frame(age_us) && chunk.remaining_samples() > channels {
+                chunk.read_pos += channels;
+            }
+
+            let remaining_output_frames = (out.len() - sample_pos) / channels;
+            let chunk_frames = chunk.remaining_samples() / channels;
+            let frames = remaining_output_frames.min(chunk_frames);
+            let samples = frames * channels;
+            for src in &chunk.samples[chunk.read_pos..chunk.read_pos + samples] {
+                out[sample_pos] = fade.feed(*src);
+                sample_pos += 1;
+            }
+            chunk.read_pos += samples;
+            produced_frames += frames;
+
+            if chunk.is_exhausted() {
+                self.current = None;
+            }
+        }
+    }
+}
+
+#[derive(Default)]
+struct DriftCorrector {
+    callbacks_since_last_drop: u32,
+}
+
+impl DriftCorrector {
+    fn should_drop_frame(&mut self, age_us: i64) -> bool {
+        self.callbacks_since_last_drop = self.callbacks_since_last_drop.saturating_add(1);
+        if age_us > 2_000 && self.callbacks_since_last_drop >= 2 {
+            self.callbacks_since_last_drop = 0;
+            true
+        } else {
+            false
+        }
+    }
+}
+
 impl Player {
-    pub fn new(fmt: SampleFormat, device_name: Option<&str>) -> Result<Self, SoniumError> {
+    pub fn new(
+        fmt: SampleFormat,
+        device_name: Option<&str>,
+        playback: Option<PlaybackHandle>,
+    ) -> Result<Self, SoniumError> {
         let capacity = fmt.rate as usize * fmt.channels as usize * 2; // ~2 s headroom
         let ring = Arc::new(Mutex::new(VecDeque::<i16>::with_capacity(capacity)));
         let health = Arc::new(HealthState::default());
         let max_samples = Arc::new(AtomicUsize::new(capacity));
+        let latest_output_latency_us = playback
+            .as_ref()
+            .map(|p| p.latest_output_latency_us.clone())
+            .unwrap_or_else(|| Arc::new(AtomicI64::new(0)));
 
         // init_tx/rx: audio thread reports success or failure back to Player::new.
         let (init_tx, init_rx) = mpsc::sync_channel::<Result<(), String>>(0);
         // keepalive: while Player holds park_tx, the audio thread keeps running.
         let (park_tx, park_rx) = mpsc::sync_channel::<()>(0);
 
-        let ring_clone = ring.clone();
-        let health_clone = health.clone();
         let device_owned = device_name.map(String::from);
+        let audio_state = AudioState {
+            ring: ring.clone(),
+            health: health.clone(),
+            playback: playback.clone(),
+            latest_output_latency_us: latest_output_latency_us.clone(),
+        };
         thread::Builder::new()
             .name("sonium-audio".into())
-            .spawn(move || {
-                audio_thread(
-                    ring_clone,
-                    health_clone,
-                    fmt,
-                    device_owned,
-                    init_tx,
-                    park_rx,
-                )
-            })
+            .spawn(move || audio_thread(audio_state, fmt, device_owned, init_tx, park_rx))
             .map_err(|e| SoniumError::Audio(format!("spawn: {e}")))?;
 
         init_rx
@@ -92,6 +289,8 @@ impl Player {
             fmt,
             health,
             max_samples,
+            playback,
+            latest_output_latency_us,
             _keepalive: park_tx,
         })
     }
@@ -103,6 +302,9 @@ impl Player {
     }
 
     pub fn buffered_us(&self) -> i64 {
+        if self.playback.is_some() {
+            return self.latest_output_latency_us.load(Ordering::Relaxed);
+        }
         let ring = self.ring.lock().unwrap();
         let frames = ring.len() / self.fmt.channels as usize;
         (frames as f64 / self.fmt.rate as f64 * 1_000_000.0) as i64
@@ -152,8 +354,7 @@ impl Player {
 }
 
 fn audio_thread(
-    ring: Arc<Mutex<VecDeque<i16>>>,
-    health: Arc<HealthState>,
+    audio_state: AudioState,
     fmt: SampleFormat,
     device_name: Option<String>,
     init_tx: SyncSender<Result<(), String>>,
@@ -168,7 +369,7 @@ fn audio_thread(
     }
 
     // ── Initial open ──────────────────────────────────────────────────────
-    let stream = match try_open_stream(ring.clone(), health.clone(), fmt, device_name.as_deref()) {
+    let stream = match try_open_stream(audio_state.clone(), fmt, device_name.as_deref()) {
         Ok(s) => {
             let _ = init_tx.send(Ok(()));
             s
@@ -202,20 +403,22 @@ fn audio_thread(
             Err(mpsc::RecvTimeoutError::Timeout) => {
                 if current_stream.is_none() {
                     // Device was lost — attempt to re-open
-                    match try_open_stream(ring.clone(), health.clone(), fmt, device_name.as_deref())
-                    {
+                    match try_open_stream(audio_state.clone(), fmt, device_name.as_deref()) {
                         Ok(s) => {
                             info!("Audio device recovered — stream re-opened");
                             current_stream = Some(s);
                             backoff = Duration::from_millis(100);
 
                             // Flush stale samples that accumulated during downtime
-                            if let Ok(mut r) = ring.lock() {
+                            if let Ok(mut r) = audio_state.ring.lock() {
                                 let stale = r.len();
                                 r.clear();
                                 if stale > 0 {
                                     info!(flushed = stale, "Cleared stale samples after recovery");
                                 }
+                            }
+                            if let Some(playback) = audio_state.playback.as_ref() {
+                                playback.clear();
                             }
                         }
                         Err(e) => {
@@ -255,8 +458,7 @@ fn select_device(host: &cpal::Host, requested: Option<&str>) -> Result<cpal::Dev
 }
 
 fn try_open_stream(
-    ring: Arc<Mutex<VecDeque<i16>>>,
-    health: Arc<HealthState>,
+    audio_state: AudioState,
     fmt: SampleFormat,
     device_name: Option<&str>,
 ) -> Result<cpal::Stream, String> {
@@ -269,7 +471,10 @@ fn try_open_stream(
         .default_output_config()
         .map_err(|e| format!("default_output_config: {e}"))?;
 
-    let fixed_frames = (fmt.rate / 25).max(256);
+    // Snapcast uses a ~100 ms CoreAudio buffer.  Matching that gives the
+    // backend a calmer local cadence while the jitter buffer remains the
+    // network latency authority.
+    let fixed_frames = (fmt.rate / 10).max(256);
     let fixed_config = cpal::StreamConfig {
         channels: fmt.channels as cpal::ChannelCount,
         sample_rate: cpal::SampleRate(fmt.rate),
@@ -287,8 +492,7 @@ fn try_open_stream(
         &device,
         supported.sample_format(),
         &fixed_config,
-        ring.clone(),
-        health.clone(),
+        audio_state.clone(),
         fade_samples,
     )
     .or_else(|e| {
@@ -300,8 +504,7 @@ fn try_open_stream(
             &device,
             supported.sample_format(),
             &default_config,
-            ring.clone(),
-            health.clone(),
+            audio_state.clone(),
             fade_samples,
         )
     })
@@ -315,20 +518,29 @@ fn build_stream_for_format(
     device: &cpal::Device,
     sample_format: cpal::SampleFormat,
     config: &cpal::StreamConfig,
-    ring: Arc<Mutex<VecDeque<i16>>>,
-    health: Arc<HealthState>,
+    audio_state: AudioState,
     fade_samples: usize,
 ) -> Result<cpal::Stream, cpal::BuildStreamError> {
     match sample_format {
         cpal::SampleFormat::I16 => {
             let mut fade = FadeState::new(fade_samples);
             let mut timing = CallbackTiming::new(config.channels, config.sample_rate.0);
-            let data_health = health.clone();
-            let err_health = health.clone();
+            let data_health = audio_state.health.clone();
+            let err_health = audio_state.health.clone();
+            let ring = audio_state.ring.clone();
+            let playback = audio_state.playback.clone();
+            let latest_output_latency_us = audio_state.latest_output_latency_us.clone();
             device.build_output_stream(
                 config,
-                move |data: &mut [i16], _: &cpal::OutputCallbackInfo| {
+                move |data: &mut [i16], info: &cpal::OutputCallbackInfo| {
                     timing.observe(data.len(), &data_health);
+                    if let Some(playback) = playback.as_ref() {
+                        playback.fill_i16(data, info, &data_health, &mut fade);
+                        return;
+                    }
+                    if let Some(latency_us) = output_latency_us(info) {
+                        latest_output_latency_us.store(latency_us, Ordering::Relaxed);
+                    }
                     let mut ring = ring.lock().unwrap();
                     for sample in data.iter_mut() {
                         if let Some(s) = ring.pop_front() {
@@ -353,12 +565,27 @@ fn build_stream_for_format(
         cpal::SampleFormat::U16 => {
             let mut fade = FadeState::new(fade_samples);
             let mut timing = CallbackTiming::new(config.channels, config.sample_rate.0);
-            let data_health = health.clone();
-            let err_health = health.clone();
+            let data_health = audio_state.health.clone();
+            let err_health = audio_state.health.clone();
+            let ring = audio_state.ring.clone();
+            let playback = audio_state.playback.clone();
+            let latest_output_latency_us = audio_state.latest_output_latency_us.clone();
+            let mut scratch = Vec::<i16>::new();
             device.build_output_stream(
                 config,
-                move |data: &mut [u16], _: &cpal::OutputCallbackInfo| {
+                move |data: &mut [u16], info: &cpal::OutputCallbackInfo| {
                     timing.observe(data.len(), &data_health);
+                    if let Some(playback) = playback.as_ref() {
+                        scratch.resize(data.len(), 0);
+                        playback.fill_i16(&mut scratch, info, &data_health, &mut fade);
+                        for (dst, src) in data.iter_mut().zip(scratch.iter()) {
+                            *dst = (*src as i32 + 32768) as u16;
+                        }
+                        return;
+                    }
+                    if let Some(latency_us) = output_latency_us(info) {
+                        latest_output_latency_us.store(latency_us, Ordering::Relaxed);
+                    }
                     let mut ring = ring.lock().unwrap();
                     for sample in data.iter_mut() {
                         let s16 = if let Some(s) = ring.pop_front() {
@@ -384,12 +611,27 @@ fn build_stream_for_format(
         cpal::SampleFormat::F32 => {
             let mut fade = FadeState::new(fade_samples);
             let mut timing = CallbackTiming::new(config.channels, config.sample_rate.0);
-            let data_health = health.clone();
-            let err_health = health.clone();
+            let data_health = audio_state.health.clone();
+            let err_health = audio_state.health.clone();
+            let ring = audio_state.ring.clone();
+            let playback = audio_state.playback.clone();
+            let latest_output_latency_us = audio_state.latest_output_latency_us.clone();
+            let mut scratch = Vec::<i16>::new();
             device.build_output_stream(
                 config,
-                move |data: &mut [f32], _: &cpal::OutputCallbackInfo| {
+                move |data: &mut [f32], info: &cpal::OutputCallbackInfo| {
                     timing.observe(data.len(), &data_health);
+                    if let Some(playback) = playback.as_ref() {
+                        scratch.resize(data.len(), 0);
+                        playback.fill_i16(&mut scratch, info, &data_health, &mut fade);
+                        for (dst, src) in data.iter_mut().zip(scratch.iter()) {
+                            *dst = *src as f32 / 32768.0;
+                        }
+                        return;
+                    }
+                    if let Some(latency_us) = output_latency_us(info) {
+                        latest_output_latency_us.store(latency_us, Ordering::Relaxed);
+                    }
                     let mut ring = ring.lock().unwrap();
                     for sample in data.iter_mut() {
                         let s16 = if let Some(s) = ring.pop_front() {
@@ -414,6 +656,24 @@ fn build_stream_for_format(
         }
         _ => Err(cpal::BuildStreamError::StreamConfigNotSupported),
     }
+}
+
+fn output_latency_us(info: &cpal::OutputCallbackInfo) -> Option<i64> {
+    let ts = info.timestamp();
+    ts.playback
+        .duration_since(&ts.callback)
+        .map(|duration| duration.as_micros().min(i64::MAX as u128) as i64)
+}
+
+fn frames_to_us(frames: usize, sample_rate: u32) -> i64 {
+    ((frames as u128) * 1_000_000u128 / u128::from(sample_rate.max(1))).min(i64::MAX as u128) as i64
+}
+
+fn us_to_frames(us: i64, sample_rate: u32) -> usize {
+    if us <= 0 {
+        return 0;
+    }
+    ((us as u128) * u128::from(sample_rate.max(1)) / 1_000_000u128).min(usize::MAX as u128) as usize
 }
 
 struct CallbackTiming {
@@ -553,5 +813,59 @@ impl FadeState {
         self.fade_pos += 1;
         self.last_val = sample;
         (sample as f32 * gain) as i16
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn mono_1khz() -> SampleFormat {
+        SampleFormat::new(1_000, 16, 1)
+    }
+
+    #[test]
+    fn callback_timeline_waits_until_chunk_is_due() {
+        let fmt = mono_1khz();
+        let mut timeline = PlaybackTimeline::new(fmt);
+        let health = HealthState::default();
+        let mut fade = FadeState::new(1);
+
+        timeline
+            .buffer
+            .push(PcmChunk::new(10_000, vec![1, 2, 3, 4, 5], fmt), 0);
+
+        let mut early = [99i16; 5];
+        timeline.fill_i16(&mut early, 0, &health, &mut fade);
+
+        assert_eq!(early, [0, 0, 0, 0, 0]);
+        assert_eq!(timeline.buffer.buffer_depth_us(), 5_000);
+        assert_eq!(health.underrun_count.load(Ordering::Relaxed), 1);
+
+        let mut due = [0i16; 5];
+        let mut fade = FadeState::new(1);
+        timeline.fill_i16(&mut due, 10_000, &health, &mut fade);
+
+        assert_eq!(due, [1, 2, 3, 4, 5]);
+        assert!(timeline.current.is_none());
+    }
+
+    #[test]
+    fn callback_timeline_inserts_partial_silence_before_due_chunk() {
+        let fmt = mono_1khz();
+        let mut timeline = PlaybackTimeline::new(fmt);
+        let health = HealthState::default();
+        let mut fade = FadeState::new(1);
+
+        timeline
+            .buffer
+            .push(PcmChunk::new(3_000, vec![7, 8, 9], fmt), 0);
+
+        let mut out = [0i16; 6];
+        timeline.fill_i16(&mut out, 0, &health, &mut fade);
+
+        assert_eq!(out[0..3], [0, 0, 0]);
+        assert_ne!(out[3..6], [0, 0, 0]);
+        assert!(timeline.current.is_none());
     }
 }

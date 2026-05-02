@@ -204,6 +204,49 @@ impl SyncBuffer {
         None
     }
 
+    /// Return the next chunk only when its timestamp is actually due.
+    ///
+    /// This is intended for audio-callback-driven playback, where the callback
+    /// already knows the server-clock time at which the first requested output
+    /// frame will hit the DAC. Unlike [`pop_ready`][Self::pop_ready], this does
+    /// not apply the jitter-buffer `lead_us` lookahead.
+    pub fn pop_due_exact(&mut self, now_server_us: i64) -> Option<PcmChunk> {
+        self.drop_stale(now_server_us);
+        let front = self.chunks.front()?;
+        if front.playout_us <= now_server_us {
+            self.state = State::Playing;
+            let chunk = self.chunks.pop_front().unwrap();
+            self.buffered_samples = self
+                .buffered_samples
+                .saturating_sub(chunk.remaining_samples());
+            Some(chunk)
+        } else {
+            None
+        }
+    }
+
+    /// Playout timestamp for the next queued chunk.
+    pub fn next_playout_us(&self) -> Option<i64> {
+        self.chunks.front().map(|chunk| chunk.playout_us)
+    }
+
+    fn drop_stale(&mut self, now_server_us: i64) {
+        let stale_threshold_us = (self.target_buffer_us / 2).clamp(100_000, 2_000_000);
+
+        while let Some(front) = self.chunks.front() {
+            let end_us = front.playout_us + front.remaining_us();
+            if end_us < now_server_us - stale_threshold_us {
+                let dropped = self.chunks.pop_front().unwrap();
+                self.buffered_samples = self
+                    .buffered_samples
+                    .saturating_sub(dropped.remaining_samples());
+                self.stale_drop_count += 1;
+                continue;
+            }
+            break;
+        }
+    }
+
     fn drop_excess_buffered_audio(&mut self) {
         let max_buffer_us = self.target_buffer_us.saturating_mul(2).max(500_000);
         while self.buffer_depth_us() > max_buffer_us {
