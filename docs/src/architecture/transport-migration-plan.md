@@ -737,6 +737,10 @@ Live v0.1.55 Wi-Fi validation:
   - Production playback was restored to the proven `SyncBuffer` + 5 ms audio-pump + local ring-buffer path while preserving the callback-driven `PlaybackTimeline` code for a later guarded experiment.
   - The fixed CoreAudio callback buffer was returned to the shorter local cadence used before the Snapcast-style experiment; network jitter depth remains controlled by `buffer_ms`/auto-buffer.
   - Snapcast's architecture is still the target direction, but the next attempt must ship behind an explicit runtime switch and add backend-latency validation before becoming the default TCP path.
+- Second TCP stability hotfix after live `v0.1.59` regression:
+  - Live TCP testing still showed heavy stuttering because the stricter `SyncBuffer::pop_ready` timestamp-only release policy from the first Snapcast-inspired fix remained active.
+  - Production `pop_ready` was restored to the earlier depth-tolerant behavior: buffering can start once target depth is available, and playing can keep the local output ring fed once low-water depth exists.
+  - The stricter callback-only methods remain available for a future opt-in backend-clock experiment, but the default TCP path now prioritizes the previously validated stable ring-buffer behavior.
 
 ---
 
