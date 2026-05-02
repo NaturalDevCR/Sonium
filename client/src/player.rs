@@ -471,10 +471,9 @@ fn try_open_stream(
         .default_output_config()
         .map_err(|e| format!("default_output_config: {e}"))?;
 
-    // Snapcast uses a ~100 ms CoreAudio buffer.  Matching that gives the
-    // backend a calmer local cadence while the jitter buffer remains the
-    // network latency authority.
-    let fixed_frames = (fmt.rate / 10).max(256);
+    // Keep the local backend cadence short while the network jitter buffer
+    // remains the latency authority.
+    let fixed_frames = (fmt.rate / 25).max(256);
     let fixed_config = cpal::StreamConfig {
         channels: fmt.channels as cpal::ChannelCount,
         sample_rate: cpal::SampleRate(fmt.rate),

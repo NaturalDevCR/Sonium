@@ -732,6 +732,11 @@ Live v0.1.55 Wi-Fi validation:
   - If a chunk is due partway through an output callback, the callback emits silence until that exact media timestamp, then starts the chunk. This preserves timestamp continuity instead of draining future audio early.
   - A first soft drift correction is in place: when callback playout is repeatedly late by more than 2 ms, the timeline drops one PCM frame at a controlled cadence to converge without a hard stale-drop reset.
   - Local backend latency is now separated from network jitter-buffer target: network depth remains in `buffer_depth_ms`/`target_playout_latency_ms`, while backend output latency is reported separately.
+- TCP stability hotfix after live `v0.1.58` regression:
+  - Live TCP testing at `buffer_ms=1200`, `auto_buffer=false` showed frequent audible cuts after enabling callback-driven playout.
+  - Production playback was restored to the proven `SyncBuffer` + 5 ms audio-pump + local ring-buffer path while preserving the callback-driven `PlaybackTimeline` code for a later guarded experiment.
+  - The fixed CoreAudio callback buffer was returned to the shorter local cadence used before the Snapcast-style experiment; network jitter depth remains controlled by `buffer_ms`/auto-buffer.
+  - Snapcast's architecture is still the target direction, but the next attempt must ship behind an explicit runtime switch and add backend-latency validation before becoming the default TCP path.
 
 ---
 
