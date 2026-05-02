@@ -720,6 +720,11 @@ Live v0.1.55 Wi-Fi validation:
   - Require sustained clean intervals before reducing latency.
   - Step up more aggressively on stale bursts, RTP burst gaps/concealment, underruns, or RTP decode errors.
   - Keep single/light RTP gaps from forcing health degradation, but do not let them count as clean enough to lower latency.
+- Snapcast parity investigation:
+  - Local Snapcast review showed its client keeps the media timeline authoritative: the audio backend asks the stream for frames using the backend's current DAC/output latency, and the stream returns silence when the next chunk is still too early instead of playing future audio.
+  - Sonium's `SyncBuffer::pop_ready` still allowed future chunks to be released when internal buffer depth crossed a low-water threshold. That kept the output ring full, but it could also play ahead of the server timestamp timeline and then recover through stale drops or health-state churn.
+  - First Snapcast-inspired parity fix: `SyncBuffer` now releases chunks only when their playout timestamp is due within `lead_us`; queue depth alone no longer authorizes early playout. The output ring still provides device-side prefill, but the timestamp timeline is the source of truth.
+  - Remaining Snapcast lessons for later Phase 3 work: expose real device/DAC latency where CPAL supports it, add soft drift correction by dropping/duplicating/resampling tiny frame counts instead of hard sync, and keep underflow-aware device latency adaptation separate from network jitter adaptation.
 
 ---
 

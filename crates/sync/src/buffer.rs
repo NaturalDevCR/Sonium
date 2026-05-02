@@ -156,8 +156,6 @@ impl SyncBuffer {
     /// before checking.
     pub fn pop_ready(&mut self, now_server_us: i64) -> Option<PcmChunk> {
         let stale_threshold_us = (self.target_buffer_us / 2).clamp(100_000, 2_000_000);
-        let low_water_us = self.lead_us.max(40_000);
-
         while let Some(front) = self.chunks.front() {
             let end_us = front.playout_us + front.remaining_us();
             if end_us < now_server_us - stale_threshold_us {
@@ -180,13 +178,11 @@ impl SyncBuffer {
         }
 
         let front = self.chunks.front()?;
-        let has_target_depth = self.buffer_depth_us() >= self.target_buffer_us;
-        let has_playing_depth = self.buffer_depth_us() >= low_water_us;
         let chunk_is_due = front.playout_us <= now_server_us + self.lead_us;
 
         match self.state {
             State::Buffering => {
-                if chunk_is_due || has_target_depth {
+                if chunk_is_due {
                     self.state = State::Playing;
                     let chunk = self.chunks.pop_front().unwrap();
                     self.buffered_samples = self
@@ -196,7 +192,7 @@ impl SyncBuffer {
                 }
             }
             State::Playing => {
-                if chunk_is_due || has_playing_depth {
+                if chunk_is_due {
                     let chunk = self.chunks.pop_front().unwrap();
                     self.buffered_samples = self
                         .buffered_samples
@@ -364,22 +360,23 @@ mod tests {
     }
 
     #[test]
-    fn releases_oldest_when_target_depth_is_reached_even_if_clock_lags() {
+    fn target_depth_does_not_release_future_chunks_early() {
         let mut buf = SyncBuffer::new(fmt());
         buf.set_target_buffer_ms(100);
         let now = 1_000_000i64;
 
-        // 10 ms per chunk, all scheduled well in the future. If clock sync is
-        // lagging, playout should still recover once enough audio is queued.
+        // 10 ms per chunk, all scheduled well in the future. Even if target
+        // depth is reached, the sync buffer must not play ahead of the
+        // timestamp timeline; the audio backend can emit silence until due.
         for i in 0..10 {
             buf.push(chunk(now + 5_000_000 + i * 10_000, 960), now);
         }
 
-        assert!(buf.pop_ready(now).is_some());
+        assert!(buf.pop_ready(now).is_none());
     }
 
     #[test]
-    fn playing_state_uses_low_water_depth_to_avoid_burst_silence_cycles() {
+    fn playing_state_does_not_use_depth_to_play_future_chunks() {
         let mut buf = SyncBuffer::new(fmt());
         buf.set_target_buffer_ms(1000);
         let now = 1_000_000i64;
@@ -388,13 +385,13 @@ mod tests {
         buf.push(chunk(now, 960), now);
         assert!(buf.pop_ready(now).is_some());
 
-        // Subsequent chunks are far in the future due to a bad clock estimate,
-        // but once a small low-water amount is queued, playout should continue
-        // instead of waiting for the full target buffer again.
+        // Subsequent chunks are far in the future. Snapcast-style playout
+        // keeps the media timeline authoritative instead of using queue depth
+        // alone to fast-forward into future audio.
         for i in 0..10 {
             buf.push(chunk(now + 5_000_000 + i * 10_000, 960), now);
         }
 
-        assert!(buf.pop_ready(now).is_some());
+        assert!(buf.pop_ready(now).is_none());
     }
 }
