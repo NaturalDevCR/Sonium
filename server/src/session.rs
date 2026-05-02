@@ -45,6 +45,9 @@ const WRITE_TIMEOUT: Duration = Duration::from_secs(5);
 // Consecutive clean health-report intervals required before leaving Recovering.
 // At the default 2-second reporting cadence this equals 10 seconds of clean signal.
 const STABLE_STREAK_REQUIRED: u32 = 5;
+const AUTO_BUFFER_CLEAN_INTERVALS_BEFORE_STEP_DOWN: u32 = 8;
+const AUTO_BUFFER_RTP_BURST_THRESHOLD: u32 = 6;
+const AUTO_BUFFER_STALE_BURST_THRESHOLD: u32 = 4;
 
 #[derive(Debug)]
 struct AutoBufferTuner {
@@ -57,6 +60,10 @@ struct AutoBufferTuner {
     last_adjust: Instant,
     last_underrun: u32,
     last_stale: u32,
+    last_rtp_gaps: u32,
+    last_rtp_concealed: u32,
+    last_rtp_decode_errors: u32,
+    clean_intervals: u32,
 }
 
 impl AutoBufferTuner {
@@ -73,38 +80,72 @@ impl AutoBufferTuner {
             last_adjust: Instant::now(),
             last_underrun: 0,
             last_stale: 0,
+            last_rtp_gaps: 0,
+            last_rtp_concealed: 0,
+            last_rtp_decode_errors: 0,
+            clean_intervals: 0,
         }
     }
 
     fn on_health(&mut self, report: &HealthReport, current_buffer_ms: u32) -> Option<u32> {
         if !self.enabled {
-            self.last_underrun = report.underrun_count;
-            self.last_stale = report.stale_drop_count;
+            self.remember(report);
             return None;
         }
 
         let now = Instant::now();
-        let underrun_increased = report.underrun_count > self.last_underrun;
-        let stale_increased = report.stale_drop_count > self.last_stale;
+        let underrun_delta = report.underrun_count.saturating_sub(self.last_underrun);
+        let stale_delta = report.stale_drop_count.saturating_sub(self.last_stale);
+        let rtp_gap_delta = report.rtp_sequence_gaps.saturating_sub(self.last_rtp_gaps);
+        let rtp_concealed_delta = report
+            .rtp_concealed_packets
+            .saturating_sub(self.last_rtp_concealed);
+        let rtp_decode_error_delta = report
+            .rtp_decode_error_count
+            .saturating_sub(self.last_rtp_decode_errors);
         let high_jitter = report.jitter_ms > (current_buffer_ms.saturating_mul(7) / 10).max(80);
         let low_jitter = report.jitter_ms < (current_buffer_ms.saturating_mul(35) / 100).max(40);
+        let stale_burst = stale_delta > AUTO_BUFFER_STALE_BURST_THRESHOLD;
+        let rtp_burst = rtp_gap_delta > AUTO_BUFFER_RTP_BURST_THRESHOLD
+            || rtp_concealed_delta > AUTO_BUFFER_RTP_BURST_THRESHOLD;
+        let rtp_activity =
+            rtp_gap_delta > 0 || rtp_concealed_delta > 0 || rtp_decode_error_delta > 0;
+        let unhealthy = underrun_delta > 0
+            || stale_delta > 0
+            || high_jitter
+            || rtp_decode_error_delta > 0
+            || rtp_burst;
 
-        self.last_underrun = report.underrun_count;
-        self.last_stale = report.stale_drop_count;
+        if unhealthy || rtp_activity {
+            self.clean_intervals = 0;
+        } else {
+            self.clean_intervals = self.clean_intervals.saturating_add(1);
+        }
+
+        self.remember(report);
 
         if now.duration_since(self.last_adjust) < self.cooldown {
             return None;
         }
 
-        if (underrun_increased || stale_increased || high_jitter) && current_buffer_ms < self.max_ms
-        {
+        if unhealthy && current_buffer_ms < self.max_ms {
             self.last_adjust = now;
-            return Some((current_buffer_ms + self.step_up_ms).min(self.max_ms));
+            let severe =
+                underrun_delta > 0 || stale_burst || rtp_burst || rtp_decode_error_delta > 0;
+            let step = if severe {
+                self.step_up_ms.saturating_mul(2)
+            } else {
+                self.step_up_ms
+            };
+            return Some((current_buffer_ms + step).min(self.max_ms));
         }
 
-        if !underrun_increased && !stale_increased && low_jitter && current_buffer_ms > self.min_ms
+        if self.clean_intervals >= AUTO_BUFFER_CLEAN_INTERVALS_BEFORE_STEP_DOWN
+            && low_jitter
+            && current_buffer_ms > self.min_ms
         {
             self.last_adjust = now;
+            self.clean_intervals = 0;
             return Some(
                 current_buffer_ms
                     .saturating_sub(self.step_down_ms)
@@ -113,6 +154,14 @@ impl AutoBufferTuner {
         }
 
         None
+    }
+
+    fn remember(&mut self, report: &HealthReport) {
+        self.last_underrun = report.underrun_count;
+        self.last_stale = report.stale_drop_count;
+        self.last_rtp_gaps = report.rtp_sequence_gaps;
+        self.last_rtp_concealed = report.rtp_concealed_packets;
+        self.last_rtp_decode_errors = report.rtp_decode_error_count;
     }
 }
 
@@ -949,5 +998,68 @@ mod tests {
         feed(&mut t, &r0);
         let r1 = stale_report(&r0);
         assert_eq!(feed(&mut t, &r1), AudioHealthState::Degraded);
+    }
+
+    fn auto_tuner() -> AutoBufferTuner {
+        AutoBufferTuner {
+            enabled: true,
+            min_ms: 1200,
+            max_ms: 2400,
+            step_up_ms: 200,
+            step_down_ms: 50,
+            cooldown: Duration::from_secs(4),
+            last_adjust: Instant::now() - Duration::from_secs(10),
+            last_underrun: 0,
+            last_stale: 0,
+            last_rtp_gaps: 0,
+            last_rtp_concealed: 0,
+            last_rtp_decode_errors: 0,
+            clean_intervals: 0,
+        }
+    }
+
+    fn rtp_report(stale_drops: u32, gaps: u32, concealed: u32, jitter_ms: u32) -> HealthReport {
+        HealthReport::new(0, 0, stale_drops, 1000, jitter_ms, 0)
+            .with_rtp_metrics(10_000, gaps, 0, concealed)
+    }
+
+    #[test]
+    fn auto_buffer_steps_up_on_stale_delta() {
+        let mut t = auto_tuner();
+        let report = rtp_report(1, 0, 0, 0);
+
+        assert_eq!(t.on_health(&report, 1200), Some(1400));
+    }
+
+    #[test]
+    fn auto_buffer_uses_larger_step_for_rtp_burst() {
+        let mut t = auto_tuner();
+        let report = rtp_report(0, AUTO_BUFFER_RTP_BURST_THRESHOLD + 1, 0, 0);
+
+        assert_eq!(t.on_health(&report, 1200), Some(1600));
+    }
+
+    #[test]
+    fn auto_buffer_does_not_step_down_on_recent_rtp_activity() {
+        let mut t = auto_tuner();
+        t.clean_intervals = AUTO_BUFFER_CLEAN_INTERVALS_BEFORE_STEP_DOWN;
+        let report = rtp_report(0, 1, 1, 0);
+
+        assert_eq!(t.on_health(&report, 1600), None);
+        assert_eq!(t.clean_intervals, 0);
+    }
+
+    #[test]
+    fn auto_buffer_steps_down_only_after_sustained_clean_reports() {
+        let mut t = auto_tuner();
+        let clean = rtp_report(0, 0, 0, 0);
+
+        for _ in 0..AUTO_BUFFER_CLEAN_INTERVALS_BEFORE_STEP_DOWN - 1 {
+            t.last_adjust = Instant::now() - Duration::from_secs(10);
+            assert_eq!(t.on_health(&clean, 1600), None);
+        }
+
+        t.last_adjust = Instant::now() - Duration::from_secs(10);
+        assert_eq!(t.on_health(&clean, 1600), Some(1550));
     }
 }

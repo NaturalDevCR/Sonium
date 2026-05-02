@@ -703,6 +703,24 @@ Phase 2 validation next steps:
 - For a definitive Phase 2 clean-LAN baseline, test on wired Ethernet (no Wi-Fi aggregation burstiness).
 - Use `tc netem` loss profiles on wired for the RTP/UDP vs. TCP comparison (Phase 0 showed TCP fails catastrophically at 30% loss; RTP/UDP with PLC should handle 1–3% cleanly).
 
+Live v0.1.55 Wi-Fi validation:
+- Subjective result: audible playback improved compared with the first RTP/UDP run, but intermittent skips are still present.
+- Metrics snapshot after the PLC/stale-PLC fixes: `rtp_packets_received=8546`, `rtp_sequence_gaps=100`, `rtp_concealed_packets=100`, `rtp_decode_errors=0`, `underruns=0`, `stale_drops=232`, `target_playout_latency_ms=1200`.
+- Interpretation: every detected RTP gap was concealed and the client did not underrun, so the remaining skips are no longer a raw missing-packet/decode failure. The remaining problem is late/bursty delivery interacting with fixed playout policy, visible as rising stale drops and health cycling through `Degraded`/`Recovering`.
+- Captured 180 second baseline `rtp-wifi-buffer-1200ms-v0155-20260502T062955Z`:
+  - Final snapshot: `rtp_packets_received=10989`, `rtp_sequence_gaps=108`, `rtp_concealed_packets=108`, `rtp_decode_errors=0`, `underruns=0`, `stale_drops=184`, `buffer_depth_ms=1280`, `target_playout_latency_ms=1200`.
+  - Follow-up 60 second live sample continued the same pattern: gaps and concealment remained matched, decode errors and underruns stayed at zero, but stale drops increased from `251` to `292`.
+  - Conclusion: fixed `buffer_ms=1200` is close but not sufficient on this Wi-Fi path. The existing server-side auto-buffer tuner was disabled for this run, so no adaptive step-up was allowed despite stale-drop growth.
+- Live auto-buffer trial with `min=1200`, `max=2400`, `step_up=200`, `step_down=50`, `cooldown=4000`:
+  - `target_playout_latency_ms` rose from `1200` toward `2000` as stale drops appeared.
+  - Stale-drop growth slowed dramatically versus the fixed-buffer run (`26 -> 51` over the first ~110 seconds, versus hundreds over the previous run), while `underruns=0` and `rtp_decode_errors=0` remained true.
+  - The existing tuner proved the right control surface, but it was too eager to step down because `jitter_ms` stayed low even while RTP gaps/concealment continued. This caused target oscillation (`1350 -> 1250 -> 1400 -> 1550...`).
+- Phase 3 first implementation step:
+  - Treat any recent RTP gap/concealment as activity that blocks step-down.
+  - Require sustained clean intervals before reducing latency.
+  - Step up more aggressively on stale bursts, RTP burst gaps/concealment, underruns, or RTP decode errors.
+  - Keep single/light RTP gaps from forcing health degradation, but do not let them count as clean enough to lower latency.
+
 ---
 
 ## Phase 0 - Baseline and observability hardening
