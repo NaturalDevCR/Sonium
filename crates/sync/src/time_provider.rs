@@ -44,6 +44,7 @@ pub struct TimeProvider {
     offset_us: Arc<AtomicI64>,
     samples: parking_lot::Mutex<SampleBuffer>,
     last_sync: parking_lot::Mutex<Option<Instant>>,
+    min_rtt_us: parking_lot::Mutex<Option<i64>>,
 }
 
 struct SampleBuffer {
@@ -95,6 +96,7 @@ impl TimeProvider {
             offset_us: Arc::new(AtomicI64::new(0)),
             samples: parking_lot::Mutex::new(SampleBuffer::new(DEFAULT_SAMPLE_BUFFER_SIZE)),
             last_sync: parking_lot::Mutex::new(None),
+            min_rtt_us: parking_lot::Mutex::new(None),
         }
     }
 
@@ -130,12 +132,34 @@ impl TimeProvider {
     /// - `server_latency_us` — `(t_server_recv - t_client_sent)` as reported by the server
     pub fn update(&self, t_sent_us: i64, t_recv_us: i64, server_latency_us: i64) {
         let rtt_us = t_recv_us - t_sent_us;
-        // Offset = ( (T2 - T1) - (T4 - T2) ) / 2
-        // where T1=sent, T2=server_recv, T4=recv.
-        // server_latency_us = T2 - T1
-        // T4 - T2 = (T4 - T1) - (T2 - T1) = rtt_us - server_latency_us
-        // Offset = ( server_latency_us - (rtt_us - server_latency_us) ) / 2
-        // Offset = ( 2 * server_latency_us - rtt_us ) / 2
+
+        let mut min_rtt = self.min_rtt_us.lock();
+        let current_min = *min_rtt;
+
+        // If this RTT is lower than our historical minimum (or we have no minimum), update it.
+        // Also apply a slow decay to min_rtt to allow recovering if routing changes permanently.
+        let updated_min = if let Some(min) = current_min {
+            if rtt_us < min {
+                rtt_us
+            } else {
+                // Decay the minimum to allow recovering if routing changes permanently.
+                // Grow by 1000µs (1ms) each sample. At 1 sample/2s, it takes 40s to adapt to a 20ms increase.
+                min + 1_000
+            }
+        } else {
+            rtt_us
+        };
+        *min_rtt = Some(updated_min);
+
+        // Filter: only accept this sample if its RTT is within a reasonable threshold of the minimum.
+        // Threshold: 50% of min_rtt, or at least 10ms (10,000 µs), or max 50ms.
+        let threshold = (updated_min / 2).clamp(10_000, 50_000);
+        if rtt_us > updated_min + threshold {
+            // Sample is too jittery (likely queued behind TCP audio buffer or blocked in event loop).
+            // Reject it to avoid skewing the clock offset!
+            return;
+        }
+
         let diff_us = server_latency_us - (rtt_us / 2);
 
         let mut buf = self.samples.lock();
@@ -182,6 +206,7 @@ impl TimeProvider {
         self.samples.lock().clear();
         self.offset_us.store(0, Ordering::Relaxed);
         *self.last_sync.lock() = None;
+        *self.min_rtt_us.lock() = None;
     }
 
     /// Clone the underlying atomic for cheap lock-free reads from the audio
