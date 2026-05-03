@@ -101,10 +101,7 @@ impl PlaybackHandle {
     pub fn set_target_buffer_ms(&self, buffer_ms: i32) {
         // Delegates to PlaybackTimeline so the resampler is also reset when
         // the target changes (its EMA should start fresh).
-        self.inner
-            .lock()
-            .unwrap()
-            .set_target_buffer_ms(buffer_ms);
+        self.inner.lock().unwrap().set_target_buffer_ms(buffer_ms);
     }
 
     pub fn buffer_depth_us(&self) -> i64 {
@@ -440,9 +437,8 @@ impl AdaptiveResampler {
         // max_resample_ratio_relative is a multiplier ≥ 1.0.
         // 1.01 → ratio may deviate ±1% from the base; our ±500 ppm limit is
         // well inside that envelope.
-        let resampler =
-            SincFixedIn::new(1.0, 1.01, params, chunk_size, channels)
-                .expect("rubato SincFixedIn init failed");
+        let resampler = SincFixedIn::new(1.0, 1.01, params, chunk_size, channels)
+            .expect("rubato SincFixedIn init failed");
         let input_bufs = vec![vec![0.0f32; chunk_size]; channels];
         let output_bufs = resampler.output_buffer_allocate(true);
 
@@ -482,7 +478,11 @@ impl AdaptiveResampler {
     /// When a full processing block (`chunk_size` frames) is ready, rubato
     /// processes it and the resulting samples become available via `pop_output`.
     fn push_frame(&mut self, frame: &[i16]) {
-        debug_assert_eq!(frame.len(), self.channels, "frame must be exactly one frame");
+        debug_assert_eq!(
+            frame.len(),
+            self.channels,
+            "frame must be exactly one frame"
+        );
         for (chan, &s) in frame.iter().enumerate() {
             self.input_bufs[chan][self.input_filled] = s as f32 / 32768.0;
         }
