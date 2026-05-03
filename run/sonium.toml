@@ -1,9 +1,32 @@
+# ── Network ────────────────────────────────────────────────────────────────
 [server]
+bind         = "127.0.0.1"
 stream_port  = 1710
 control_port = 1711
-bind         = "127.0.0.1"
 mdns         = false        # desactivado en Mac para evitar permisos extra
+snapcast_compat = false
 
+# ── Audio timing ───────────────────────────────────────────────────────────
+[server.audio]
+buffer_ms         = 200   # jitter buffer global sugerido a clientes (ms)
+chunk_ms          = 10    # duración de cada chunk codificado (ms); mín 10 para Opus
+output_prefill_ms = 0     # prefill del ring del DAC; 0 = derivar de buffer_ms
+
+# ── Auto-buffer (ajuste automático del buffer por cliente) ─────────────────
+[server.auto_buffer]
+enabled      = false
+min_ms       = 20
+max_ms       = 3000
+step_up_ms   = 120
+step_down_ms = 40
+cooldown_ms  = 8000
+
+# ── Transport ──────────────────────────────────────────────────────────────
+[server.transport]
+mode     = "tcp"
+udp_port = 0
+
+# ── Logging ────────────────────────────────────────────────────────────────
 [log]
 level = "info"
 

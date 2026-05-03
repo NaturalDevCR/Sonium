@@ -4,6 +4,33 @@ use sonium_transport::TransportConfig;
 use crate::SampleFormat;
 
 /// Top-level config loaded from `sonium.toml` (or defaults — no file required).
+///
+/// Example layout:
+/// ```toml
+/// [server]
+/// bind         = "0.0.0.0"
+/// stream_port  = 1710
+/// control_port = 1711
+/// mdns         = true
+/// snapcast_compat = false
+///
+/// [server.audio]
+/// buffer_ms         = 200
+/// chunk_ms          = 10
+/// output_prefill_ms = 0
+///
+/// [server.auto_buffer]
+/// enabled       = false
+/// min_ms        = 20
+/// max_ms        = 3000
+/// step_up_ms    = 120
+/// step_down_ms  = 40
+/// cooldown_ms   = 8000
+///
+/// [server.transport]
+/// mode     = "tcp"
+/// udp_port = 0
+/// ```
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(default)]
 pub struct ServerConfig {
@@ -13,45 +40,66 @@ pub struct ServerConfig {
     pub log: LogConfig,
 }
 
+/// Network and feature flags for the server.
+///
+/// Audio, auto-buffer, and transport are in dedicated sub-sections so the
+/// `[server]` table stays small and readable.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(default)]
 pub struct ServerNet {
     pub bind: String,
-    /// TCP port for audio stream protocol.
+    /// TCP port for the audio stream protocol.
     pub stream_port: u16,
-    /// HTTP/WS port for control API + web UI.
+    /// HTTP/WS port for the control API and web UI.
     pub control_port: u16,
+    /// Advertise via mDNS so clients can discover the server automatically.
     pub mdns: bool,
-    /// When true: advertise `_snapcast._tcp` via mDNS so legacy Snapcast
-    /// clients can discover this server.  Also useful if you want to use
-    /// Sonium as a drop-in replacement on an existing Snapcast setup.
-    /// Ports must also be set to 1704/1780 manually for full compatibility.
+    /// Advertise `_snapcast._tcp` for legacy Snapcast client discovery.
+    /// Set ports to 1704/1780 manually for full wire compatibility.
     pub snapcast_compat: bool,
-    /// Global jitter buffer suggested to connected clients unless a stream overrides it.
+
+    /// Audio timing settings (`[server.audio]`).
+    pub audio: AudioConfig,
+    /// Automatic per-client jitter-buffer tuning (`[server.auto_buffer]`).
+    pub auto_buffer: AutoBufferConfig,
+    /// Media transport selection (`[server.transport]`).
+    pub transport: TransportConfig,
+}
+
+/// Audio timing knobs — buffer, chunk size, and output prefill.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default)]
+pub struct AudioConfig {
+    /// Global jitter buffer suggested to clients unless a stream overrides it.
     pub buffer_ms: u32,
     /// Global encoded audio chunk duration unless a stream overrides it.
+    /// Smaller → lower latency; larger → less packet overhead.
     pub chunk_ms: u32,
-    /// Local output-device prefill in milliseconds (`0` = derive from buffer_ms).
+    /// Output-device prefill in ms (`0` = derive from `buffer_ms`).
     ///
-    /// This is intentionally separate from `buffer_ms`: `buffer_ms` absorbs
-    /// network jitter, while this keeps the client's audio backend ring fed.
+    /// Intentionally separate from `buffer_ms`: `buffer_ms` absorbs network
+    /// jitter while this keeps the client audio ring fed ahead of the DAC.
     pub output_prefill_ms: u32,
-    /// Enable server-side automatic jitter buffer tuning per client session.
-    pub auto_buffer: bool,
-    /// Lower clamp for auto-tuned buffer target.
-    pub auto_buffer_min_ms: u32,
-    /// Upper clamp for auto-tuned buffer target.
-    pub auto_buffer_max_ms: u32,
-    /// Buffer increase step used when health degrades.
-    pub auto_buffer_step_up_ms: u32,
-    /// Buffer decrease step used during stable playback.
-    pub auto_buffer_step_down_ms: u32,
-    /// Minimum delay between auto-buffer adjustments.
-    pub auto_buffer_cooldown_ms: u64,
-    /// Media transport selection.  See [`TransportConfig`] for options.
-    /// Defaults to `tcp`; future modes (`rtp_udp`, `quic_dgram`) require
-    /// Phase 2+ implementations before they can be enabled.
-    pub transport: TransportConfig,
+}
+
+/// Server-side automatic jitter-buffer tuning.
+///
+/// When `enabled`, the server monitors each client's health reports and
+/// nudges `buffer_ms` up on degradation and down during sustained stability.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default)]
+pub struct AutoBufferConfig {
+    pub enabled: bool,
+    /// Minimum buffer the auto-tuner will set (ms).
+    pub min_ms: u32,
+    /// Maximum buffer the auto-tuner will set (ms).
+    pub max_ms: u32,
+    /// Buffer increase step on health degradation (ms).
+    pub step_up_ms: u32,
+    /// Buffer decrease step during stable playback (ms).
+    pub step_down_ms: u32,
+    /// Minimum interval between adjustments (ms).
+    pub cooldown_ms: u64,
 }
 
 /// One audio source that the server encodes and broadcasts.
@@ -122,16 +170,32 @@ impl Default for ServerNet {
             control_port: 1711,
             mdns: true,
             snapcast_compat: false,
+            audio: AudioConfig::default(),
+            auto_buffer: AutoBufferConfig::default(),
+            transport: TransportConfig::default(),
+        }
+    }
+}
+
+impl Default for AudioConfig {
+    fn default() -> Self {
+        Self {
             buffer_ms: 200,
             chunk_ms: 10,
             output_prefill_ms: 0,
-            auto_buffer: false,
-            auto_buffer_min_ms: 20,
-            auto_buffer_max_ms: 3000,
-            auto_buffer_step_up_ms: 120,
-            auto_buffer_step_down_ms: 40,
-            auto_buffer_cooldown_ms: 8_000,
-            transport: TransportConfig::default(),
+        }
+    }
+}
+
+impl Default for AutoBufferConfig {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            min_ms: 20,
+            max_ms: 3000,
+            step_up_ms: 120,
+            step_down_ms: 40,
+            cooldown_ms: 8_000,
         }
     }
 }
@@ -178,11 +242,11 @@ impl ServerConfig {
     }
 
     pub fn effective_buffer_ms(&self, stream: &StreamSource) -> u32 {
-        stream.buffer_ms.unwrap_or(self.server.buffer_ms)
+        stream.buffer_ms.unwrap_or(self.server.audio.buffer_ms)
     }
 
     pub fn effective_chunk_ms(&self, stream: &StreamSource) -> u32 {
-        stream.chunk_ms.unwrap_or(self.server.chunk_ms)
+        stream.chunk_ms.unwrap_or(self.server.audio.chunk_ms)
     }
 }
 

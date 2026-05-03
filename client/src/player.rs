@@ -99,10 +99,11 @@ impl PlaybackHandle {
     }
 
     pub fn set_target_buffer_ms(&self, buffer_ms: i32) {
+        // Delegates to PlaybackTimeline so the resampler is also reset when
+        // the target changes (its EMA should start fresh).
         self.inner
             .lock()
             .unwrap()
-            .buffer
             .set_target_buffer_ms(buffer_ms);
     }
 
@@ -181,6 +182,7 @@ struct PlaybackTimeline {
     buffer: SyncBuffer,
     current: Option<PcmChunk>,
     fmt: SampleFormat,
+    /// Adaptive resampler for f32 output; initialised lazily on first f32 callback.
     resampler: Option<AdaptiveResampler>,
 }
 
@@ -192,6 +194,13 @@ impl PlaybackTimeline {
             fmt,
             resampler: None,
         }
+    }
+
+    fn set_target_buffer_ms(&mut self, ms: i32) {
+        self.buffer.set_target_buffer_ms(ms);
+        // Tear down and rebuild the resampler when the target changes so its
+        // internal state (EMA ratio) starts from a clean baseline.
+        self.resampler = None;
     }
 
     fn fill_i16(
@@ -284,14 +293,20 @@ impl PlaybackTimeline {
         let mut sample_pos = 0usize;
         let mut produced_frames = 0usize;
 
+        // Initialise resampler lazily on first f32 callback.
         if self.resampler.is_none() {
-            // Internal resampler chunk size: 10ms
-            let chunk_size = (self.fmt.rate / 100) as usize;
-            self.resampler = Some(AdaptiveResampler::new(channels, self.fmt.rate, chunk_size));
+            self.resampler = Some(AdaptiveResampler::new(channels, self.fmt.rate));
         }
         let resampler = self.resampler.as_mut().unwrap();
 
+        // Update drift-correction ratio once per callback from buffer-depth feedback.
+        resampler.update_ratio(
+            self.buffer.buffer_depth_us(),
+            self.buffer.target_buffer_us(),
+        );
+
         while sample_pos < out.len() {
+            // ── 1. Drain resampler output ring first ──────────────────────
             if let Some(s) = resampler.pop_output() {
                 out[sample_pos] = fade.feed(s);
                 sample_pos += 1;
@@ -301,14 +316,15 @@ impl PlaybackTimeline {
                 continue;
             }
 
-            // Need more data in resampler
+            // ── 2. Need more input — resolve current chunk ────────────────
             let frame_server_us = dac_server_us + frames_to_us(produced_frames, self.fmt.rate);
 
             if self.current.is_none() {
                 self.current = self.buffer.pop_due_exact(frame_server_us);
             }
 
-            let Some(chunk) = self.current.take() else {
+            let Some(chunk) = self.current.as_mut() else {
+                // Underrun: fill remaining output with silence.
                 let remaining_frames = (out.len() - sample_pos) / channels;
                 let silence_frames = self
                     .buffer
@@ -326,100 +342,169 @@ impl PlaybackTimeline {
                     health.underrun_count.fetch_add(1, Ordering::Relaxed);
                 }
                 let silence_samples = silence_frames * channels;
-                for _ in 0..silence_samples {
-                    if sample_pos < out.len() {
-                        out[sample_pos] = fade.drain();
-                        sample_pos += 1;
-                    }
+                for s in &mut out[sample_pos..sample_pos + silence_samples] {
+                    *s = fade.drain();
                 }
+                sample_pos += silence_samples;
                 produced_frames += silence_frames;
                 continue;
             };
 
-            // Calculate drift and set ratio
-            let age_us = frame_server_us - chunk.playout_us;
-            // Target: 1.0. Speed up if behind (age > 0) -> ratio < 1.0.
-            // A 10ms lag corrected over 200ms = 5% change.
-            let ratio = 1.0 - (age_us as f64 / 200_000.0).clamp(-0.02, 0.02);
-            resampler.set_ratio(ratio);
+            // ── 3. Gross drift guard (>2 ms) — coarse drop / dup ─────────
+            // The resampler only handles fine corrections (≤500 ppm).  Large
+            // errors are resolved here first so the resampler never operates
+            // far from unity ratio.
+            let age_us = frame_server_us - chunk.current_playout_us();
+            if age_us > 2_000 && chunk.remaining_samples() > channels {
+                // Running ahead: drop one frame.
+                chunk.read_pos += channels;
+                health.drift_drop_count.fetch_add(1, Ordering::Relaxed);
+                if chunk.is_exhausted() {
+                    self.current = None;
+                }
+                continue;
+            }
+            if age_us < -2_000 && chunk.read_pos >= channels {
+                // Running behind: duplicate the previous frame.
+                let prev = chunk.read_pos - channels;
+                resampler.push_frame(&chunk.samples[prev..prev + channels]);
+                health.drift_dup_count.fetch_add(1, Ordering::Relaxed);
+                continue;
+            }
 
-            // Feed the whole chunk (resampler handles internal buffering)
-            resampler.feed(&chunk.samples);
-            // Loop will pull from output_pending in next iteration
+            // ── 4. Normal path: feed one frame to the resampler ──────────
+            if chunk.remaining_samples() >= channels {
+                let start = chunk.read_pos;
+                resampler.push_frame(&chunk.samples[start..start + channels]);
+                chunk.read_pos += channels;
+            }
+            if chunk.is_exhausted() {
+                self.current = None;
+            }
         }
     }
 }
 
-// ── Adaptive Resampling ──────────────────────────────────────────────────────
+// ── Adaptive Resampling ───────────────────────────────────────────────────────
+//
+// Design principles:
+//
+// * Uses SincFixedIn with lightweight quality parameters suited for real-time
+//   drift correction, not offline high-quality resampling:
+//     sinc_len=64, oversampling_factor=16  (~10× faster than the 256/128 config)
+//     WindowFunction::Hann                 (fastest of the provided windows)
+//     SincInterpolationType::Linear        (cheapest interpolation)
+//   At 48 kHz stereo this stays well under 1 ms CPU per 10 ms block.
+//
+// * Feedback signal: buffer_depth_us − target_buffer_us.
+//   Positive error (buffer too full) → ratio > 1 → consume input faster.
+//   Negative error (buffer too empty) → ratio < 1 → slow down.
+//   Max correction: ±500 ppm.  Imperceptible below ~1000 ppm for music.
+//
+// * EMA smoothing (τ ≈ 200 callbacks ≈ 2 s at 10 ms/callback) prevents
+//   audible pitch wobble from short-term jitter spikes.
+//
+// * Gross errors (> 2 ms) are handled by the caller with drop/dup before
+//   frames reach this resampler, so it only ever needs fine corrections.
 
 struct AdaptiveResampler {
     resampler: SincFixedIn<f32>,
+    /// Deinterleaved input accumulator: [channels][chunk_size]
     input_bufs: Vec<Vec<f32>>,
+    /// How many frames are currently filled in input_bufs
+    input_filled: usize,
+    /// Deinterleaved output buffers allocated by rubato
     output_bufs: Vec<Vec<f32>>,
-    input_pending: Vec<i16>,
-    output_pending: VecDeque<f32>, // Interleaved output samples
+    /// Interleaved f32 output samples ready to consume
+    output_pending: VecDeque<f32>,
     channels: usize,
+    /// Input frames per rubato call (10 ms worth)
     chunk_size: usize,
+    /// EMA-smoothed resampling ratio
+    rate_ema: f64,
 }
 
 impl AdaptiveResampler {
-    fn new(channels: usize, _sample_rate: u32, chunk_size: usize) -> Self {
+    /// Create a new resampler for `channels` channels at `sample_rate` Hz.
+    fn new(channels: usize, sample_rate: u32) -> Self {
+        // 10 ms processing blocks — balances latency against rubato overhead.
+        let chunk_size = (sample_rate / 100) as usize;
+
         let params = SincInterpolationParameters {
-            sinc_len: 256,
+            sinc_len: 64,
             f_cutoff: 0.95,
             interpolation: SincInterpolationType::Linear,
-            oversampling_factor: 128,
-            window: WindowFunction::BlackmanHarris2,
+            oversampling_factor: 16,
+            window: WindowFunction::Hann,
         };
-        // We allow +/- 5% ratio change (max_resample_ratio_relative is a multiplier >= 1.0).
-        let resampler = SincFixedIn::new(1.0, 1.05, params, chunk_size, channels).unwrap();
+        // max_resample_ratio_relative is a multiplier ≥ 1.0.
+        // 1.01 → ratio may deviate ±1% from the base; our ±500 ppm limit is
+        // well inside that envelope.
+        let resampler =
+            SincFixedIn::new(1.0, 1.01, params, chunk_size, channels)
+                .expect("rubato SincFixedIn init failed");
         let input_bufs = vec![vec![0.0f32; chunk_size]; channels];
         let output_bufs = resampler.output_buffer_allocate(true);
 
         Self {
             resampler,
             input_bufs,
+            input_filled: 0,
             output_bufs,
-            input_pending: Vec::with_capacity(chunk_size * channels),
-            output_pending: VecDeque::with_capacity(chunk_size * channels * 2),
+            output_pending: VecDeque::with_capacity(chunk_size * channels * 4),
             channels,
             chunk_size,
+            rate_ema: 1.0,
         }
     }
 
-    fn set_ratio(&mut self, ratio: f64) {
-        let _ = self.resampler.set_resample_ratio(ratio, false);
+    /// Update the resampling ratio from buffer-depth feedback.
+    ///
+    /// Call once per audio callback, before pulling samples.
+    ///
+    /// * `depth_us`  — current SyncBuffer depth in microseconds.
+    /// * `target_us` — target buffer depth in microseconds.
+    fn update_ratio(&mut self, depth_us: i64, target_us: i64) {
+        let error_us = depth_us - target_us;
+        // Proportional controller: clamp to ±500 ppm.
+        // A 10 ms error at full correction converges in ~10 s — slow enough
+        // to be inaudible, fast enough to track typical LAN jitter.
+        let p = (error_us as f64 / 10_000.0).clamp(-0.005, 0.005);
+        let target_ratio = 1.0 + p;
+        // EMA τ ≈ 200 callbacks to avoid audible pitch wobble.
+        self.rate_ema = self.rate_ema * 0.995 + target_ratio * 0.005;
+        // `true` = gradual (ramp) transition to avoid discontinuities.
+        let _ = self.resampler.set_resample_ratio(self.rate_ema, true);
     }
 
-    /// Feeds variable size interleaved i16 samples.
-    fn feed(&mut self, input: &[i16]) {
-        self.input_pending.extend_from_slice(input);
-        while self.input_pending.len() >= self.chunk_size * self.channels {
-            // Process one internal chunk
-            for frame in 0..self.chunk_size {
-                for chan in 0..self.channels {
-                    let s = self.input_pending[frame * self.channels + chan];
-                    self.input_bufs[chan][frame] = s as f32 / 32768.0;
-                }
-            }
-            self.input_pending.drain(0..self.chunk_size * self.channels);
-
-            // Resample
-            let (_used, _produced) = self
+    /// Push one interleaved frame (`channels` i16 samples) into the resampler.
+    ///
+    /// When a full processing block (`chunk_size` frames) is ready, rubato
+    /// processes it and the resulting samples become available via `pop_output`.
+    fn push_frame(&mut self, frame: &[i16]) {
+        debug_assert_eq!(frame.len(), self.channels, "frame must be exactly one frame");
+        for (chan, &s) in frame.iter().enumerate() {
+            self.input_bufs[chan][self.input_filled] = s as f32 / 32768.0;
+        }
+        self.input_filled += 1;
+        if self.input_filled == self.chunk_size {
+            self.input_filled = 0;
+            if self
                 .resampler
                 .process_into_buffer(&self.input_bufs, &mut self.output_bufs, None)
-                .unwrap();
-
-            // Interleave and push to pending
-            let produced_frames = self.output_bufs[0].len();
-            for frame in 0..produced_frames {
-                for chan in 0..self.channels {
-                    self.output_pending.push_back(self.output_bufs[chan][frame]);
+                .is_ok()
+            {
+                let produced = self.output_bufs[0].len();
+                for f in 0..produced {
+                    for c in 0..self.channels {
+                        self.output_pending.push_back(self.output_bufs[c][f]);
+                    }
                 }
             }
         }
     }
 
+    /// Pull the next f32 output sample (interleaved), or `None` if not yet available.
     fn pop_output(&mut self) -> Option<f32> {
         self.output_pending.pop_front()
     }

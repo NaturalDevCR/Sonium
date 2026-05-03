@@ -68,15 +68,15 @@ struct AutoBufferTuner {
 
 impl AutoBufferTuner {
     fn from_config(cfg: &ServerConfig) -> Self {
-        let min_ms = cfg.server.auto_buffer_min_ms.max(40);
-        let max_ms = cfg.server.auto_buffer_max_ms.max(min_ms);
+        let min_ms = cfg.server.auto_buffer.min_ms.max(40);
+        let max_ms = cfg.server.auto_buffer.max_ms.max(min_ms);
         Self {
-            enabled: cfg.server.auto_buffer,
+            enabled: cfg.server.auto_buffer.enabled,
             min_ms,
             max_ms,
-            step_up_ms: cfg.server.auto_buffer_step_up_ms.max(20),
-            step_down_ms: cfg.server.auto_buffer_step_down_ms.max(10),
-            cooldown: Duration::from_millis(cfg.server.auto_buffer_cooldown_ms.max(1_000)),
+            step_up_ms: cfg.server.auto_buffer.step_up_ms.max(20),
+            step_down_ms: cfg.server.auto_buffer.step_down_ms.max(10),
+            cooldown: Duration::from_millis(cfg.server.auto_buffer.cooldown_ms.max(1_000)),
             last_adjust: Instant::now(),
             last_underrun: 0,
             last_stale: 0,
@@ -422,7 +422,7 @@ async fn session_loop(
     let init_buffer = bc
         .as_ref()
         .map(|b| b.buffer_ms)
-        .unwrap_or(cfg.server.buffer_ms);
+        .unwrap_or(cfg.server.audio.buffer_ms);
     let mut current_buffer_ms = init_buffer;
     let mut auto_buffer_tuner = AutoBufferTuner::from_config(&cfg);
 
@@ -474,7 +474,7 @@ async fn session_loop(
         init_observability,
         effective_mode.to_string(),
         server_udp_port,
-        cfg.server.output_prefill_ms,
+        cfg.server.audio.output_prefill_ms,
     )
     .await?;
 
@@ -507,7 +507,7 @@ async fn session_loop(
                                 health_tracker: &mut health_tracker,
                                 transport_mode: effective_mode.to_string(),
                                 server_udp_port,
-                                output_prefill_ms: cfg.server.output_prefill_ms,
+                                output_prefill_ms: cfg.server.audio.output_prefill_ms,
                             },
                             hdr,
                             &payload,
@@ -559,7 +559,7 @@ async fn session_loop(
                                 &new_sid,
                             ).await?;
                             current_buffer_ms =
-                                bc.as_ref().map(|x| x.buffer_ms).unwrap_or(cfg.server.buffer_ms);
+                                bc.as_ref().map(|x| x.buffer_ms).unwrap_or(cfg.server.audio.buffer_ms);
                         }
                     }
 
@@ -572,7 +572,7 @@ async fn session_loop(
                             &new_sid,
                         ).await?;
                         current_buffer_ms =
-                            bc.as_ref().map(|x| x.buffer_ms).unwrap_or(cfg.server.buffer_ms);
+                            bc.as_ref().map(|x| x.buffer_ms).unwrap_or(cfg.server.audio.buffer_ms);
                     }
 
                     Ok(Event::StreamRestarted { stream_id: sid })
@@ -589,7 +589,7 @@ async fn session_loop(
                             &current_sid,
                         ).await?;
                         current_buffer_ms =
-                            bc.as_ref().map(|x| x.buffer_ms).unwrap_or(cfg.server.buffer_ms);
+                            bc.as_ref().map(|x| x.buffer_ms).unwrap_or(cfg.server.audio.buffer_ms);
                     }
 
                     Ok(Event::StreamRemoved { stream_id: sid })
@@ -608,7 +608,7 @@ async fn session_loop(
                         let lat = c.as_ref().map(|c| c.latency_ms).unwrap_or(0);
                         let obs = c.as_ref().map(|c| c.observability_enabled).unwrap_or(false);
                         let (eq, en) = state.get_stream_eq(&stream_id).unwrap_or_default();
-                        send_server_settings(stream, current_buffer_ms, volume, muted, lat, eq, en, obs, effective_mode.to_string(), server_udp_port, cfg.server.output_prefill_ms).await?;
+                        send_server_settings(stream, current_buffer_ms, volume, muted, lat, eq, en, obs, effective_mode.to_string(), server_udp_port, cfg.server.audio.output_prefill_ms).await?;
                         debug!(%peer, volume, muted, "Volume settings pushed to client");
                     }
 
@@ -618,7 +618,7 @@ async fn session_loop(
                         let (vol, muted) = state.get_volume(client_id).unwrap_or((100, false));
                         let obs = state.get_client(client_id).map(|c| c.observability_enabled).unwrap_or(false);
                         let (eq, en) = state.get_stream_eq(&stream_id).unwrap_or_default();
-                        send_server_settings(stream, current_buffer_ms, vol, muted, latency_ms, eq, en, obs, effective_mode.to_string(), server_udp_port, cfg.server.output_prefill_ms).await?;
+                        send_server_settings(stream, current_buffer_ms, vol, muted, latency_ms, eq, en, obs, effective_mode.to_string(), server_udp_port, cfg.server.audio.output_prefill_ms).await?;
                         debug!(%peer, latency_ms, "Latency settings pushed to client");
                     }
 
@@ -635,7 +635,7 @@ async fn session_loop(
                         let c = state.get_client(client_id);
                         let lat = c.as_ref().map(|c| c.latency_ms).unwrap_or(0);
                         let obs = c.as_ref().map(|c| c.observability_enabled).unwrap_or(false);
-                        send_server_settings(stream, current_buffer_ms, vol, muted, lat, eq_bands, enabled, obs, effective_mode.to_string(), server_udp_port, cfg.server.output_prefill_ms).await?;
+                        send_server_settings(stream, current_buffer_ms, vol, muted, lat, eq_bands, enabled, obs, effective_mode.to_string(), server_udp_port, cfg.server.audio.output_prefill_ms).await?;
                         debug!(%peer, stream_id, "Stream EQ settings pushed to client");
                     }
 
