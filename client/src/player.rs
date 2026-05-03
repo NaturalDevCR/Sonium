@@ -371,8 +371,8 @@ impl AdaptiveResampler {
             oversampling_factor: 128,
             window: WindowFunction::BlackmanHarris2,
         };
-        // We allow +/- 5% ratio change.
-        let resampler = SincFixedIn::new(1.0, 0.05, params, chunk_size, channels).unwrap();
+        // We allow +/- 5% ratio change (max_resample_ratio_relative is a multiplier >= 1.0).
+        let resampler = SincFixedIn::new(1.0, 1.05, params, chunk_size, channels).unwrap();
         let input_bufs = vec![vec![0.0f32; chunk_size]; channels];
         let output_bufs = resampler.output_buffer_allocate(true);
 

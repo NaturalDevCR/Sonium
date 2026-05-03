@@ -9,26 +9,44 @@
   ],
   "clients": [
     {
-      "id": "Josues-MacBook-Pro.local-1",
-      "hostname": "Josues-MacBook-Pro.local",
-      "display_name": null,
-      "volume": 100,
-      "muted": false,
-      "latency_ms": 0,
-      "group_id": "default",
-      "last_seen": "2026-04-27T23:00:08.457146Z",
-      "eq_bands": []
-    },
-    {
       "id": "Josues-MacBook-Pro.local-2",
       "hostname": "Josues-MacBook-Pro.local",
       "display_name": null,
       "volume": 100,
       "muted": false,
       "latency_ms": 0,
+      "observability_enabled": false,
       "group_id": "default",
-      "last_seen": "2026-04-27T23:00:08.457149Z",
-      "eq_bands": []
+      "last_seen": "2026-05-03T16:57:20.745021Z"
+    },
+    {
+      "id": "Josues-MacBook-Pro.local-1",
+      "hostname": "Josues-MacBook-Pro.local",
+      "display_name": null,
+      "volume": 100,
+      "muted": false,
+      "latency_ms": 0,
+      "observability_enabled": false,
+      "group_id": "default",
+      "last_seen": "2026-05-03T16:57:20.745022Z"
+    },
+    {
+      "id": "Josues-MBP.lan-1",
+      "hostname": "Josues-MBP.lan",
+      "display_name": null,
+      "volume": 100,
+      "muted": false,
+      "latency_ms": 0,
+      "observability_enabled": false,
+      "group_id": "default",
+      "last_seen": "2026-05-03T16:57:20.745022Z"
+    }
+  ],
+  "streams": [
+    {
+      "id": "default",
+      "eq_bands": [],
+      "eq_enabled": true
     }
   ]
 }

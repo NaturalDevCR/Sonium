@@ -1,0 +1,23 @@
+2026-05-03T10:55:28.876018-06:00  INFO Sonium server starting version="0.1.63" local_ip="10.1.1.184" stream_port=1710 control_port=1711 streams=1
+2026-05-03T10:55:28.878215-06:00  INFO Loaded users path=users.json users=1
+2026-05-03T10:55:28.879251-06:00  INFO Loaded persisted state path=sonium-state.json groups=1 clients=2 streams=0
+2026-05-03T10:55:28.879528-06:00  INFO Stream reader started stream=default
+2026-05-03T10:55:28.879707-06:00  INFO Listening for audio clients on 0.0.0.0:1710
+2026-05-03T10:55:28.881018-06:00  INFO mDNS advertising started — clients will find this server automatically stream_port=1710 control_port=1711
+2026-05-03T10:55:28.881430-06:00  INFO run: Stream reader started id=default source=- codec="opus" format=48000Hz/16bit/2ch chunk_ms=10 stream_id=default
+2026-05-03T10:55:28.881546-06:00  INFO run: Audio input closed stream="default" stream_id=default
+2026-05-03T10:55:28.882006-06:00  INFO Control API + Web UI on http://0.0.0.0:1711
+2026-05-03T10:55:48.022772-06:00  INFO Sonium server starting version="0.1.63" local_ip="10.1.1.184" stream_port=1710 control_port=1711 streams=1
+2026-05-03T10:55:48.024310-06:00  INFO Loaded users path=users.json users=1
+2026-05-03T10:55:48.024816-06:00  INFO Loaded persisted state path=sonium-state.json groups=1 clients=2 streams=0
+2026-05-03T10:55:48.025069-06:00  INFO Stream reader started stream=default
+2026-05-03T10:56:20.656051-06:00  INFO New client connected peer=127.0.0.1:63159
+2026-05-03T10:56:20.657313-06:00  INFO handle: Session ready peer=127.0.0.1:63159 stream=default transport=tcp peer=127.0.0.1:63159 client_id="Josues-MBP.lan-1" client_id="Josues-MBP.lan-1"
+2026-05-03T10:56:20.926738-06:00  INFO handle: Client reader closed peer=127.0.0.1:63159 reason=early eof peer=127.0.0.1:63159 client_id="Josues-MBP.lan-1" client_id="Josues-MBP.lan-1"
+2026-05-03T10:56:20.926956-06:00  INFO Client disconnected peer=127.0.0.1:63159
+2026-05-03T10:56:49.657746-06:00  INFO New client connected peer=127.0.0.1:63183
+2026-05-03T10:56:49.658985-06:00  INFO handle: Session ready peer=127.0.0.1:63183 stream=default transport=tcp peer=127.0.0.1:63183 client_id="Josues-MBP.lan-1" client_id="Josues-MBP.lan-1"
+2026-05-03T10:57:16.363868-06:00  INFO New client connected peer=127.0.0.1:63205
+2026-05-03T10:57:16.364741-06:00  INFO handle: Session ready peer=127.0.0.1:63205 stream=default transport=tcp peer=127.0.0.1:63205 client_id="Josues-MBP.lan-1" client_id="Josues-MBP.lan-1"
+2026-05-03T10:57:20.744922-06:00  INFO handle: Client reader closed peer=127.0.0.1:63205 reason=early eof peer=127.0.0.1:63205 client_id="Josues-MBP.lan-1" client_id="Josues-MBP.lan-1"
+2026-05-03T10:57:20.745313-06:00  INFO Client disconnected peer=127.0.0.1:63205
