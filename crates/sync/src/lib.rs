@@ -13,6 +13,6 @@ pub mod buffer;
 pub mod time_provider;
 pub mod time_source;
 
-pub use buffer::{PcmChunk, SyncBuffer};
+pub use buffer::{DriftCorrector, PcmChunk, SyncBuffer};
 pub use time_provider::TimeProvider;
 pub use time_source::{NtpTimeSource, TimeSource};

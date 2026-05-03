@@ -757,7 +757,7 @@ checksum = "4bfbf56724aa9eca8afa4fcfadeb479e722935bb2a0900c2d37e0cc477af0688"
 
 [[package]]
 name = "client-gui"
-version = "0.1.61"
+version = "0.1.62"
 dependencies = [
  "anyhow",
  "cpal",
@@ -4798,7 +4798,7 @@ dependencies = [
 
 [[package]]
 name = "sonium-client"
-version = "0.1.61"
+version = "0.1.62"
 dependencies = [
  "anyhow",
  "bytes",
@@ -4809,6 +4809,7 @@ dependencies = [
  "dirs 6.0.0",
  "hostname",
  "parking_lot",
+ "rubato",
  "serde",
  "serde_json",
  "socket2 0.6.3",
@@ -4828,7 +4829,7 @@ dependencies = [
 
 [[package]]
 name = "sonium-codec"
-version = "0.1.61"
+version = "0.1.62"
 dependencies = [
  "audiopus",
  "bytes",
@@ -4844,7 +4845,7 @@ dependencies = [
 
 [[package]]
 name = "sonium-common"
-version = "0.1.61"
+version = "0.1.62"
 dependencies = [
  "anyhow",
  "serde",
@@ -4857,7 +4858,7 @@ dependencies = [
 
 [[package]]
 name = "sonium-control"
-version = "0.1.61"
+version = "0.1.62"
 dependencies = [
  "anyhow",
  "argon2",
@@ -4886,7 +4887,7 @@ dependencies = [
 
 [[package]]
 name = "sonium-protocol"
-version = "0.1.61"
+version = "0.1.62"
 dependencies = [
  "bytes",
  "serde",
@@ -4897,7 +4898,7 @@ dependencies = [
 
 [[package]]
 name = "sonium-server"
-version = "0.1.61"
+version = "0.1.62"
 dependencies = [
  "anyhow",
  "axum",
@@ -4931,17 +4932,18 @@ dependencies = [
 
 [[package]]
 name = "sonium-sync"
-version = "0.1.61"
+version = "0.1.62"
 dependencies = [
  "parking_lot",
  "rubato",
  "sonium-common",
+ "sonium-protocol",
  "thiserror 1.0.69",
 ]
 
 [[package]]
 name = "sonium-transport"
-version = "0.1.61"
+version = "0.1.62"
 dependencies = [
  "anyhow",
  "bytes",

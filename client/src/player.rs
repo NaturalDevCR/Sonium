@@ -1,5 +1,5 @@
 use std::collections::VecDeque;
-use std::sync::atomic::{AtomicI64, AtomicU32, AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicI64, AtomicU32, AtomicU64, AtomicUsize, Ordering};
 use std::sync::mpsc::{self, Receiver, SyncSender};
 use std::sync::{Arc, Mutex};
 use std::thread;
@@ -11,6 +11,11 @@ use tracing::{debug, info, warn};
 use sonium_common::{SampleFormat, SoniumError};
 use sonium_sync::time_provider::now_us;
 use sonium_sync::{PcmChunk, SyncBuffer};
+
+use rubato::{
+    Resampler, SincFixedIn, SincInterpolationParameters, SincInterpolationType,
+    WindowFunction,
+};
 
 /// Audio output backed by the system default device via CPAL.
 ///
@@ -33,6 +38,8 @@ struct HealthState {
     overrun_count: AtomicU32,
     callback_starvation_count: AtomicU32,
     audio_callback_xrun_count: AtomicU32,
+    drift_drop_count: AtomicU64,
+    drift_dup_count: AtomicU64,
 }
 
 #[derive(Debug, Clone, Copy, Default)]
@@ -41,6 +48,8 @@ pub struct PlayerHealth {
     pub overrun_count: u32,
     pub callback_starvation_count: u32,
     pub audio_callback_xrun_count: u32,
+    pub drift_drop_count: u64,
+    pub drift_dup_count: u64,
 }
 
 pub struct Player {
@@ -82,6 +91,11 @@ impl PlaybackHandle {
         self.inner.lock().unwrap().buffer.push(chunk, arrival_us);
     }
 
+    pub fn take_drift_metrics(&self) -> (u64, u64) {
+        let mut inner = self.inner.lock().unwrap();
+        (inner.buffer.take_drift_drop_count(), inner.buffer.take_drift_dup_count())
+    }
+
     pub fn set_target_buffer_ms(&self, buffer_ms: i32) {
         self.inner
             .lock()
@@ -112,7 +126,7 @@ impl PlaybackHandle {
         inner.current = None;
     }
 
-    pub fn get_report(&self, now_server_us: i64) -> sonium_sync::buffer::SyncReport {
+    pub fn get_report(&self, now_server_us: i64) -> sonium_protocol::messages::HealthReport {
         self.inner.lock().unwrap().buffer.get_report(now_server_us)
     }
 
@@ -136,6 +150,26 @@ impl PlaybackHandle {
             .fill_i16(out, dac_server_us, health, fade);
     }
 
+    fn fill_f32(
+        &self,
+        out: &mut [f32],
+        info: &cpal::OutputCallbackInfo,
+        health: &HealthState,
+        fade: &mut FadeStateF32,
+    ) {
+        let output_latency_us = output_latency_us(info).unwrap_or_else(|| {
+            let frames = out.len() / self.inner.lock().unwrap().fmt.channels as usize;
+            frames_to_us(frames, self.inner.lock().unwrap().fmt.rate)
+        });
+        self.latest_output_latency_us
+            .store(output_latency_us, Ordering::Relaxed);
+        let dac_server_us = now_us() + self.offset_us.load(Ordering::Relaxed) + output_latency_us;
+        self.inner
+            .lock()
+            .unwrap()
+            .fill_f32(out, dac_server_us, health, fade);
+    }
+
     pub fn latest_output_latency_us(&self) -> i64 {
         self.latest_output_latency_us.load(Ordering::Relaxed)
     }
@@ -145,7 +179,7 @@ struct PlaybackTimeline {
     buffer: SyncBuffer,
     current: Option<PcmChunk>,
     fmt: SampleFormat,
-    drift: DriftCorrector,
+    resampler: Option<AdaptiveResampler>,
 }
 
 impl PlaybackTimeline {
@@ -154,7 +188,7 @@ impl PlaybackTimeline {
             buffer: SyncBuffer::new(fmt),
             current: None,
             fmt,
-            drift: DriftCorrector::default(),
+            resampler: None,
         }
     }
 
@@ -202,9 +236,22 @@ impl PlaybackTimeline {
                 continue;
             };
 
+            // Legacy drop/dup logic remains for i16 path
             let age_us = frame_server_us - chunk.current_playout_us();
-            if self.drift.should_drop_frame(age_us) && chunk.remaining_samples() > channels {
+            if age_us > 2000 && chunk.remaining_samples() > channels {
                 chunk.read_pos += channels;
+                health.drift_drop_count.fetch_add(1, Ordering::Relaxed);
+            } else if age_us < -2000 && chunk.read_pos >= channels {
+                let prev_pos = chunk.read_pos - channels;
+                for i in 0..channels {
+                    if sample_pos < out.len() {
+                        out[sample_pos] = fade.feed(chunk.samples[prev_pos + i]);
+                        sample_pos += 1;
+                    }
+                }
+                produced_frames += 1;
+                health.drift_dup_count.fetch_add(1, Ordering::Relaxed);
+                continue;
             }
 
             let remaining_output_frames = (out.len() - sample_pos) / channels;
@@ -223,22 +270,156 @@ impl PlaybackTimeline {
             }
         }
     }
-}
 
-#[derive(Default)]
-struct DriftCorrector {
-    callbacks_since_last_drop: u32,
-}
+    fn fill_f32(
+        &mut self,
+        out: &mut [f32],
+        dac_server_us: i64,
+        health: &HealthState,
+        fade: &mut FadeStateF32,
+    ) {
+        let channels = self.fmt.channels as usize;
+        let mut sample_pos = 0usize;
+        let mut produced_frames = 0usize;
 
-impl DriftCorrector {
-    fn should_drop_frame(&mut self, age_us: i64) -> bool {
-        self.callbacks_since_last_drop = self.callbacks_since_last_drop.saturating_add(1);
-        if age_us > 2_000 && self.callbacks_since_last_drop >= 2 {
-            self.callbacks_since_last_drop = 0;
-            true
-        } else {
-            false
+        if self.resampler.is_none() {
+            // Internal resampler chunk size: 10ms
+            let chunk_size = (self.fmt.rate / 100) as usize;
+            self.resampler = Some(AdaptiveResampler::new(channels, self.fmt.rate, chunk_size));
         }
+        let resampler = self.resampler.as_mut().unwrap();
+
+        while sample_pos < out.len() {
+            if let Some(s) = resampler.pop_output() {
+                out[sample_pos] = fade.feed(s);
+                sample_pos += 1;
+                if sample_pos.is_multiple_of(channels) {
+                    produced_frames += 1;
+                }
+                continue;
+            }
+
+            // Need more data in resampler
+            let frame_server_us = dac_server_us + frames_to_us(produced_frames, self.fmt.rate);
+
+            if self.current.is_none() {
+                self.current = self.buffer.pop_due_exact(frame_server_us);
+            }
+
+            let Some(chunk) = self.current.take() else {
+                let remaining_frames = (out.len() - sample_pos) / channels;
+                let silence_frames = self
+                    .buffer
+                    .next_playout_us()
+                    .and_then(|next| {
+                        if next > frame_server_us {
+                            Some(us_to_frames(next - frame_server_us, self.fmt.rate))
+                        } else {
+                            None
+                        }
+                    })
+                    .unwrap_or(remaining_frames)
+                    .clamp(1, remaining_frames);
+                if fade.phase == FadePhase::Playing {
+                    health.underrun_count.fetch_add(1, Ordering::Relaxed);
+                }
+                let silence_samples = silence_frames * channels;
+                for _ in 0..silence_samples {
+                    if sample_pos < out.len() {
+                        out[sample_pos] = fade.drain();
+                        sample_pos += 1;
+                    }
+                }
+                produced_frames += silence_frames;
+                continue;
+            };
+
+            // Calculate drift and set ratio
+            let age_us = frame_server_us - chunk.playout_us;
+            // Target: 1.0. Speed up if behind (age > 0) -> ratio < 1.0.
+            // A 10ms lag corrected over 200ms = 5% change.
+            let ratio = 1.0 - (age_us as f64 / 200_000.0).clamp(-0.02, 0.02);
+            resampler.set_ratio(ratio);
+
+            // Feed the whole chunk (resampler handles internal buffering)
+            resampler.feed(&chunk.samples);
+            // Loop will pull from output_pending in next iteration
+        }
+    }
+}
+
+// ── Adaptive Resampling ──────────────────────────────────────────────────────
+
+struct AdaptiveResampler {
+    resampler: SincFixedIn<f32>,
+    input_bufs: Vec<Vec<f32>>,
+    output_bufs: Vec<Vec<f32>>,
+    input_pending: Vec<i16>,
+    output_pending: VecDeque<f32>, // Interleaved output samples
+    channels: usize,
+    chunk_size: usize,
+}
+
+impl AdaptiveResampler {
+    fn new(channels: usize, _sample_rate: u32, chunk_size: usize) -> Self {
+        let params = SincInterpolationParameters {
+            sinc_len: 256,
+            f_cutoff: 0.95,
+            interpolation: SincInterpolationType::Linear,
+            oversampling_factor: 128,
+            window: WindowFunction::BlackmanHarris2,
+        };
+        // We allow +/- 5% ratio change.
+        let resampler = SincFixedIn::new(1.0, 0.05, params, chunk_size, channels).unwrap();
+        let input_bufs = vec![vec![0.0f32; chunk_size]; channels];
+        let output_bufs = resampler.output_buffer_allocate(true);
+
+        Self {
+            resampler,
+            input_bufs,
+            output_bufs,
+            input_pending: Vec::with_capacity(chunk_size * channels),
+            output_pending: VecDeque::with_capacity(chunk_size * channels * 2),
+            channels,
+            chunk_size,
+        }
+    }
+
+    fn set_ratio(&mut self, ratio: f64) {
+        let _ = self.resampler.set_resample_ratio(ratio, false);
+    }
+
+    /// Feeds variable size interleaved i16 samples.
+    fn feed(&mut self, input: &[i16]) {
+        self.input_pending.extend_from_slice(input);
+        while self.input_pending.len() >= self.chunk_size * self.channels {
+            // Process one internal chunk
+            for frame in 0..self.chunk_size {
+                for chan in 0..self.channels {
+                    let s = self.input_pending[frame * self.channels + chan];
+                    self.input_bufs[chan][frame] = s as f32 / 32768.0;
+                }
+            }
+            self.input_pending.drain(0..self.chunk_size * self.channels);
+
+            // Resample
+            let (_used, _produced) = self
+                .resampler
+                .process_into_buffer(&self.input_bufs, &mut self.output_bufs, None)
+                .unwrap();
+
+            // Interleave and push to pending
+            let produced_frames = self.output_bufs[0].len();
+            for frame in 0..produced_frames {
+                for chan in 0..self.channels {
+                    self.output_pending.push_back(self.output_bufs[chan][frame]);
+                }
+            }
+        }
+    }
+
+    fn pop_output(&mut self) -> Option<f32> {
+        self.output_pending.pop_front()
     }
 }
 
@@ -347,8 +528,9 @@ impl Player {
                 .swap(0, Ordering::Relaxed),
             audio_callback_xrun_count: self
                 .health
-                .audio_callback_xrun_count
-                .swap(0, Ordering::Relaxed),
+                .audio_callback_xrun_count.swap(0, Ordering::Relaxed),
+            drift_drop_count: self.health.drift_drop_count.swap(0, Ordering::Relaxed),
+            drift_dup_count: self.health.drift_dup_count.swap(0, Ordering::Relaxed),
         }
     }
 }
@@ -534,6 +716,9 @@ fn build_stream_for_format(
                 move |data: &mut [i16], info: &cpal::OutputCallbackInfo| {
                     timing.observe(data.len(), &data_health);
                     if let Some(playback) = playback.as_ref() {
+                        let (drops, dups) = playback.take_drift_metrics();
+                        data_health.drift_drop_count.fetch_add(drops, Ordering::Relaxed);
+                        data_health.drift_dup_count.fetch_add(dups, Ordering::Relaxed);
                         playback.fill_i16(data, info, &data_health, &mut fade);
                         return;
                     }
@@ -575,6 +760,9 @@ fn build_stream_for_format(
                 move |data: &mut [u16], info: &cpal::OutputCallbackInfo| {
                     timing.observe(data.len(), &data_health);
                     if let Some(playback) = playback.as_ref() {
+                        let (drops, dups) = playback.take_drift_metrics();
+                        data_health.drift_drop_count.fetch_add(drops, Ordering::Relaxed);
+                        data_health.drift_dup_count.fetch_add(dups, Ordering::Relaxed);
                         scratch.resize(data.len(), 0);
                         playback.fill_i16(&mut scratch, info, &data_health, &mut fade);
                         for (dst, src) in data.iter_mut().zip(scratch.iter()) {
@@ -608,24 +796,22 @@ fn build_stream_for_format(
             )
         }
         cpal::SampleFormat::F32 => {
-            let mut fade = FadeState::new(fade_samples);
+            let mut fade = FadeStateF32::new(fade_samples);
             let mut timing = CallbackTiming::new(config.channels, config.sample_rate.0);
             let data_health = audio_state.health.clone();
             let err_health = audio_state.health.clone();
             let ring = audio_state.ring.clone();
             let playback = audio_state.playback.clone();
             let latest_output_latency_us = audio_state.latest_output_latency_us.clone();
-            let mut scratch = Vec::<i16>::new();
             device.build_output_stream(
                 config,
                 move |data: &mut [f32], info: &cpal::OutputCallbackInfo| {
                     timing.observe(data.len(), &data_health);
                     if let Some(playback) = playback.as_ref() {
-                        scratch.resize(data.len(), 0);
-                        playback.fill_i16(&mut scratch, info, &data_health, &mut fade);
-                        for (dst, src) in data.iter_mut().zip(scratch.iter()) {
-                            *dst = *src as f32 / 32768.0;
-                        }
+                        let (drops, dups) = playback.take_drift_metrics();
+                        data_health.drift_drop_count.fetch_add(drops, Ordering::Relaxed);
+                        data_health.drift_dup_count.fetch_add(dups, Ordering::Relaxed);
+                        playback.fill_f32(data, info, &data_health, &mut fade);
                         return;
                     }
                     if let Some(latency_us) = output_latency_us(info) {
@@ -633,15 +819,14 @@ fn build_stream_for_format(
                     }
                     let mut ring = ring.lock().unwrap();
                     for sample in data.iter_mut() {
-                        let s16 = if let Some(s) = ring.pop_front() {
-                            fade.feed(s)
+                        if let Some(s) = ring.pop_front() {
+                            *sample = fade.feed(s as f32 / 32768.0);
                         } else {
                             if fade.phase == FadePhase::Playing {
                                 data_health.underrun_count.fetch_add(1, Ordering::Relaxed);
                             }
-                            fade.drain()
-                        };
-                        *sample = s16 as f32 / 32768.0;
+                            *sample = fade.drain();
+                        }
                     }
                 },
                 move |err| {
@@ -812,6 +997,81 @@ impl FadeState {
         self.fade_pos += 1;
         self.last_val = sample;
         (sample as f32 * gain) as i16
+    }
+}
+
+struct FadeStateF32 {
+    phase: FadePhase,
+    fade_len: usize,
+    fade_pos: usize,
+    last_val: f32,
+}
+
+impl FadeStateF32 {
+    fn new(fade_len: usize) -> Self {
+        Self {
+            phase: FadePhase::Playing,
+            fade_len: fade_len.max(1),
+            fade_pos: 0,
+            last_val: 0.0,
+        }
+    }
+
+    #[inline]
+    fn feed(&mut self, sample: f32) -> f32 {
+        match self.phase {
+            FadePhase::Silent | FadePhase::FadingOut => {
+                self.phase = FadePhase::FadingIn;
+                self.fade_pos = 0;
+                self.apply_fade_in(sample)
+            }
+            FadePhase::FadingIn => self.apply_fade_in(sample),
+            FadePhase::Playing => {
+                self.last_val = sample;
+                sample
+            }
+        }
+    }
+
+    #[inline]
+    fn drain(&mut self) -> f32 {
+        match self.phase {
+            FadePhase::Playing => {
+                self.phase = FadePhase::FadingOut;
+                self.fade_pos = 0;
+                self.apply_fade_out()
+            }
+            FadePhase::FadingOut => self.apply_fade_out(),
+            FadePhase::FadingIn | FadePhase::Silent => {
+                self.phase = FadePhase::Silent;
+                0.0
+            }
+        }
+    }
+
+    #[inline]
+    fn apply_fade_out(&mut self) -> f32 {
+        if self.fade_pos >= self.fade_len {
+            self.phase = FadePhase::Silent;
+            self.last_val = 0.0;
+            return 0.0;
+        }
+        let gain = (self.fade_len - self.fade_pos) as f32 / self.fade_len as f32;
+        self.fade_pos += 1;
+        self.last_val * gain
+    }
+
+    #[inline]
+    fn apply_fade_in(&mut self, sample: f32) -> f32 {
+        if self.fade_pos >= self.fade_len {
+            self.phase = FadePhase::Playing;
+            self.last_val = sample;
+            return sample;
+        }
+        let gain = self.fade_pos as f32 / self.fade_len as f32;
+        self.fade_pos += 1;
+        self.last_val = sample;
+        sample * gain
     }
 }
 

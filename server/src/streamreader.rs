@@ -86,6 +86,8 @@ pub async fn run(
         .map(|ms| Duration::from_millis(ms as u64));
     let silence_on_idle = stream.silence_on_idle;
 
+    let chunk_ms = stream_chunk_ms(&stream);
+
     if stream.source == "-" {
         run_reader(
             tokio::io::stdin(),
@@ -97,6 +99,7 @@ pub async fn run(
             &state,
             idle_timeout,
             silence_on_idle,
+            chunk_ms,
         )
         .await
     } else if stream.source.starts_with("pipe://") {
@@ -110,6 +113,7 @@ pub async fn run(
             &state,
             idle_timeout,
             silence_on_idle,
+            chunk_ms,
         )
         .await
     } else if let Some(tcp) = parse_tcp_source(&stream.source)? {
@@ -123,6 +127,7 @@ pub async fn run(
             &state,
             idle_timeout,
             silence_on_idle,
+            chunk_ms,
         )
         .await
     } else {
@@ -139,6 +144,7 @@ pub async fn run(
             &state,
             idle_timeout,
             silence_on_idle,
+            chunk_ms,
         )
         .await
     }
@@ -335,6 +341,7 @@ async fn run_tcp(
     state: &Arc<ServerState>,
     idle_timeout: Option<Duration>,
     silence_on_idle: bool,
+    chunk_ms: u32,
 ) -> anyhow::Result<()> {
     match tcp.mode {
         TcpMode::Connect => {
@@ -352,6 +359,7 @@ async fn run_tcp(
                 state,
                 idle_timeout,
                 silence_on_idle,
+                chunk_ms,
             )
             .await
         }
@@ -374,6 +382,7 @@ async fn run_tcp(
                     state,
                     idle_timeout,
                     silence_on_idle,
+                    chunk_ms,
                 )
                 .await
                 {
@@ -399,6 +408,7 @@ async fn run_pipe(
     state: &Arc<ServerState>,
     idle_timeout: Option<Duration>,
     silence_on_idle: bool,
+    chunk_ms: u32,
 ) -> anyhow::Result<()> {
     let (cmd, args) = parse_pipe_uri(uri)?;
 
@@ -430,6 +440,7 @@ async fn run_pipe(
             state,
             idle_timeout,
             silence_on_idle,
+            chunk_ms,
         )
         .await;
 
@@ -506,6 +517,7 @@ async fn run_reader<R: AsyncReadExt + Unpin>(
     state: &Arc<ServerState>,
     idle_timeout: Option<Duration>,
     silence_on_idle: bool,
+    chunk_ms: u32,
 ) -> anyhow::Result<()> {
     let silence_pcm: Vec<i16> = vec![0i16; pcm_buf.len() / 2];
     let mut is_idle = false;
@@ -541,8 +553,8 @@ async fn run_reader<R: AsyncReadExt + Unpin>(
                     }
 
                     if silence_on_idle {
-                        // Emit silence frames at 20 ms intervals until data returns.
-                        let mut tick = tokio::time::interval(Duration::from_millis(20));
+                        // Emit silence frames at chunk_ms intervals until data returns.
+                        let mut tick = tokio::time::interval(Duration::from_millis(chunk_ms as u64));
                         tick.tick().await; // discard immediate first tick
                         loop {
                             tokio::select! {

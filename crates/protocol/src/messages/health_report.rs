@@ -118,6 +118,12 @@ pub struct HealthReport {
     /// Number of missing RTP packets concealed by the client decoder.
     #[serde(default)]
     pub rtp_concealed_packets: u32,
+    /// Number of frames dropped to correct clock drift.
+    #[serde(default)]
+    pub drift_drop_count: u64,
+    /// Number of frames duplicated to correct clock drift.
+    #[serde(default)]
+    pub drift_dup_count: u64,
 }
 
 impl HealthReport {
@@ -145,6 +151,8 @@ impl HealthReport {
             rtp_sequence_gaps: 0,
             rtp_decode_error_count: 0,
             rtp_concealed_packets: 0,
+            drift_drop_count: 0,
+            drift_dup_count: 0,
         }
     }
 
@@ -188,6 +196,12 @@ impl HealthReport {
         self
     }
 
+    pub fn with_drift_metrics(mut self, drop_count: u64, dup_count: u64) -> Self {
+        self.drift_drop_count = drop_count;
+        self.drift_dup_count = dup_count;
+        self
+    }
+
     pub fn total_playout_queue_ms(&self) -> u32 {
         self.buffer_depth_ms.saturating_add(self.output_buffer_ms)
     }
@@ -210,11 +224,13 @@ impl HealthReport {
             rtp_sequence_gaps: if r.remaining() >= 4 { r.read_u32()? } else { 0 },
             rtp_decode_error_count: if r.remaining() >= 4 { r.read_u32()? } else { 0 },
             rtp_concealed_packets: if r.remaining() >= 4 { r.read_u32()? } else { 0 },
+            drift_drop_count: if r.remaining() >= 4 { r.read_u32()? as u64 } else { 0 },
+            drift_dup_count: if r.remaining() >= 4 { r.read_u32()? as u64 } else { 0 },
         })
     }
 
     pub fn encode(&self) -> Vec<u8> {
-        let mut w = WireWrite::with_capacity(60);
+        let mut w = WireWrite::with_capacity(68);
         w.write_u32(self.underrun_count);
         w.write_u32(self.overrun_count);
         w.write_u32(self.stale_drop_count);
@@ -230,6 +246,8 @@ impl HealthReport {
         w.write_u32(self.rtp_sequence_gaps);
         w.write_u32(self.rtp_decode_error_count);
         w.write_u32(self.rtp_concealed_packets);
+        w.write_u32(self.drift_drop_count as u32);
+        w.write_u32(self.drift_dup_count as u32);
         w.finish()
     }
 }

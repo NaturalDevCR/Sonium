@@ -31,7 +31,7 @@ use std::sync::atomic::{AtomicI64, Ordering};
 use std::sync::Arc;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
-const SAMPLE_BUFFER_SIZE: usize = 200;
+const DEFAULT_SAMPLE_BUFFER_SIZE: usize = 200;
 const STALE_TIMEOUT_SECS: u64 = 60;
 
 /// Estimates the signed offset between the local clock and the server clock.
@@ -47,15 +47,15 @@ pub struct TimeProvider {
 }
 
 struct SampleBuffer {
-    buf: [i64; SAMPLE_BUFFER_SIZE],
+    buf: Vec<i64>,
     len: usize,
     pos: usize,
 }
 
 impl SampleBuffer {
-    fn new() -> Self {
+    fn new(size: usize) -> Self {
         Self {
-            buf: [0i64; SAMPLE_BUFFER_SIZE],
+            buf: vec![0i64; size],
             len: 0,
             pos: 0,
         }
@@ -63,8 +63,8 @@ impl SampleBuffer {
 
     fn push(&mut self, v: i64) {
         self.buf[self.pos] = v;
-        self.pos = (self.pos + 1) % SAMPLE_BUFFER_SIZE;
-        if self.len < SAMPLE_BUFFER_SIZE {
+        self.pos = (self.pos + 1) % self.buf.len();
+        if self.len < self.buf.len() {
             self.len += 1;
         }
     }
@@ -93,9 +93,33 @@ impl TimeProvider {
     pub fn new() -> Self {
         Self {
             offset_us: Arc::new(AtomicI64::new(0)),
-            samples: parking_lot::Mutex::new(SampleBuffer::new()),
+            samples: parking_lot::Mutex::new(SampleBuffer::new(DEFAULT_SAMPLE_BUFFER_SIZE)),
             last_sync: parking_lot::Mutex::new(None),
         }
+    }
+
+    /// Update the window size for the median filter.
+    ///
+    /// Smaller windows react faster to changes but are more susceptible to noise.
+    /// Use a smaller window (e.g. 50) when operating with low playback buffers.
+    pub fn set_window_size(&self, size: usize) {
+        let mut samples = self.samples.lock();
+        if samples.buf.len() == size {
+            return;
+        }
+
+        let mut new_buf = SampleBuffer::new(size);
+        // Copy as much as possible from old buffer, starting from oldest samples
+        let to_copy = samples.len.min(size);
+        for i in 0..to_copy {
+            // This is a bit complex due to circular buffer, but we can just
+            // push the last 'to_copy' samples into the new buffer.
+            let idx = (samples.pos + samples.buf.len() - to_copy + i) % samples.buf.len();
+            new_buf.buf[i] = samples.buf[idx];
+        }
+        new_buf.len = to_copy;
+        new_buf.pos = to_copy % size;
+        *samples = new_buf;
     }
 
     /// Update the clock offset estimate with one RTT measurement.

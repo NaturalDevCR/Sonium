@@ -122,11 +122,11 @@ impl Default for ServerNet {
             control_port: 1711,
             mdns: true,
             snapcast_compat: false,
-            buffer_ms: 1000,
-            chunk_ms: 20,
+            buffer_ms: 200,
+            chunk_ms: 10,
             output_prefill_ms: 0,
             auto_buffer: false,
-            auto_buffer_min_ms: 400,
+            auto_buffer_min_ms: 20,
             auto_buffer_max_ms: 3000,
             auto_buffer_step_up_ms: 120,
             auto_buffer_step_down_ms: 40,
@@ -203,6 +203,8 @@ pub struct ClientConfig {
     /// The instance ID, useful for running multiple isolated clients on the same host.
     pub instance: u32,
     pub log: LogConfig,
+    /// Enable the new callback-driven playout path with precise drift correction.
+    pub experimental_callback: bool,
 }
 
 impl Default for ClientConfig {
@@ -215,6 +217,7 @@ impl Default for ClientConfig {
             device: None,
             instance: 1,
             log: LogConfig::default(),
+            experimental_callback: true,
         }
     }
 }

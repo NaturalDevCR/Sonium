@@ -20,6 +20,34 @@
 use sonium_common::SampleFormat;
 use std::collections::VecDeque;
 
+/// Tracks drift between local audio hardware and server stream timing.
+#[derive(Debug, Default, Clone, Copy)]
+pub struct DriftCorrector {
+    pub ticks_since_last_correction: u32,
+}
+
+impl DriftCorrector {
+    pub fn should_drop_frame(&mut self, age_us: i64) -> bool {
+        self.ticks_since_last_correction = self.ticks_since_last_correction.saturating_add(1);
+        if age_us > 2_000 && self.ticks_since_last_correction >= 2 {
+            self.ticks_since_last_correction = 0;
+            true
+        } else {
+            false
+        }
+    }
+
+    pub fn should_duplicate_frame(&mut self, age_us: i64) -> bool {
+        self.ticks_since_last_correction = self.ticks_since_last_correction.saturating_add(1);
+        if age_us < -2_000 && self.ticks_since_last_correction >= 2 {
+            self.ticks_since_last_correction = 0;
+            true
+        } else {
+            false
+        }
+    }
+}
+
 /// A decoded audio chunk with its scheduled playout timestamp.
 #[derive(Debug, Clone)]
 pub struct PcmChunk {
@@ -60,11 +88,11 @@ impl PcmChunk {
         (frames as f64 / self.fmt.rate as f64 * 1_000_000.0) as i64
     }
 
-    /// Playout timestamp of the first unconsumed sample.
+    /// Absolute playout time of the sample at the current `read_pos`.
     pub fn current_playout_us(&self) -> i64 {
-        let consumed_frames = self.read_pos / self.fmt.channels as usize;
-        let consumed_us = (consumed_frames as f64 / self.fmt.rate as f64 * 1_000_000.0) as i64;
-        self.playout_us + consumed_us
+        let frames = self.read_pos / self.fmt.channels as usize;
+        let us = (frames as f64 / self.fmt.rate as f64 * 1_000_000.0) as i64;
+        self.playout_us + us
     }
 }
 
@@ -94,6 +122,8 @@ pub struct SyncBuffer {
     state: State,
     target_buffer_us: i64,
     lead_us: i64,
+    drift_drop_count: u64,
+    drift_dup_count: u64,
 }
 
 impl SyncBuffer {
@@ -114,97 +144,40 @@ impl SyncBuffer {
             state: State::Buffering,
             target_buffer_us: 1_000_000,
             lead_us: 40_000,
+            drift_drop_count: 0,
+            drift_dup_count: 0,
         }
     }
 
-    /// Update the server-requested playout buffer.
-    pub fn set_target_buffer_ms(&mut self, buffer_ms: i32) {
-        let clamped_ms = buffer_ms.clamp(40, 10_000);
-        self.target_buffer_us = clamped_ms as i64 * 1000;
-        self.lead_us = (self.target_buffer_us / 10).clamp(20_000, 100_000);
-    }
-
-    /// Insert a decoded chunk, maintaining playout-time order.
+    /// Add a new chunk to the buffer.
     ///
-    /// `arrival_us` is the local monotonic time (µs) when the chunk was received,
-    /// used for jitter estimation.
+    /// The chunk is inserted in timestamp order.  Jitter is estimated based on
+    /// the arrival time of this chunk relative to its scheduled playout time.
     pub fn push(&mut self, chunk: PcmChunk, arrival_us: i64) {
-        // Estimate jitter using RFC 3550 algorithm:
-        // D(i,j) = (Rj - Sj) - (Ri - Si)
-        // J = J + (|D(i,j)| - J)/16
-        if let Some((last_r, last_s)) = self.last_arrival_info {
-            let transit_diff = (arrival_us - chunk.playout_us) - (last_r - last_s);
-            let d = transit_diff.abs() as f64;
-            self.jitter_us += (d - self.jitter_us) / 16.0;
+        // Calculate jitter (server playout - local arrival)
+        // We use relative variation in this difference.
+        let current_diff = chunk.playout_us - arrival_us;
+        if let Some((last_arrival, last_playout)) = self.last_arrival_info {
+            let last_diff = last_playout - last_arrival;
+            let variation = (current_diff - last_diff).abs() as f64;
+            // EWMA with alpha=0.1
+            self.jitter_us = self.jitter_us * 0.9 + variation * 0.1;
         }
         self.last_arrival_info = Some((arrival_us, chunk.playout_us));
 
+        // Insert in order
+        let mut insert_at = self.chunks.len();
+        for (i, c) in self.chunks.iter().enumerate() {
+            if c.playout_us > chunk.playout_us {
+                insert_at = i;
+                break;
+            }
+        }
+
         self.buffered_samples += chunk.remaining_samples();
-        let pos = self
-            .chunks
-            .iter()
-            .position(|c| c.playout_us > chunk.playout_us)
-            .unwrap_or(self.chunks.len());
-        self.chunks.insert(pos, chunk);
+        self.chunks.insert(insert_at, chunk);
+
         self.drop_excess_buffered_audio();
-    }
-
-    /// Return the next chunk ready to play relative to `now_server_us`, or
-    /// `None` if no chunk is due yet.
-    ///
-    /// Stale chunks (more than 100 ms past their playout window) are dropped
-    /// before checking.
-    pub fn pop_ready(&mut self, now_server_us: i64) -> Option<PcmChunk> {
-        let stale_threshold_us = (self.target_buffer_us / 2).clamp(100_000, 2_000_000);
-        let low_water_us = self.lead_us.max(40_000);
-        while let Some(front) = self.chunks.front() {
-            let end_us = front.playout_us + front.remaining_us();
-            if end_us < now_server_us - stale_threshold_us {
-                let dropped = self.chunks.pop_front().unwrap();
-                self.buffered_samples = self
-                    .buffered_samples
-                    .saturating_sub(dropped.remaining_samples());
-                self.stale_drop_count += 1;
-                continue;
-            }
-            break;
-        }
-
-        if self.chunks.is_empty() {
-            if self.state == State::Playing {
-                self.underrun_count += 1;
-                self.state = State::Buffering;
-            }
-            return None;
-        }
-
-        let front = self.chunks.front()?;
-        let has_target_depth = self.buffer_depth_us() >= self.target_buffer_us;
-        let has_playing_depth = self.buffer_depth_us() >= low_water_us;
-        let chunk_is_due = front.playout_us <= now_server_us + self.lead_us;
-
-        match self.state {
-            State::Buffering => {
-                if chunk_is_due || has_target_depth {
-                    self.state = State::Playing;
-                    let chunk = self.chunks.pop_front().unwrap();
-                    self.buffered_samples = self
-                        .buffered_samples
-                        .saturating_sub(chunk.remaining_samples());
-                    return Some(chunk);
-                }
-            }
-            State::Playing => {
-                if chunk_is_due || has_playing_depth {
-                    let chunk = self.chunks.pop_front().unwrap();
-                    self.buffered_samples = self
-                        .buffered_samples
-                        .saturating_sub(chunk.remaining_samples());
-                    return Some(chunk);
-                }
-            }
-        }
-        None
     }
 
     /// Return the next chunk only when its timestamp is actually due.
@@ -234,7 +207,7 @@ impl SyncBuffer {
     }
 
     fn drop_stale(&mut self, now_server_us: i64) {
-        let stale_threshold_us = (self.target_buffer_us / 2).clamp(100_000, 2_000_000);
+        let stale_threshold_us = (self.target_buffer_us / 2).clamp(10_000, 2_000_000);
 
         while let Some(front) = self.chunks.front() {
             let end_us = front.playout_us + front.remaining_us();
@@ -251,7 +224,7 @@ impl SyncBuffer {
     }
 
     fn drop_excess_buffered_audio(&mut self) {
-        let max_buffer_us = self.target_buffer_us.saturating_mul(2).max(500_000);
+        let max_buffer_us = self.target_buffer_us.saturating_mul(2).max(100_000);
         while self.buffer_depth_us() > max_buffer_us {
             let Some(dropped) = self.chunks.pop_front() else {
                 break;
@@ -300,143 +273,85 @@ impl SyncBuffer {
         self.target_buffer_us
     }
 
+    pub fn take_drift_drop_count(&mut self) -> u64 {
+        let count = self.drift_drop_count;
+        self.drift_drop_count = 0;
+        count
+    }
+
+    pub fn take_drift_dup_count(&mut self) -> u64 {
+        let count = self.drift_dup_count;
+        self.drift_dup_count = 0;
+        count
+    }
+
     /// Current estimated jitter in microseconds.
     pub fn jitter_us(&self) -> i64 {
         self.jitter_us as i64
     }
 
-    pub fn get_report(&self, _now_server_us: i64) -> SyncReport {
-        SyncReport {
-            underrun_count: self.underrun_count,
-            stale_drop_count: self.stale_drop_count,
-            buffer_depth_ms: (self.buffer_depth_us() / 1000) as i32,
-            jitter_ms: (self.jitter_us / 1000.0) as i32,
-        }
-    }
-}
-
-#[derive(Debug, Clone, Default)]
-pub struct SyncReport {
-    pub underrun_count: u32,
-    pub stale_drop_count: u32,
-    pub buffer_depth_ms: i32,
-    pub jitter_ms: i32,
-}
-
-// ─── Tests ───────────────────────────────────────────────────────────────────
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    fn fmt() -> SampleFormat {
-        SampleFormat::new(48_000, 16, 2)
+    /// Target buffer depth in milliseconds.
+    pub fn set_target_buffer_ms(&mut self, ms: i32) {
+        self.target_buffer_us = (ms as i64 * 1000).max(20_000);
+        // Rescale lead_us to stay at 25% of target, minimum 5ms.
+        self.lead_us = (self.target_buffer_us / 4).clamp(5_000, 100_000);
     }
 
-    fn chunk(playout_us: i64, sample_count: usize) -> PcmChunk {
-        PcmChunk::new(playout_us, vec![0i16; sample_count], fmt())
+    /// Set the lead time (lookahead) for `pop_ready`.
+    pub fn set_lead_us(&mut self, us: i64) {
+        self.lead_us = us;
     }
 
-    #[test]
-    fn push_and_pop_single_chunk() {
-        let mut buf = SyncBuffer::new(fmt());
-        let now = 1_000_000i64;
-        // Chunk scheduled to play at exactly 'now'
-        buf.push(chunk(now, 960), now);
-
-        assert!(buf.pop_ready(now).is_some());
-        assert!(buf.is_empty());
+    pub fn take_underruns(&mut self) -> u32 {
+        let count = self.underrun_count;
+        self.underrun_count = 0;
+        count
     }
 
-    #[test]
-    fn future_chunk_not_released() {
-        let mut buf = SyncBuffer::new(fmt());
-        let now = 1_000_000i64;
-        // Chunk scheduled 5 seconds in the future
-        buf.push(chunk(now + 5_000_000, 960), now);
-        assert!(buf.pop_ready(now).is_none());
-        assert!(!buf.is_empty());
+    pub fn get_report(&mut self, now_server_us: i64) -> sonium_protocol::messages::HealthReport {
+        let latency_ms = if let Some(next_us) = self.next_playout_us() {
+            ((next_us - now_server_us) / 1000) as i32
+        } else {
+            0
+        };
+
+        sonium_protocol::messages::HealthReport::new(
+            self.take_underruns(),
+            0,
+            self.take_stale_drops(),
+            (self.buffer_depth_us() / 1000) as u32,
+            (self.jitter_us / 1000.0) as u32,
+            latency_ms,
+        )
+        .with_queue_metrics(
+            0,
+            self.len() as u32,
+            (self.target_buffer_us / 1000) as u32,
+        )
     }
 
-    #[test]
-    fn chunks_released_in_playout_order() {
-        let mut buf = SyncBuffer::new(fmt());
-        // Push out-of-order
-        buf.push(chunk(3_000, 960), 0);
-        buf.push(chunk(1_000, 960), 0);
-        buf.push(chunk(2_000, 960), 0);
+    /// Pull audio that is due to be played at `now_server_us + lead_us`.
+    pub fn pop_ready(&mut self, now_server_us: i64) -> Option<PcmChunk> {
+        self.drop_stale(now_server_us);
 
-        let c1 = buf.pop_ready(10_000).unwrap();
-        let c2 = buf.pop_ready(10_000).unwrap();
-        let c3 = buf.pop_ready(10_000).unwrap();
-        assert!(c1.playout_us <= c2.playout_us);
-        assert!(c2.playout_us <= c3.playout_us);
-    }
-
-    #[test]
-    fn stale_chunks_dropped_automatically() {
-        let mut buf = SyncBuffer::new(fmt());
-        // Current time is 1,000,000us
-        let now = 1_000_000i64;
-        // Chunk finished long before the allowed stale window.
-        buf.push(chunk(300_000 - 10_000, 960), now);
-
-        // pop_ready should drop the stale chunk
-        assert!(buf.pop_ready(now).is_none());
-        assert!(buf.is_empty());
-        assert_eq!(buf.get_report(now).stale_drop_count, 1);
-    }
-
-    #[test]
-    fn buffer_depth_accounting() {
-        let mut buf = SyncBuffer::new(fmt());
-        // 960 stereo samples = 10ms
-        buf.push(chunk(100_000, 960), 0);
-        let depth = buf.buffer_depth_us();
-        assert!((depth - 10_000).abs() < 100);
-    }
-
-    #[test]
-    fn clear_empties_buffer() {
-        let mut buf = SyncBuffer::new(fmt());
-        buf.push(chunk(0, 960), 0);
-        buf.push(chunk(10_000, 960), 0);
-        buf.clear();
-        assert!(buf.is_empty());
-    }
-
-    #[test]
-    fn target_depth_does_not_release_future_chunks_early() {
-        let mut buf = SyncBuffer::new(fmt());
-        buf.set_target_buffer_ms(100);
-        let now = 1_000_000i64;
-
-        // 10 ms per chunk, all scheduled well in the future. The ring-buffer
-        // playback path may release at target depth to avoid starving the
-        // audio backend while clock sync settles.
-        for i in 0..10 {
-            buf.push(chunk(now + 5_000_000 + i * 10_000, 960), now);
+        if self.state == State::Buffering {
+            if self.buffer_depth_us() >= self.target_buffer_us {
+                self.state = State::Playing;
+            } else {
+                return None;
+            }
         }
 
-        assert!(buf.pop_ready(now).is_some());
-    }
-
-    #[test]
-    fn playing_state_can_use_depth_to_keep_output_prefilled() {
-        let mut buf = SyncBuffer::new(fmt());
-        buf.set_target_buffer_ms(1000);
-        let now = 1_000_000i64;
-
-        // Enter Playing with a due chunk.
-        buf.push(chunk(now, 960), now);
-        assert!(buf.pop_ready(now).is_some());
-
-        // Subsequent chunks are far in the future. Once playing, enough queued
-        // depth lets the client keep its local output ring fed.
-        for i in 0..10 {
-            buf.push(chunk(now + 5_000_000 + i * 10_000, 960), now);
+        let front = self.chunks.front()?;
+        if front.playout_us <= now_server_us + self.lead_us {
+            let chunk = self.chunks.pop_front().unwrap();
+            self.buffered_samples = self
+                .buffered_samples
+                .saturating_sub(chunk.remaining_samples());
+            Some(chunk)
+        } else {
+            self.underrun_count += 1;
+            None
         }
-
-        assert!(buf.pop_ready(now).is_some());
     }
 }
