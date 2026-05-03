@@ -60,18 +60,18 @@ jobs:
             target: x86_64-unknown-linux-gnu
             package: linux-x86_64
             archive: tar.gz
-          - os: ubuntu-24.04-arm
-            target: aarch64-unknown-linux-gnu
-            package: linux-aarch64
-            archive: tar.gz
+          # - os: ubuntu-24.04-arm
+          #   target: aarch64-unknown-linux-gnu
+          #   package: linux-aarch64
+          #   archive: tar.gz
           - os: macos-14
             target: aarch64-apple-darwin
             package: macos-aarch64
             archive: tar.gz
-          - os: windows-latest
-            target: x86_64-pc-windows-msvc
-            package: windows-x86_64
-            archive: zip
+          # - os: windows-latest
+          #   target: x86_64-pc-windows-msvc
+          #   package: windows-x86_64
+          #   archive: zip
 
     steps:
       - uses: actions/checkout@v4
@@ -145,10 +145,10 @@ jobs:
         include:
           - os: macos-14
             target: aarch64-apple-darwin
-          - os: windows-latest
-            target: x86_64-pc-windows-msvc
-          - os: ubuntu-latest
-            target: x86_64-unknown-linux-gnu
+          # - os: windows-latest
+          #   target: x86_64-pc-windows-msvc
+          # - os: ubuntu-latest
+          #   target: x86_64-unknown-linux-gnu
 
     steps:
       - uses: actions/checkout@v4

@@ -332,6 +332,13 @@ async fn main() -> anyhow::Result<()> {
 
 fn configure_tcp_stream(stream: &TcpStream) {
     let sock = SockRef::from(stream);
+
+    // Bump the kernel send buffer to absorb bursty audio frame writes.
+    // 256 KB provides headroom for short-term TCP backpressure.
+    if let Err(e) = sock.set_send_buffer_size(262_144) {
+        warn!("Could not set TCP SO_SNDBUF: {e}");
+    }
+
     if let Err(e) = sock.set_keepalive(true) {
         warn!("Could not enable TCP keepalive: {e}");
     }

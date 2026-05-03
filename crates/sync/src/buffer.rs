@@ -338,7 +338,15 @@ impl SyncBuffer {
             }
         }
 
-        let front = self.chunks.front()?;
+        let front = match self.chunks.front() {
+            Some(f) => f,
+            None => {
+                // Buffer empty while Playing → genuine underrun.
+                self.underrun_count += 1;
+                return None;
+            }
+        };
+
         if front.playout_us <= now_server_us + self.lead_us {
             let chunk = self.chunks.pop_front().unwrap();
             self.buffered_samples = self
@@ -346,7 +354,8 @@ impl SyncBuffer {
                 .saturating_sub(chunk.remaining_samples());
             Some(chunk)
         } else {
-            self.underrun_count += 1;
+            // Front chunk is scheduled for the future — this is NOT an
+            // underrun.  The buffer is holding audio that isn't due yet.
             None
         }
     }

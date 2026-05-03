@@ -20,9 +20,16 @@ pub struct Broadcaster {
     codec_header: Mutex<Option<Bytes>>,
 }
 
+/// Broadcast channel capacity.
+///
+/// At 20 ms/chunk this is ~40 seconds of audio.  A generous capacity
+/// prevents `RecvError::Lagged` for sessions that are temporarily slow
+/// (e.g. TCP write backpressure on a congested link).
+const BROADCAST_CAPACITY: usize = 2048;
+
 impl Broadcaster {
     pub fn new(stream_id: impl Into<String>, buffer_ms: u32) -> Self {
-        let (sender, _) = broadcast::channel(256);
+        let (sender, _) = broadcast::channel(BROADCAST_CAPACITY);
         Self {
             stream_id: stream_id.into(),
             buffer_ms,

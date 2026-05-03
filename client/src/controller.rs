@@ -606,6 +606,13 @@ fn output_prefill_us(total_buffer_ms: i32, configured_output_prefill_ms: u32) ->
 
 fn configure_tcp_stream(stream: &TcpStream) {
     let sock = SockRef::from(stream);
+
+    // Bump the receive buffer so the kernel can absorb bursty audio arrivals.
+    // 256 KB matches the server's SO_SNDBUF setting.
+    if let Err(e) = sock.set_recv_buffer_size(262_144) {
+        warn!("Could not set TCP SO_RCVBUF: {e}");
+    }
+
     if let Err(e) = sock.set_keepalive(true) {
         warn!("Could not enable TCP keepalive: {e}");
     }
