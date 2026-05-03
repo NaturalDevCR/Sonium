@@ -84,6 +84,7 @@ async fn post_config_validate(body: String) -> Response {
             .into_response();
     }
     if let Err(e) = toml::from_str::<sonium_common::config::ServerConfig>(&body) {
+        tracing::error!("Config validation failed: {e}");
         return (
             StatusCode::UNPROCESSABLE_ENTITY,
             format!("config error: {e}"),
@@ -120,6 +121,7 @@ async fn put_config_raw(State(s): State<ConfigApiState>, body: String) -> Respon
     }
     // Also validate against ServerConfig shape.
     if let Err(e) = toml::from_str::<sonium_common::config::ServerConfig>(&body) {
+        tracing::error!("Config validation failed: {e}");
         return (
             StatusCode::UNPROCESSABLE_ENTITY,
             format!("config error: {e}"),

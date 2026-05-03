@@ -563,24 +563,32 @@ async function loadServerTuning() {
     const raw = await api.configRaw().catch(() => '');
     const cfg: any = raw ? parse(raw) : {};
     const server = cfg.server || {};
-    globalBufferMs.value = Number(server.buffer_ms ?? 1000);
-    globalChunkMs.value = Number(server.chunk_ms ?? 20);
-    outputPrefillMs.value = Number(server.output_prefill_ms ?? 0);
-    autoBufferEnabled.value = Boolean(server.auto_buffer ?? false);
-    autoBufferMinMs.value = Number(server.auto_buffer_min_ms ?? 400);
-    autoBufferMaxMs.value = Number(server.auto_buffer_max_ms ?? 3000);
-    autoBufferStepUpMs.value = Number(server.auto_buffer_step_up_ms ?? 120);
-    autoBufferStepDownMs.value = Number(server.auto_buffer_step_down_ms ?? 40);
-    autoBufferCooldownMs.value = Number(server.auto_buffer_cooldown_ms ?? 8000);
-    const configuredTransport = server.transport || {};
-    transportMode.value = (configuredTransport.mode ?? 'tcp') as TransportMode;
-    transportUdpPort.value = Number(configuredTransport.udp_port ?? 0);
+    
+    // New nested structure
+    const audio = server.audio || {};
+    const auto_buffer = server.auto_buffer || {};
+    const transport = server.transport || {};
+
+    globalBufferMs.value = Number(audio.buffer_ms ?? server.buffer_ms ?? 1000);
+    globalChunkMs.value = Number(audio.chunk_ms ?? server.chunk_ms ?? 20);
+    outputPrefillMs.value = Number(audio.output_prefill_ms ?? server.output_prefill_ms ?? 0);
+    
+    autoBufferEnabled.value = Boolean(auto_buffer.enabled ?? server.auto_buffer ?? false);
+    autoBufferMinMs.value = Number(auto_buffer.min_ms ?? server.auto_buffer_min_ms ?? 400);
+    autoBufferMaxMs.value = Number(auto_buffer.max_ms ?? server.auto_buffer_max_ms ?? 3000);
+    autoBufferStepUpMs.value = Number(auto_buffer.step_up_ms ?? server.auto_buffer_step_up_ms ?? 120);
+    autoBufferStepDownMs.value = Number(auto_buffer.step_down_ms ?? server.auto_buffer_step_down_ms ?? 40);
+    autoBufferCooldownMs.value = Number(auto_buffer.cooldown_ms ?? server.auto_buffer_cooldown_ms ?? 8000);
+    
+    transportMode.value = (transport.mode ?? 'tcp') as TransportMode;
+    transportUdpPort.value = Number(transport.udp_port ?? 0);
+
     const runtime = await api.transport().catch(() => null);
     if (runtime) {
-      if (!configuredTransport.mode) {
+      if (!transport.mode) {
         transportMode.value = runtime.mode;
       }
-      if (configuredTransport.udp_port == null) {
+      if (transport.udp_port == null) {
         transportUdpPort.value = Number(runtime.server_udp_port ?? transportUdpPort.value);
       }
     }
@@ -596,29 +604,39 @@ async function saveServerTuning() {
     const raw = await api.configRaw().catch(() => '');
     const cfg: any = raw ? parse(raw) : {};
     if (!cfg.server) cfg.server = {};
-    cfg.server.buffer_ms = Math.max(100, Number(globalBufferMs.value || 1000));
-    cfg.server.chunk_ms = Math.max(10, Number(globalChunkMs.value || 20));
-    cfg.server.output_prefill_ms = Math.max(
-      0,
-      Math.min(1000, Number(outputPrefillMs.value || 0)),
-    );
-    cfg.server.auto_buffer = !!autoBufferEnabled.value;
-    cfg.server.auto_buffer_min_ms = Math.max(100, Number(autoBufferMinMs.value || 400));
-    cfg.server.auto_buffer_max_ms = Math.max(
-      cfg.server.auto_buffer_min_ms,
-      Number(autoBufferMaxMs.value || 3000),
-    );
-    cfg.server.auto_buffer_step_up_ms = Math.max(20, Number(autoBufferStepUpMs.value || 120));
-    cfg.server.auto_buffer_step_down_ms = Math.max(10, Number(autoBufferStepDownMs.value || 40));
-    cfg.server.auto_buffer_cooldown_ms = Math.max(
-      1000,
-      Number(autoBufferCooldownMs.value || 8000),
-    );
+    
+    // Clean up old flat keys if they exist
+    delete cfg.server.buffer_ms;
+    delete cfg.server.chunk_ms;
+    delete cfg.server.output_prefill_ms;
+    delete cfg.server.auto_buffer;
+    delete cfg.server.auto_buffer_min_ms;
+    delete cfg.server.auto_buffer_max_ms;
+    delete cfg.server.auto_buffer_step_up_ms;
+    delete cfg.server.auto_buffer_step_down_ms;
+    delete cfg.server.auto_buffer_cooldown_ms;
+
+    // Create new nested sections
+    cfg.server.audio = {
+      buffer_ms:         Math.max(10,  Number(globalBufferMs.value || 1000)),
+      chunk_ms:          Math.max(2,   Number(globalChunkMs.value || 20)),
+      output_prefill_ms: Math.max(0,   Number(outputPrefillMs.value || 0)),
+    };
+
+    cfg.server.auto_buffer = {
+      enabled:      !!autoBufferEnabled.value,
+      min_ms:       Math.max(10,   Number(autoBufferMinMs.value || 400)),
+      max_ms:       Math.max(100,  Number(autoBufferMaxMs.value || 3000)),
+      step_up_ms:   Math.max(10,   Number(autoBufferStepUpMs.value || 120)),
+      step_down_ms: Math.max(1,    Number(autoBufferStepDownMs.value || 40)),
+      cooldown_ms:  Math.max(1000, Number(autoBufferCooldownMs.value || 8000)),
+    };
+
     cfg.server.transport = {
-      ...(cfg.server.transport || {}),
-      mode: transportMode.value,
+      mode:     transportMode.value,
       udp_port: Math.max(0, Math.min(65535, Number(transportUdpPort.value || 0))),
     };
+
     await api.saveConfigRaw(stringify(cfg));
     await api.setTransport(transportMode.value).catch(() => undefined);
     tuningInfo.value = 'Global tuning saved. Restart Sonium server and reconnect clients to apply transport changes.';
