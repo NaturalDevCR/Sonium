@@ -313,7 +313,7 @@ async fn connect_and_run(
                         info!(codec = %ch.codec, "CodecHeader received");
                         let dec = ActiveDecoder::from_codec(&ch.codec, &ch.header_data)?;
                         let fmt = dec.sample_format();
-                        
+
                         let offset_us = std::sync::Arc::new(std::sync::atomic::AtomicI64::new(time_provider.offset_us()));
                         let playback = if cfg.experimental_callback {
                             Some(crate::player::PlaybackHandle::new(fmt, offset_us.clone()))

@@ -323,11 +323,7 @@ impl SyncBuffer {
             (self.jitter_us / 1000.0) as u32,
             latency_ms,
         )
-        .with_queue_metrics(
-            0,
-            self.len() as u32,
-            (self.target_buffer_us / 1000) as u32,
-        )
+        .with_queue_metrics(0, self.len() as u32, (self.target_buffer_us / 1000) as u32)
     }
 
     /// Pull audio that is due to be played at `now_server_us + lead_us`.

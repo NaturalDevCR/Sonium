@@ -13,8 +13,7 @@ use sonium_sync::time_provider::now_us;
 use sonium_sync::{PcmChunk, SyncBuffer};
 
 use rubato::{
-    Resampler, SincFixedIn, SincInterpolationParameters, SincInterpolationType,
-    WindowFunction,
+    Resampler, SincFixedIn, SincInterpolationParameters, SincInterpolationType, WindowFunction,
 };
 
 /// Audio output backed by the system default device via CPAL.
@@ -93,7 +92,10 @@ impl PlaybackHandle {
 
     pub fn take_drift_metrics(&self) -> (u64, u64) {
         let mut inner = self.inner.lock().unwrap();
-        (inner.buffer.take_drift_drop_count(), inner.buffer.take_drift_dup_count())
+        (
+            inner.buffer.take_drift_drop_count(),
+            inner.buffer.take_drift_dup_count(),
+        )
     }
 
     pub fn set_target_buffer_ms(&self, buffer_ms: i32) {
@@ -528,7 +530,8 @@ impl Player {
                 .swap(0, Ordering::Relaxed),
             audio_callback_xrun_count: self
                 .health
-                .audio_callback_xrun_count.swap(0, Ordering::Relaxed),
+                .audio_callback_xrun_count
+                .swap(0, Ordering::Relaxed),
             drift_drop_count: self.health.drift_drop_count.swap(0, Ordering::Relaxed),
             drift_dup_count: self.health.drift_dup_count.swap(0, Ordering::Relaxed),
         }
@@ -717,8 +720,12 @@ fn build_stream_for_format(
                     timing.observe(data.len(), &data_health);
                     if let Some(playback) = playback.as_ref() {
                         let (drops, dups) = playback.take_drift_metrics();
-                        data_health.drift_drop_count.fetch_add(drops, Ordering::Relaxed);
-                        data_health.drift_dup_count.fetch_add(dups, Ordering::Relaxed);
+                        data_health
+                            .drift_drop_count
+                            .fetch_add(drops, Ordering::Relaxed);
+                        data_health
+                            .drift_dup_count
+                            .fetch_add(dups, Ordering::Relaxed);
                         playback.fill_i16(data, info, &data_health, &mut fade);
                         return;
                     }
@@ -761,8 +768,12 @@ fn build_stream_for_format(
                     timing.observe(data.len(), &data_health);
                     if let Some(playback) = playback.as_ref() {
                         let (drops, dups) = playback.take_drift_metrics();
-                        data_health.drift_drop_count.fetch_add(drops, Ordering::Relaxed);
-                        data_health.drift_dup_count.fetch_add(dups, Ordering::Relaxed);
+                        data_health
+                            .drift_drop_count
+                            .fetch_add(drops, Ordering::Relaxed);
+                        data_health
+                            .drift_dup_count
+                            .fetch_add(dups, Ordering::Relaxed);
                         scratch.resize(data.len(), 0);
                         playback.fill_i16(&mut scratch, info, &data_health, &mut fade);
                         for (dst, src) in data.iter_mut().zip(scratch.iter()) {
@@ -809,8 +820,12 @@ fn build_stream_for_format(
                     timing.observe(data.len(), &data_health);
                     if let Some(playback) = playback.as_ref() {
                         let (drops, dups) = playback.take_drift_metrics();
-                        data_health.drift_drop_count.fetch_add(drops, Ordering::Relaxed);
-                        data_health.drift_dup_count.fetch_add(dups, Ordering::Relaxed);
+                        data_health
+                            .drift_drop_count
+                            .fetch_add(drops, Ordering::Relaxed);
+                        data_health
+                            .drift_dup_count
+                            .fetch_add(dups, Ordering::Relaxed);
                         playback.fill_f32(data, info, &data_health, &mut fade);
                         return;
                     }

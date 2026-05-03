@@ -224,8 +224,16 @@ impl HealthReport {
             rtp_sequence_gaps: if r.remaining() >= 4 { r.read_u32()? } else { 0 },
             rtp_decode_error_count: if r.remaining() >= 4 { r.read_u32()? } else { 0 },
             rtp_concealed_packets: if r.remaining() >= 4 { r.read_u32()? } else { 0 },
-            drift_drop_count: if r.remaining() >= 4 { r.read_u32()? as u64 } else { 0 },
-            drift_dup_count: if r.remaining() >= 4 { r.read_u32()? as u64 } else { 0 },
+            drift_drop_count: if r.remaining() >= 4 {
+                r.read_u32()? as u64
+            } else {
+                0
+            },
+            drift_dup_count: if r.remaining() >= 4 {
+                r.read_u32()? as u64
+            } else {
+                0
+            },
         })
     }
 

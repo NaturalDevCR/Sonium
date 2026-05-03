@@ -554,7 +554,8 @@ async fn run_reader<R: AsyncReadExt + Unpin>(
 
                     if silence_on_idle {
                         // Emit silence frames at chunk_ms intervals until data returns.
-                        let mut tick = tokio::time::interval(Duration::from_millis(chunk_ms as u64));
+                        let mut tick =
+                            tokio::time::interval(Duration::from_millis(chunk_ms as u64));
                         tick.tick().await; // discard immediate first tick
                         loop {
                             tokio::select! {
