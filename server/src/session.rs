@@ -41,7 +41,7 @@ use sonium_protocol::{
     },
     MessageHeader, MessageType, Timestamp,
 };
-use sonium_transport::{sender::MediaSender, RtpUdpMediaSender, TcpMediaSender, TransportMode};
+use sonium_transport::{sender::MediaSender, RtpUdpMediaSender, TransportMode};
 
 use crate::broadcaster::{lookup, AudioFrame, BroadcasterRegistry};
 use crate::metrics;
@@ -62,6 +62,38 @@ const STABLE_STREAK_REQUIRED: u32 = 5;
 const AUTO_BUFFER_CLEAN_INTERVALS_BEFORE_STEP_DOWN: u32 = 8;
 const AUTO_BUFFER_RTP_BURST_THRESHOLD: u32 = 6;
 const AUTO_BUFFER_STALE_BURST_THRESHOLD: u32 = 4;
+
+/// Dedicated TCP writer task.  Owns the `OwnedWriteHalf` exclusively so the
+/// select loop never blocks on a TCP write.  Audio frames arrive via a bounded
+/// channel (`try_send` — drop oldest on full); control messages use a separate
+/// unbounded channel so they are never lost.
+async fn tcp_writer_task(
+    mut writer: OwnedWriteHalf,
+    mut audio_rx: mpsc::Receiver<bytes::Bytes>,
+    mut ctrl_rx: mpsc::UnboundedReceiver<Vec<u8>>,
+    peer: SocketAddr,
+) {
+    loop {
+        tokio::select! {
+            biased;
+            // Prioritise control messages (Time replies, settings) over audio.
+            msg = ctrl_rx.recv() => {
+                let Some(buf) = msg else { break };
+                if let Err(e) = write_all_with_timeout(&mut writer, &buf).await {
+                    warn!(%peer, error = %e, "TCP control write failed");
+                    break;
+                }
+            }
+            msg = audio_rx.recv() => {
+                let Some(buf) = msg else { break };
+                if let Err(e) = write_all_with_timeout(&mut writer, &buf).await {
+                    warn!(%peer, error = %e, "TCP audio write failed");
+                    break;
+                }
+            }
+        }
+    }
+}
 
 #[derive(Debug)]
 struct AutoBufferTuner {
@@ -369,10 +401,10 @@ pub async fn handle(
         proto_ver,
     );
 
-    let (reader, mut writer) = stream.into_split();
+    let (reader, writer) = stream.into_split();
     let result = session_loop(
         reader,
-        &mut writer,
+        writer,
         peer,
         SessionLoopContext {
             registry,
@@ -400,7 +432,7 @@ struct SessionLoopContext {
 
 async fn session_loop(
     reader: OwnedReadHalf,
-    stream: &mut OwnedWriteHalf,
+    writer: OwnedWriteHalf,
     peer: SocketAddr,
     ctx: SessionLoopContext,
 ) -> anyhow::Result<()> {
@@ -425,10 +457,19 @@ async fn session_loop(
 
     let mut bc = lookup(&registry, &stream_id);
 
-    // Send CodecHeader if stream is already active.
+    // ── Set up writer channels ───────────────────────────────────────
+    // All TCP writes go through dedicated channels so the select loop
+    // never blocks on write backpressure.
+    let (audio_tx, audio_write_rx) = mpsc::channel::<bytes::Bytes>(AUDIO_QUEUE_CAPACITY);
+    let (ctrl_tx, ctrl_rx) = mpsc::unbounded_channel::<Vec<u8>>();
+
+    // Send CodecHeader if stream is already active (via writer task).
+    // We must send these before spawning the writer so they arrive
+    // before we start sending audio — but the writer task hasn't started
+    // yet, so we queue them.
     if let Some(b) = &bc {
         if let Some(hdr) = b.codec_header() {
-            write_all_with_timeout(stream, &hdr).await?;
+            let _ = ctrl_tx.send(hdr.to_vec());
         }
     }
 
@@ -486,20 +527,24 @@ async fn session_loop(
         TransportMode::Tcp
     };
 
-    send_server_settings(
-        stream,
-        current_buffer_ms,
-        init_vol.0,
-        init_vol.1,
-        init_latency,
-        init_eq_bands,
-        init_eq_enabled,
-        init_observability,
-        effective_mode.to_string(),
-        server_udp_port,
-        cfg.server.audio.output_prefill_ms,
-    )
-    .await?;
+    // Queue initial ServerSettings via control channel.
+    {
+        let settings = ServerSettings {
+            buffer_ms: current_buffer_ms as i32,
+            output_prefill_ms: cfg.server.audio.output_prefill_ms,
+            latency: init_latency,
+            volume: init_vol.0,
+            muted: init_vol.1,
+            eq_bands: init_eq_bands,
+            eq_enabled: init_eq_enabled,
+            observability_enabled: init_observability,
+            transport_mode: effective_mode.to_string(),
+            server_udp_port,
+        };
+        let mut hdr = MessageHeader::new(MessageType::ServerSettings, 0);
+        hdr.id = next_id();
+        let _ = ctrl_tx.send(Message::ServerSettings(settings).encode_with_header(hdr));
+    }
 
     info!(%peer, stream = %stream_id, transport = %effective_mode, "Session ready");
 
@@ -510,64 +555,35 @@ async fn session_loop(
     let read_task = tokio::spawn(socket_reader(reader, incoming_tx));
     let mut health_tracker = HealthTransitionTracker::default();
 
-    // ── Dedicated audio-write queue ───────────────────────────────────
-    //
-    // Audio frames are forwarded to a bounded mpsc channel.  A separate
-    // task drains the channel and writes frames to the TCP stream (or
-    // via the RTP sender).  This decouples audio delivery from the
-    // control-plane select loop: if TCP backpressure causes a slow
-    // write, only the audio-write task blocks — the control loop
-    // continues reading Time/HealthReport messages and handling events.
-    //
-    // When the queue fills (client cannot keep up), `try_send` will
-    // fail; we then drain the oldest frame from the receiver to make
-    // room and retry — equivalent to dropping the oldest chunk.
-    let (audio_tx, audio_write_rx) = mpsc::channel::<bytes::Bytes>(AUDIO_QUEUE_CAPACITY);
+    // ── Spawn the dedicated writer task ──────────────────────────────
     let audio_write_task = if rtp_sender.is_some() {
-        // For RTP/UDP, the media goes through the UDP sender.
-        // We spawn a task that reads from the queue and sends via RTP.
+        // For RTP/UDP: audio goes through the RTP sender, control through TCP writer.
         let mut rtp = rtp_sender.take().unwrap();
         let peer_for_task = peer;
-        tokio::spawn(async move {
-            let mut rx = audio_write_rx;
+        let rtp_audio_rx = audio_write_rx;
+        // Spawn RTP audio task.
+        let rtp_task = tokio::spawn(async move {
+            let mut rx = rtp_audio_rx;
             while let Some(wire_bytes) = rx.recv().await {
                 if let Err(e) = rtp.send_wire_bytes(&wire_bytes).await {
                     warn!(%peer_for_task, error = %e, "RTP audio frame write failed");
                     break;
                 }
             }
-        })
+        });
+        // Also spawn a TCP writer for control messages.
+        let _tcp_ctrl_task = tokio::spawn(tcp_writer_task(
+            writer,
+            // Empty audio channel — RTP handles audio.
+            mpsc::channel(1).1,
+            ctrl_rx,
+            peer,
+        ));
+        rtp_task
     } else {
-        // For TCP, we need a writer reference.  We use a separate
-        // OwnedWriteHalf but that means we need to split the writer
-        // usage.  Instead, we send raw bytes through the channel and
-        // handle the TCP write inside the select loop.
-        //
-        // Actually, let's just give the writer to the audio task.
-        // Control messages will use a separate channel back to the
-        // main loop which holds a second writer reference — but TCP
-        // only has one writer.  So the approach is:
-        //   1. Audio task gets exclusive write access.
-        //   2. Control messages (Time replies, ServerSettings) are
-        //      sent through a control_tx channel to the audio task
-        //      which serialises all writes.
-        //
-        // This is the Snapcast approach: one writer, serialised.
-        //
-        // Simpler alternative: keep the current design but just decouple
-        // the audio send by queueing frames.  The audio frame write
-        // stays in the select loop but uses `try_send` to avoid blocking.
-        // If the TCP write takes long, subsequent audio frames queue up;
-        // when the queue fills, we drop old frames.
-        //
-        // This simpler approach still gives us most of the benefit.
-        // Let's do that.
-        drop(audio_write_rx);
-        tokio::spawn(async {})
+        // For TCP: both audio AND control go through the unified writer task.
+        tokio::spawn(tcp_writer_task(writer, audio_write_rx, ctrl_rx, peer))
     };
-
-    // Track whether we have an RTP sender active (it was moved into the task).
-    let using_rtp = rtp_sender.is_none() && effective_mode == TransportMode::RtpUdp;
 
     let result = loop {
         tokio::select! {
@@ -581,7 +597,7 @@ async fn session_loop(
                     IncomingClientFrame::Message(hdr, payload) => {
                         handle_client_msg(
                             ClientMsgContext {
-                                stream,
+                                ctrl_tx: &ctrl_tx,
                                 state: &state,
                                 client_id,
                                 current_buffer_ms: &mut current_buffer_ms,
@@ -606,22 +622,11 @@ async fn session_loop(
             frame = recv_audio(&mut audio_rx) => {
                 match frame {
                     Ok(f) => {
-                        if using_rtp {
-                            // RTP path: forward to the audio-write task.
-                            if audio_tx.try_send(f.wire_bytes.clone()).is_err() {
-                                // Queue full — drop this frame (client can't keep up).
-                                debug!(%peer, "Audio queue full — dropping frame (RTP)");
-                            }
-                        } else {
-                            // TCP path: write directly but with a short timeout
-                            // to prevent stalling the loop for too long.
-                            let result = TcpMediaSender::new(stream)
-                                .send_wire_bytes(&f.wire_bytes)
-                                .await;
-                            if let Err(e) = result {
-                                warn!(%peer, error = %e, "Audio frame write failed");
-                                break Ok(());
-                            }
+                        // Both TCP and RTP: forward to the writer task via channel.
+                        // try_send drops the frame if the queue is full (client can't keep up)
+                        // instead of blocking the select loop.
+                        if audio_tx.try_send(f.wire_bytes.clone()).is_err() {
+                            debug!(%peer, "Audio queue full — dropping frame");
                         }
                     }
                     Err(broadcast::error::RecvError::Lagged(n)) => {
@@ -643,10 +648,10 @@ async fn session_loop(
                             .map(|g| g.stream_id.clone())
                         {
                             switch_stream(
-                                stream, &registry,
+                                &ctrl_tx, &registry,
                                 &mut audio_rx, &mut stream_id, &mut bc,
                                 &new_sid,
-                            ).await?;
+                            )?;
                             current_buffer_ms =
                                 bc.as_ref().map(|x| x.buffer_ms).unwrap_or(cfg.server.audio.buffer_ms);
                         }
@@ -656,10 +661,10 @@ async fn session_loop(
                         if gid == group_id =>
                     {
                         switch_stream(
-                            stream, &registry,
+                            &ctrl_tx, &registry,
                             &mut audio_rx, &mut stream_id, &mut bc,
                             &new_sid,
-                        ).await?;
+                        )?;
                         current_buffer_ms =
                             bc.as_ref().map(|x| x.buffer_ms).unwrap_or(cfg.server.audio.buffer_ms);
                     }
@@ -673,10 +678,10 @@ async fn session_loop(
                         let current_sid = stream_id.clone();
                         stream_id.clear();
                         switch_stream(
-                            stream, &registry,
+                            &ctrl_tx, &registry,
                             &mut audio_rx, &mut stream_id, &mut bc,
                             &current_sid,
-                        ).await?;
+                        )?;
                         current_buffer_ms =
                             bc.as_ref().map(|x| x.buffer_ms).unwrap_or(cfg.server.audio.buffer_ms);
                     }
@@ -697,7 +702,7 @@ async fn session_loop(
                         let lat = c.as_ref().map(|c| c.latency_ms).unwrap_or(0);
                         let obs = c.as_ref().map(|c| c.observability_enabled).unwrap_or(false);
                         let (eq, en) = state.get_stream_eq(&stream_id).unwrap_or_default();
-                        send_server_settings(stream, current_buffer_ms, volume, muted, lat, eq, en, obs, effective_mode.to_string(), server_udp_port, cfg.server.audio.output_prefill_ms).await?;
+                        send_server_settings_via_channel(&ctrl_tx, current_buffer_ms, volume, muted, lat, eq, en, obs, effective_mode.to_string(), server_udp_port, cfg.server.audio.output_prefill_ms);
                         debug!(%peer, volume, muted, "Volume settings pushed to client");
                     }
 
@@ -707,7 +712,7 @@ async fn session_loop(
                         let (vol, muted) = state.get_volume(client_id).unwrap_or((100, false));
                         let obs = state.get_client(client_id).map(|c| c.observability_enabled).unwrap_or(false);
                         let (eq, en) = state.get_stream_eq(&stream_id).unwrap_or_default();
-                        send_server_settings(stream, current_buffer_ms, vol, muted, latency_ms, eq, en, obs, effective_mode.to_string(), server_udp_port, cfg.server.audio.output_prefill_ms).await?;
+                        send_server_settings_via_channel(&ctrl_tx, current_buffer_ms, vol, muted, latency_ms, eq, en, obs, effective_mode.to_string(), server_udp_port, cfg.server.audio.output_prefill_ms);
                         debug!(%peer, latency_ms, "Latency settings pushed to client");
                     }
 
@@ -724,7 +729,7 @@ async fn session_loop(
                         let c = state.get_client(client_id);
                         let lat = c.as_ref().map(|c| c.latency_ms).unwrap_or(0);
                         let obs = c.as_ref().map(|c| c.observability_enabled).unwrap_or(false);
-                        send_server_settings(stream, current_buffer_ms, vol, muted, lat, eq_bands, enabled, obs, effective_mode.to_string(), server_udp_port, cfg.server.audio.output_prefill_ms).await?;
+                        send_server_settings_via_channel(&ctrl_tx, current_buffer_ms, vol, muted, lat, eq_bands, enabled, obs, effective_mode.to_string(), server_udp_port, cfg.server.audio.output_prefill_ms);
                         debug!(%peer, stream_id, "Stream EQ settings pushed to client");
                     }
 
@@ -743,8 +748,8 @@ async fn session_loop(
 }
 
 /// Re-subscribe to a different stream broadcaster and notify the client.
-async fn switch_stream(
-    wire: &mut OwnedWriteHalf,
+fn switch_stream(
+    ctrl_tx: &mpsc::UnboundedSender<Vec<u8>>,
     registry: &Arc<BroadcasterRegistry>,
     audio_rx: &mut Option<broadcast::Receiver<AudioFrame>>,
     stream_id: &mut String,
@@ -762,7 +767,7 @@ async fn switch_stream(
     if let Some(bc) = &new_bc {
         // Send the new stream's CodecHeader so the client re-initialises its decoder.
         if let Some(hdr) = bc.codec_header() {
-            write_all_with_timeout(wire, &hdr).await?;
+            let _ = ctrl_tx.send(hdr.to_vec());
         }
         *audio_rx = Some(bc.subscribe());
     } else {
@@ -784,8 +789,8 @@ async fn recv_audio(
 }
 
 #[allow(clippy::too_many_arguments)]
-async fn send_server_settings(
-    stream: &mut OwnedWriteHalf,
+fn send_server_settings_via_channel(
+    ctrl_tx: &mpsc::UnboundedSender<Vec<u8>>,
     buffer_ms: u32,
     volume: u8,
     muted: bool,
@@ -796,7 +801,7 @@ async fn send_server_settings(
     transport_mode: String,
     server_udp_port: u16,
     output_prefill_ms: u32,
-) -> anyhow::Result<()> {
+) {
     let settings = ServerSettings {
         buffer_ms: buffer_ms as i32,
         output_prefill_ms,
@@ -811,16 +816,11 @@ async fn send_server_settings(
     };
     let mut hdr = MessageHeader::new(MessageType::ServerSettings, 0);
     hdr.id = next_id();
-    write_all_with_timeout(
-        stream,
-        &Message::ServerSettings(settings).encode_with_header(hdr),
-    )
-    .await?;
-    Ok(())
+    let _ = ctrl_tx.send(Message::ServerSettings(settings).encode_with_header(hdr));
 }
 
 struct ClientMsgContext<'a> {
-    stream: &'a mut OwnedWriteHalf,
+    ctrl_tx: &'a mpsc::UnboundedSender<Vec<u8>>,
     state: &'a ServerState,
     client_id: &'a str,
     current_buffer_ms: &'a mut u32,
@@ -847,11 +847,9 @@ async fn handle_client_msg(
             reply.id = next_id();
             reply.refers_to = hdr.id;
             reply.received = now;
-            write_all_with_timeout(
-                ctx.stream,
-                &Message::Time(TimeMsg { latency: diff }).encode_with_header(reply),
-            )
-            .await?;
+            let _ = ctx
+                .ctrl_tx
+                .send(Message::Time(TimeMsg { latency: diff }).encode_with_header(reply));
         }
         MessageType::ClientInfo => {
             if let Ok(Message::ClientInfo(ci)) = Message::from_payload(&hdr, payload) {
@@ -888,8 +886,8 @@ async fn handle_client_msg(
                         .unwrap_or_else(|| "default".into());
                     let (eq_bands, eq_enabled) =
                         ctx.state.get_stream_eq(&stream_id).unwrap_or_default();
-                    send_server_settings(
-                        ctx.stream,
+                    send_server_settings_via_channel(
+                        ctx.ctrl_tx,
                         next_buffer_ms,
                         volume,
                         muted,
@@ -900,8 +898,7 @@ async fn handle_client_msg(
                         ctx.transport_mode.clone(),
                         ctx.server_udp_port,
                         ctx.output_prefill_ms,
-                    )
-                    .await?;
+                    );
                     *ctx.current_buffer_ms = next_buffer_ms;
                     debug!(client_id = %ctx.client_id, buffer_ms = next_buffer_ms, "Auto buffer adjusted");
                 }
