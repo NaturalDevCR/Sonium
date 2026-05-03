@@ -194,10 +194,22 @@ impl PlaybackTimeline {
     }
 
     fn set_target_buffer_ms(&mut self, ms: i32) {
+        let was_low_latency = self.is_low_latency();
         self.buffer.set_target_buffer_ms(ms);
-        // Tear down and rebuild the resampler when the target changes so its
-        // internal state (EMA ratio) starts from a clean baseline.
-        self.resampler = None;
+        // Only tear down the resampler when crossing the low-latency threshold.
+        // Otherwise the server's periodic settings updates would rebuild it
+        // every few seconds, producing a click each time from the SincFixedIn
+        // initialisation transient.
+        if was_low_latency != self.is_low_latency() {
+            self.resampler = None;
+        }
+    }
+
+    /// Buffer targets ≤ 50 ms are considered "low-latency mode" and engage
+    /// the rubato resampler for sub-ppm rate correction.  Above that, the
+    /// drop/dup mechanism is sufficient and avoids resampler overhead.
+    fn is_low_latency(&self) -> bool {
+        self.buffer.target_buffer_us() <= 50_000
     }
 
     fn fill_i16(
@@ -279,7 +291,37 @@ impl PlaybackTimeline {
         }
     }
 
+    /// Fill an f32 output buffer.
+    ///
+    /// Dispatches to one of two correction paths based on the current target
+    /// buffer:
+    ///
+    /// * **Normal mode** (`target > 50 ms`) — direct copy with i16→f32
+    ///   conversion and drop/dup drift correction.  Lowest CPU, no resampler
+    ///   transients.  Used for typical LAN setups (200–1200 ms buffers).
+    ///
+    /// * **Low-latency mode** (`target ≤ 50 ms`) — adaptive sample-rate
+    ///   correction via `rubato`.  Produces smooth ±500 ppm rate adjustments
+    ///   from buffer-depth feedback, the only viable approach at sub-50 ms
+    ///   buffers where drop/dup artifacts become audible.
     fn fill_f32(
+        &mut self,
+        out: &mut [f32],
+        dac_server_us: i64,
+        health: &HealthState,
+        fade: &mut FadeStateF32,
+    ) {
+        if self.is_low_latency() {
+            self.fill_f32_resampled(out, dac_server_us, health, fade);
+        } else {
+            self.fill_f32_simple(out, dac_server_us, health, fade);
+            // Drop the resampler when not in use to free its allocations.
+            self.resampler = None;
+        }
+    }
+
+    /// Mirror of [`fill_i16`][Self::fill_i16] with i16→f32 conversion and no resampler.
+    fn fill_f32_simple(
         &mut self,
         out: &mut [f32],
         dac_server_us: i64,
@@ -290,30 +332,7 @@ impl PlaybackTimeline {
         let mut sample_pos = 0usize;
         let mut produced_frames = 0usize;
 
-        // Initialise resampler lazily on first f32 callback.
-        if self.resampler.is_none() {
-            self.resampler = Some(AdaptiveResampler::new(channels, self.fmt.rate));
-        }
-        let resampler = self.resampler.as_mut().unwrap();
-
-        // Update drift-correction ratio once per callback from buffer-depth feedback.
-        resampler.update_ratio(
-            self.buffer.buffer_depth_us(),
-            self.buffer.target_buffer_us(),
-        );
-
         while sample_pos < out.len() {
-            // ── 1. Drain resampler output ring first ──────────────────────
-            if let Some(s) = resampler.pop_output() {
-                out[sample_pos] = fade.feed(s);
-                sample_pos += 1;
-                if sample_pos.is_multiple_of(channels) {
-                    produced_frames += 1;
-                }
-                continue;
-            }
-
-            // ── 2. Need more input — resolve current chunk ────────────────
             let frame_server_us = dac_server_us + frames_to_us(produced_frames, self.fmt.rate);
 
             if self.current.is_none() {
@@ -321,7 +340,6 @@ impl PlaybackTimeline {
             }
 
             let Some(chunk) = self.current.as_mut() else {
-                // Underrun: fill remaining output with silence.
                 let remaining_frames = (out.len() - sample_pos) / channels;
                 let silence_frames = self
                     .buffer
@@ -347,13 +365,111 @@ impl PlaybackTimeline {
                 continue;
             };
 
-            // ── 3. Gross drift guard (>2 ms) — coarse drop / dup ─────────
-            // The resampler only handles fine corrections (≤500 ppm).  Large
-            // errors are resolved here first so the resampler never operates
-            // far from unity ratio.
+            // Drop/dup drift correction (>2 ms threshold).
             let age_us = frame_server_us - chunk.current_playout_us();
             if age_us > 2_000 && chunk.remaining_samples() > channels {
-                // Running ahead: drop one frame.
+                chunk.read_pos += channels;
+                health.drift_drop_count.fetch_add(1, Ordering::Relaxed);
+            } else if age_us < -2_000 && chunk.read_pos >= channels {
+                let prev_pos = chunk.read_pos - channels;
+                for i in 0..channels {
+                    if sample_pos < out.len() {
+                        out[sample_pos] = fade.feed(chunk.samples[prev_pos + i] as f32 / 32768.0);
+                        sample_pos += 1;
+                    }
+                }
+                produced_frames += 1;
+                health.drift_dup_count.fetch_add(1, Ordering::Relaxed);
+                continue;
+            }
+
+            let remaining_output_frames = (out.len() - sample_pos) / channels;
+            let chunk_frames = chunk.remaining_samples() / channels;
+            let frames = remaining_output_frames.min(chunk_frames);
+            let samples = frames * channels;
+            for src in &chunk.samples[chunk.read_pos..chunk.read_pos + samples] {
+                out[sample_pos] = fade.feed(*src as f32 / 32768.0);
+                sample_pos += 1;
+            }
+            chunk.read_pos += samples;
+            produced_frames += frames;
+
+            if chunk.is_exhausted() {
+                self.current = None;
+            }
+        }
+    }
+
+    /// Adaptive-resampling f32 path used in low-latency mode (target ≤ 50 ms).
+    fn fill_f32_resampled(
+        &mut self,
+        out: &mut [f32],
+        dac_server_us: i64,
+        health: &HealthState,
+        fade: &mut FadeStateF32,
+    ) {
+        let channels = self.fmt.channels as usize;
+        let mut sample_pos = 0usize;
+        let mut produced_frames = 0usize;
+
+        if self.resampler.is_none() {
+            self.resampler = Some(AdaptiveResampler::new(channels, self.fmt.rate));
+        }
+        let resampler = self.resampler.as_mut().unwrap();
+
+        // Update drift-correction ratio once per callback from buffer-depth feedback.
+        resampler.update_ratio(
+            self.buffer.buffer_depth_us(),
+            self.buffer.target_buffer_us(),
+        );
+
+        while sample_pos < out.len() {
+            // 1. Drain the resampler output queue first.
+            if let Some(s) = resampler.pop_output() {
+                out[sample_pos] = fade.feed(s);
+                sample_pos += 1;
+                if sample_pos.is_multiple_of(channels) {
+                    produced_frames += 1;
+                }
+                continue;
+            }
+
+            // 2. Need more input — resolve the current chunk.
+            let frame_server_us = dac_server_us + frames_to_us(produced_frames, self.fmt.rate);
+
+            if self.current.is_none() {
+                self.current = self.buffer.pop_due_exact(frame_server_us);
+            }
+
+            let Some(chunk) = self.current.as_mut() else {
+                let remaining_frames = (out.len() - sample_pos) / channels;
+                let silence_frames = self
+                    .buffer
+                    .next_playout_us()
+                    .and_then(|next| {
+                        if next > frame_server_us {
+                            Some(us_to_frames(next - frame_server_us, self.fmt.rate))
+                        } else {
+                            None
+                        }
+                    })
+                    .unwrap_or(remaining_frames)
+                    .clamp(1, remaining_frames);
+                if fade.phase == FadePhase::Playing {
+                    health.underrun_count.fetch_add(1, Ordering::Relaxed);
+                }
+                let silence_samples = silence_frames * channels;
+                for s in &mut out[sample_pos..sample_pos + silence_samples] {
+                    *s = fade.drain();
+                }
+                sample_pos += silence_samples;
+                produced_frames += silence_frames;
+                continue;
+            };
+
+            // 3. Coarse drop/dup for >2 ms gross drift before feeding the resampler.
+            let age_us = frame_server_us - chunk.current_playout_us();
+            if age_us > 2_000 && chunk.remaining_samples() > channels {
                 chunk.read_pos += channels;
                 health.drift_drop_count.fetch_add(1, Ordering::Relaxed);
                 if chunk.is_exhausted() {
@@ -362,14 +478,13 @@ impl PlaybackTimeline {
                 continue;
             }
             if age_us < -2_000 && chunk.read_pos >= channels {
-                // Running behind: duplicate the previous frame.
                 let prev = chunk.read_pos - channels;
                 resampler.push_frame(&chunk.samples[prev..prev + channels]);
                 health.drift_dup_count.fetch_add(1, Ordering::Relaxed);
                 continue;
             }
 
-            // ── 4. Normal path: feed one frame to the resampler ──────────
+            // 4. Normal: feed one frame.
             if chunk.remaining_samples() >= channels {
                 let start = chunk.read_pos;
                 resampler.push_frame(&chunk.samples[start..start + channels]);
