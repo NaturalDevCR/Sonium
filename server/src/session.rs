@@ -659,6 +659,24 @@ async fn session_loop(
 
     let result = loop {
         tokio::select! {
+            biased;
+            // Audio is latency-sensitive — always process before control or events.
+            // ── Outgoing audio frame ──────────────────────────────────────
+            frame = recv_audio(&mut audio_rx) => {
+                match frame {
+                    Ok(f) => {
+                        if audio_tx.try_send(f.wire_bytes.clone()).is_err() {
+                            let queue_cap = audio_tx.max_capacity();
+                            warn!(%peer, queue_cap, "Audio queue FULL — frame dropped (client cannot consume)");
+                        }
+                    }
+                    Err(broadcast::error::RecvError::Lagged(n)) => {
+                        warn!(%peer, dropped = n, "Client lagged — broadcaster backpressure");
+                    }
+                    Err(_) => break Ok(()),
+                }
+            }
+
             // ── Incoming message from client ──────────────────────────────
             incoming = incoming_rx.recv() => {
                 let Some(incoming) = incoming else {
@@ -687,47 +705,6 @@ async fn session_loop(
                         info!(%peer, %reason, "Client reader closed");
                         break Ok(());
                     }
-                }
-            }
-
-            // ── Outgoing audio frame ──────────────────────────────────────
-            frame = recv_audio(&mut audio_rx) => {
-                match frame {
-                    Ok(f) => {
-                        // Try to send immediately; if the queue is full, wait up to
-                        // 50 ms for the writer task to drain.  This applies gentle
-                        // backpressure without stalling the session loop long enough
-                        // to miss control messages.
-                        match audio_tx.try_send(f.wire_bytes.clone()) {
-                            Ok(()) => {}
-                            Err(mpsc::error::TrySendError::Full(bytes)) => {
-                                let t0 = std::time::Instant::now();
-                                match tokio::time::timeout(
-                                    Duration::from_millis(50),
-                                    audio_tx.send(bytes),
-                                )
-                                .await
-                                {
-                                    Ok(Ok(())) => {
-                                        let waited_ms = t0.elapsed().as_millis();
-                                        if waited_ms > 10 {
-                                            warn!(%peer, waited_ms, "Audio send waited (queue drain)");
-                                        }
-                                    }
-                                    Ok(Err(_)) => break Ok(()),
-                                    Err(_) => {
-                                        let queue_cap = audio_tx.max_capacity();
-                                        warn!(%peer, queue_cap, "Audio queue STUCK — frame dropped after 50ms wait (client cannot consume)");
-                                    }
-                                }
-                            }
-                            Err(mpsc::error::TrySendError::Closed(_)) => break Ok(()),
-                        }
-                    }
-                    Err(broadcast::error::RecvError::Lagged(n)) => {
-                        warn!(%peer, dropped = n, "Client lagged — broadcaster backpressure");
-                    }
-                    Err(_) => break Ok(()),
                 }
             }
 

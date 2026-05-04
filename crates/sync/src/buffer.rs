@@ -232,7 +232,7 @@ impl SyncBuffer {
     }
 
     fn drop_excess_buffered_audio(&mut self) {
-        let max_buffer_us = self.target_buffer_us.saturating_mul(2).max(100_000);
+        let max_buffer_us = self.target_buffer_us.saturating_mul(3).max(200_000);
         while self.buffer_depth_us() > max_buffer_us {
             let Some(dropped) = self.chunks.pop_front() else {
                 break;
