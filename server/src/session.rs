@@ -628,6 +628,10 @@ async fn session_loop(
     let read_task = tokio::spawn(socket_reader(reader, incoming_tx));
     let mut health_tracker = HealthTransitionTracker::default();
 
+    // Group sync broadcast: shared timeline for multi-room sync.
+    let mut group_sync_tick = tokio::time::interval(tokio::time::Duration::from_millis(500));
+    group_sync_tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+
     // ── Spawn the dedicated writer task ──────────────────────────────
     let audio_write_task = if rtp_sender.is_some() {
         // For RTP/UDP: audio goes through the RTP sender, control through TCP writer.
@@ -811,6 +815,20 @@ async fn session_loop(
                     }
                     _ => {}
                 }
+            }
+
+            // ── Group sync broadcast ──────────────────────────────────────
+            _ = group_sync_tick.tick() => {
+                let server_now_us = sonium_sync::time_provider::now_us();
+                let gs = sonium_protocol::messages::GroupSync::new(
+                    server_now_us,
+                    0, // group_offset_us: future smart group sync will compute median
+                    0, // rate_ppm: future drift correction
+                );
+                let mut hdr = MessageHeader::new(MessageType::GroupSync, 20);
+                hdr.id = next_id();
+                let _ = ctrl_tx.send(Message::GroupSync(gs).encode_with_header(hdr));
+                tracing::trace!(%peer, server_now_us, "GroupSync broadcast");
             }
         }
     };

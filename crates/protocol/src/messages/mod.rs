@@ -1,6 +1,7 @@
 pub mod client_info;
 pub mod codec_header;
 pub mod error;
+pub mod group_sync;
 pub mod health_report;
 pub mod hello;
 pub mod server_settings;
@@ -10,6 +11,7 @@ pub mod wire_chunk;
 pub use client_info::ClientInfo;
 pub use codec_header::CodecHeader;
 pub use error::ErrorMsg;
+pub use group_sync::GroupSync;
 pub use health_report::{jitter_warning_ms, low_buffer_warning_ms, AudioHealthState, HealthReport};
 pub use hello::Hello;
 pub use server_settings::{EqBand, FilterType, ServerSettings};
@@ -30,6 +32,7 @@ pub enum Message {
     Time(TimeMsg),
     Error(ErrorMsg),
     HealthReport(HealthReport),
+    GroupSync(GroupSync),
 }
 
 impl Message {
@@ -43,6 +46,7 @@ impl Message {
             Self::Time(_) => MessageType::Time,
             Self::Error(_) => MessageType::ErrorMsg,
             Self::HealthReport(_) => MessageType::HealthReport,
+            Self::GroupSync(_) => MessageType::GroupSync,
         }
     }
 
@@ -59,6 +63,7 @@ impl Message {
             MessageType::Time => Ok(Self::Time(TimeMsg::decode(payload)?)),
             MessageType::ErrorMsg => Ok(Self::Error(ErrorMsg::decode(payload)?)),
             MessageType::HealthReport => Ok(Self::HealthReport(HealthReport::decode(payload)?)),
+            MessageType::GroupSync => Ok(Self::GroupSync(GroupSync::decode(payload)?)),
             MessageType::Base => Err(SoniumError::Protocol("base message unsupported".into())),
         }
     }
@@ -93,6 +98,7 @@ impl Message {
             Self::Time(m) => m.encode(),
             Self::Error(m) => m.encode(),
             Self::HealthReport(m) => m.encode(),
+            Self::GroupSync(m) => m.encode(),
         }
     }
 }

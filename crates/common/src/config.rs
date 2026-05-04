@@ -38,6 +38,10 @@ pub struct ServerConfig {
     /// One entry per audio stream source.  The first entry is the "default" stream.
     pub streams: Vec<StreamSource>,
     pub log: LogConfig,
+    /// IANA timezone identifier for log timestamps and web UI display.
+    /// e.g. "America/Costa_Rica", "Europe/Berlin", "UTC".
+    /// Defaults to system local time if not set.
+    pub timezone: Option<String>,
 }
 
 /// Network and feature flags for the server.
@@ -158,6 +162,7 @@ impl Default for ServerConfig {
             server: ServerNet::default(),
             streams: vec![StreamSource::default()],
             log: LogConfig::default(),
+            timezone: None,
         }
     }
 }
@@ -269,6 +274,10 @@ pub struct ClientConfig {
     pub log: LogConfig,
     /// Enable the new callback-driven playout path with precise drift correction.
     pub experimental_callback: bool,
+    /// IANA timezone identifier for log timestamps and UI display.
+    /// e.g. "America/Costa_Rica", "Europe/Berlin", "UTC".
+    /// Defaults to system local time if not set.
+    pub timezone: Option<String>,
 }
 
 impl Default for ClientConfig {
@@ -282,6 +291,7 @@ impl Default for ClientConfig {
             instance: 1,
             log: LogConfig::default(),
             experimental_callback: true,
+            timezone: None,
         }
     }
 }

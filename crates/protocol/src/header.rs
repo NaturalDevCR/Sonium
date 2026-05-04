@@ -46,6 +46,8 @@ pub enum MessageType {
     ErrorMsg = 8,
     /// Real-time connection and buffer health report from client to server.
     HealthReport = 9,
+    /// Group-wide playout timeline synchronisation.
+    GroupSync = 10,
 }
 
 impl TryFrom<u16> for MessageType {
@@ -61,6 +63,7 @@ impl TryFrom<u16> for MessageType {
             7 => Ok(Self::ClientInfo),
             8 => Ok(Self::ErrorMsg),
             9 => Ok(Self::HealthReport),
+            10 => Ok(Self::GroupSync),
             n => Err(SoniumError::Protocol(format!("unknown message type {n}"))),
         }
     }
@@ -78,6 +81,7 @@ impl std::fmt::Display for MessageType {
             Self::ClientInfo => "ClientInfo",
             Self::ErrorMsg => "Error",
             Self::HealthReport => "Health",
+            Self::GroupSync => "GroupSync",
         };
         f.write_str(s)
     }
@@ -94,6 +98,7 @@ pub fn max_payload_size(msg_type: MessageType) -> usize {
         MessageType::ClientInfo => 4 * 1024,
         MessageType::ErrorMsg => 64 * 1024,
         MessageType::HealthReport => 1024,
+        MessageType::GroupSync => 64,
     }
 }
 
@@ -255,6 +260,7 @@ mod tests {
             (7, MessageType::ClientInfo),
             (8, MessageType::ErrorMsg),
             (9, MessageType::HealthReport),
+            (10, MessageType::GroupSync),
         ];
         for (raw, expected) in variants {
             let got = MessageType::try_from(raw).expect("should parse");
@@ -268,7 +274,7 @@ mod tests {
     fn unknown_type_returns_error() {
         // Type 6 is not assigned in the Sonium protocol
         assert!(MessageType::try_from(6u16).is_err());
-        assert!(MessageType::try_from(10u16).is_err());
+        assert!(MessageType::try_from(11u16).is_err());
         assert!(MessageType::try_from(u16::MAX).is_err());
     }
 
@@ -342,6 +348,7 @@ mod tests {
             MessageType::ClientInfo,
             MessageType::ErrorMsg,
             MessageType::HealthReport,
+            MessageType::GroupSync,
         ] {
             let hdr = MessageHeader::new(t, 0);
             let bytes = hdr.to_bytes();

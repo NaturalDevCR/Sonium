@@ -172,8 +172,9 @@ async fn main() -> anyhow::Result<()> {
     ));
     let registry = new_registry();
 
-    // Initialise runtime transport config from the loaded config file.
+    // Initialise runtime config from the loaded config file.
     state.set_transport_config(cfg.server.transport.mode, cfg.server.transport.udp_port);
+    state.set_timezone(cfg.timezone.clone());
 
     // Restore persisted groups before any clients connect.
     state.restore_groups(saved_groups);

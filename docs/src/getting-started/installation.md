@@ -7,6 +7,58 @@ Sonium ships as two binaries:
 | `sonium-server` | One machine on the network | Reads audio, hosts the web UI/API, broadcasts streams. |
 | `sonium-client` | Every playback machine | Connects to the server and plays synchronized audio. |
 
+## Prerequisites for Multi-Room Sync
+
+For **sample-accurate multi-room synchronisation** (multiple clients playing in
+perfect unison), all devices must share a common time reference within ±5 ms.
+
+### Linux (Server + Client)
+
+Install **chrony** on every Linux device:
+
+```bash
+sudo apt-get install chrony   # Debian/Ubuntu
+sudo dnf install chrony       # Fedora
+sudo pacman -S chrony         # Arch
+```
+
+Verify sync quality:
+
+```bash
+chronyc tracking
+# Look for "System time" — should be within ±0.005 seconds
+```
+
+### macOS (Client)
+
+macOS uses `sntp` by default. Verify:
+
+```bash
+sntp -s time.apple.com
+```
+
+### Windows (Client)
+
+Windows Time service usually suffices. For better accuracy, install
+[Meinberg NTP](https://www.meinberg.de/english/sw/ntp.htm).
+
+### Time Zone Configuration
+
+Sonium uses UTC internally, but logs and the web UI display local time.
+Set the timezone on each device:
+
+```bash
+# Linux
+sudo timedatectl set-timezone America/Costa_Rica
+
+# macOS
+sudo systemsetup -settimezone America/Costa_Rica
+```
+
+Or configure via the Sonium Agent UI (client-side only).
+
+---
+
 ## Linux Installer
 
 The Linux installer downloads the right release package, writes

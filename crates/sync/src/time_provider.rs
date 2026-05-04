@@ -42,6 +42,8 @@ const STALE_TIMEOUT_SECS: u64 = 60;
 pub struct TimeProvider {
     /// Median-filtered offset in microseconds (server - local).
     offset_us: Arc<AtomicI64>,
+    /// Additional group-wide offset applied on top of the NTP estimate.
+    group_offset_us: Arc<AtomicI64>,
     samples: parking_lot::Mutex<SampleBuffer>,
     last_sync: parking_lot::Mutex<Option<Instant>>,
 }
@@ -93,6 +95,7 @@ impl TimeProvider {
     pub fn new() -> Self {
         Self {
             offset_us: Arc::new(AtomicI64::new(0)),
+            group_offset_us: Arc::new(AtomicI64::new(0)),
             samples: parking_lot::Mutex::new(SampleBuffer::new(DEFAULT_SAMPLE_BUFFER_SIZE)),
             last_sync: parking_lot::Mutex::new(None),
         }
@@ -144,17 +147,26 @@ impl TimeProvider {
 
     /// Convert a local timestamp (µs since UNIX epoch) to server time.
     pub fn to_server_time(&self, local_us: i64) -> i64 {
-        local_us + self.offset_us.load(Ordering::Relaxed)
+        local_us
+            + self.offset_us.load(Ordering::Relaxed)
+            + self.group_offset_us.load(Ordering::Relaxed)
     }
 
     /// Convert a server timestamp (µs since UNIX epoch) to local time.
     pub fn to_local_time(&self, server_us: i64) -> i64 {
-        server_us - self.offset_us.load(Ordering::Relaxed)
+        server_us
+            - self.offset_us.load(Ordering::Relaxed)
+            - self.group_offset_us.load(Ordering::Relaxed)
     }
 
-    /// Current estimated offset in microseconds (server − local).
+    /// Current estimated offset in microseconds (server − local), excluding group offset.
     pub fn offset_us(&self) -> i64 {
         self.offset_us.load(Ordering::Relaxed)
+    }
+
+    /// Current group offset in microseconds.
+    pub fn group_offset_us(&self) -> i64 {
+        self.group_offset_us.load(Ordering::Relaxed)
     }
 
     /// Number of samples collected since the last [`reset`][Self::reset].
@@ -176,7 +188,25 @@ impl TimeProvider {
     pub fn reset(&self) {
         self.samples.lock().clear();
         self.offset_us.store(0, Ordering::Relaxed);
+        self.group_offset_us.store(0, Ordering::Relaxed);
         *self.last_sync.lock() = None;
+    }
+
+    /// Apply a gentle correction to the group offset.
+    ///
+    /// `diff_us` is `local_server_time - expected_server_time`.
+    /// A positive diff means the local clock is *ahead* of the group median,
+    /// so we add a positive group_offset to slow down local playout.
+    ///
+    /// The correction is damped (25 % of the observed error) to avoid
+    /// audible pitch shifts.
+    pub fn nudge_group_offset(&self, diff_us: i64) {
+        // Dampen: only correct 25 % of the observed error per nudge.
+        const DAMPING: i64 = 4;
+        let correction = diff_us / DAMPING;
+        let current = self.group_offset_us.load(Ordering::Relaxed);
+        let new = current + correction;
+        self.group_offset_us.store(new, Ordering::Relaxed);
     }
 
     /// Clone the underlying atomic for cheap lock-free reads from the audio

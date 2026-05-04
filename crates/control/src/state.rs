@@ -163,6 +163,8 @@ pub struct ServerState {
     saved_streams: Vec<PersistedStream>,
     /// Active media transport configuration (runtime-mutable via control API).
     transport: parking_lot::Mutex<TransportState>,
+    /// IANA timezone identifier for log timestamps and web UI display.
+    timezone: parking_lot::RwLock<Option<String>>,
 }
 
 impl ServerState {
@@ -266,7 +268,18 @@ impl ServerState {
                 mode: TransportMode::Tcp,
                 server_udp_port: 0,
             }),
+            timezone: parking_lot::RwLock::new(None),
         }
+    }
+
+    /// Set the timezone identifier.
+    pub fn set_timezone(&self, tz: Option<String>) {
+        *self.timezone.write() = tz;
+    }
+
+    /// Get the timezone identifier.
+    pub fn timezone(&self) -> Option<String> {
+        self.timezone.read().clone()
     }
 
     /// Restore persisted groups (call before accepting any client connections).

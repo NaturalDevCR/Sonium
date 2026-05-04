@@ -488,6 +488,22 @@ async fn connect_and_run(
                         }
                     }
 
+                    MessageType::GroupSync => {
+                        if let Ok(Message::GroupSync(gs)) = Message::from_payload(&hdr, &payload) {
+                            let local_now_us = now_us();
+                            let local_server_time = time_provider.to_server_time(local_now_us);
+                            let diff_us = local_server_time - gs.server_now_us;
+                            let diff_ms = diff_us / 1000;
+                            if diff_ms.abs() > 50 {
+                                warn!(diff_ms, "GroupSync drift > 50ms — clock sync diverging");
+                            } else {
+                                debug!(diff_ms, "GroupSync ok");
+                            }
+                            // Nudge the group offset to keep all clients aligned.
+                            time_provider.nudge_group_offset(diff_us);
+                        }
+                    }
+
                     other => debug!("Unhandled message type: {other:?}"),
                 }
             }
