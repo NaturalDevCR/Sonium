@@ -97,12 +97,6 @@ impl PcmChunk {
     }
 }
 
-#[derive(Debug, PartialEq, Clone, Copy)]
-enum State {
-    Buffering,
-    Playing,
-}
-
 /// Jitter buffer: holds decoded PCM chunks sorted by playout timestamp and
 /// releases them at the right time.
 ///
@@ -120,7 +114,6 @@ pub struct SyncBuffer {
     jitter_us: f64,
     /// Last arrival info for jitter calculation: (arrival_us, playout_us).
     last_arrival_info: Option<(i64, i64)>,
-    state: State,
     target_buffer_us: i64,
     lead_us: i64,
     drift_drop_count: u64,
@@ -142,7 +135,6 @@ impl SyncBuffer {
             underrun_count: 0,
             jitter_us: 0.0,
             last_arrival_info: None,
-            state: State::Buffering,
             target_buffer_us: 1_000_000,
             lead_us: 40_000,
             drift_drop_count: 0,
@@ -191,7 +183,6 @@ impl SyncBuffer {
         self.drop_stale(now_server_us);
         let front = self.chunks.front()?;
         if front.playout_us <= now_server_us {
-            self.state = State::Playing;
             let chunk = self.chunks.pop_front().unwrap();
             self.buffered_samples = self
                 .buffered_samples
@@ -208,7 +199,10 @@ impl SyncBuffer {
     }
 
     fn drop_stale(&mut self, now_server_us: i64) {
-        let stale_threshold_us = (self.target_buffer_us / 2).clamp(10_000, 2_000_000);
+        // Snapcast-style threshold: a chunk is stale only if it is older than
+        // the configured buffer depth plus a generous 5-second grace window.
+        // This avoids incorrectly dropping chunks during clock-offset convergence.
+        let stale_threshold_us = self.target_buffer_us + 5_000_000;
 
         while let Some(front) = self.chunks.front() {
             let end_us = front.playout_us + front.remaining_us();
@@ -271,7 +265,6 @@ impl SyncBuffer {
         self.buffered_samples = 0;
         self.stale_drop_count = 0;
         self.underrun_count = 0;
-        self.state = State::Buffering;
     }
 
     /// Return and reset the accumulated stale drop counter.
@@ -343,22 +336,14 @@ impl SyncBuffer {
     pub fn pop_ready(&mut self, now_server_us: i64) -> Option<PcmChunk> {
         self.drop_stale(now_server_us);
 
-        if self.state == State::Buffering {
-            if self.buffer_depth_us() >= self.target_buffer_us {
-                self.state = State::Playing;
-            } else {
-                return None;
-            }
-        }
-
         let front = match self.chunks.front() {
             Some(f) => f,
             None => {
-                // Buffer empty while Playing → genuine underrun.
+                // Buffer empty → genuine underrun.
                 self.underrun_count += 1;
                 warn!(
                     underruns = self.underrun_count,
-                    "SyncBuffer: underrun (buffer empty while playing)"
+                    "SyncBuffer: underrun (buffer empty)"
                 );
                 return None;
             }

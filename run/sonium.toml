@@ -1,41 +1,33 @@
-# ── Network ────────────────────────────────────────────────────────────────
 [server]
-bind         = "127.0.0.1"
-stream_port  = 1710
+bind = "127.0.0.1"
+stream_port = 1710
 control_port = 1711
-mdns         = false        # desactivado en Mac para evitar permisos extra
+mdns = false
 snapcast_compat = false
 
-# ── Audio timing ───────────────────────────────────────────────────────────
 [server.audio]
-buffer_ms         = 200   # jitter buffer global sugerido a clientes (ms)
-chunk_ms          = 10    # duración de cada chunk codificado (ms); mín 10 para Opus
-output_prefill_ms = 0     # prefill del ring del DAC; 0 = derivar de buffer_ms
+buffer_ms = 200
+chunk_ms = 10
+output_prefill_ms = 0
 
-# ── Auto-buffer (ajuste automático del buffer por cliente) ─────────────────
 [server.auto_buffer]
-enabled      = false
-min_ms       = 20
-max_ms       = 3000
-step_up_ms   = 120
+enabled = false
+min_ms = 20
+max_ms = 3000
+step_up_ms = 120
 step_down_ms = 40
-cooldown_ms  = 8000
+cooldown_ms = 8000
 
-# ── Transport ──────────────────────────────────────────────────────────────
 [server.transport]
-mode     = "tcp"
+mode = "tcp"
 udp_port = 0
 
-# ── Logging ────────────────────────────────────────────────────────────────
 [log]
 level = "info"
 
-# ── Streams ────────────────────────────────────────────────────────────────
-# Sin streams por ahora — agrega uno aquí cuando tengas ffmpeg o una fuente.
-# Ejemplo con ffmpeg (tono de prueba 440 Hz):
-#
-# [[streams]]
-# id        = "test"
-# source    = "pipe:///usr/local/bin/ffmpeg?-f&lavfi&-i&sine=frequency=440:sample_rate=48000&-f&s16le&-ar&48000&-ac&2&-"
-# codec     = "opus"
-# buffer_ms = 1000
+[[streams]]
+id = "default"
+source = "pipe:///usr/bin/ffmpeg?-reconnect&1&-reconnect_streamed&1&-i&https://cast.symphonycr.com/listen/party_time/radio.mp3&-f&s16le&-ar&48000&-ac&2&-"
+codec = "opus"
+idle_timeout_ms = 3000
+silence_on_idle = true

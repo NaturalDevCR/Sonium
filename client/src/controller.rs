@@ -183,7 +183,6 @@ async fn connect_and_run(
     let mut eq_processor: Option<SmoothedEqProcessor> = None;
     let mut server_buffer_ms: i32 = cfg.latency_ms + 500; // Default buffer depth
     let mut server_latency_ms: i32 = 0;
-    let mut output_prefill_ms: u32 = 0;
 
     let mut pending_time: Option<(u16, i64)> = None; // (msg_id, sent_us)
 
@@ -209,11 +208,11 @@ async fn connect_and_run(
 
     let result = loop {
         tokio::select! {
-            // Audio pump: keep the device ring buffered from the timestamped SyncBuffer.
-            // The callback-driven playout path remains in Player for future guarded work,
-            // but the stable TCP path uses this proven prefill loop.
+            // Audio pump: drain every chunk that is ready from SyncBuffer into the
+            // Player ring buffer.  We no longer gate on target depth — Snapcast-style
+            // behaviour: if a chunk is due, play it.  The Player ring buffer absorbs
+            // jitter; underruns are handled by the CPAL callback fade-to-silence.
             _ = audio_tick.tick() => {
-                // If using the experimental callback path, the audio pump is handled by the Player's callback.
                 if playback_handle.is_some() {
                     continue;
                 }
@@ -222,15 +221,7 @@ async fn connect_and_run(
                 }
                 if let (Some(pl), Some(buf)) = (player.as_mut(), sync_buf.as_mut()) {
                     let now_server = time_provider.to_server_time(now_us());
-                    let target_output_us = output_prefill_us(
-                        server_buffer_ms + cfg.latency_ms + server_latency_ms,
-                        output_prefill_ms,
-                    );
-                    while pl.buffered_us() < target_output_us {
-                        let sink_ready_at = now_server + pl.buffered_us();
-                        let Some(chunk) = buf.pop_ready(sink_ready_at) else {
-                            break;
-                        };
+                    while let Some(chunk) = buf.pop_ready(now_server) {
                         if let Err(e) = pl.write(&chunk.samples) {
                             warn!("Audio pump write error: {e}");
                             break;
@@ -364,7 +355,6 @@ async fn connect_and_run(
                         eq_enabled = ss.eq_enabled;
                         server_buffer_ms = ss.buffer_ms;
                         server_latency_ms = ss.latency;
-                        output_prefill_ms = ss.output_prefill_ms;
                         if let Some(buf) = sync_buf.as_mut() {
                             buf.set_target_buffer_ms(server_buffer_ms + cfg.latency_ms + server_latency_ms);
                         }
@@ -389,7 +379,7 @@ async fn connect_and_run(
                                 ));
                             }
                         }
-                        debug!(volume = ss.volume, muted = ss.muted, buffer_ms = ss.buffer_ms, output_prefill_ms = ss.output_prefill_ms, latency_ms = ss.latency, "ServerSettings applied");
+                        debug!(volume = ss.volume, muted = ss.muted, buffer_ms = ss.buffer_ms, latency_ms = ss.latency, "ServerSettings applied");
 
                         if ss.transport_mode == "rtp_udp" && udp_chunk_rx.is_none() {
                             let (udp_tx, udp_rx) = tokio_mpsc::unbounded_channel::<UdpMediaEvent>();
@@ -625,15 +615,6 @@ async fn connect_and_run(
         task.abort();
     }
     result
-}
-
-fn output_prefill_us(total_buffer_ms: i32, configured_output_prefill_ms: u32) -> i64 {
-    let ms = if configured_output_prefill_ms > 0 {
-        configured_output_prefill_ms.min(1_000) as i32
-    } else {
-        (total_buffer_ms / 4).clamp(120, 300)
-    };
-    ms as i64 * 1000
 }
 
 fn configure_tcp_stream(stream: &TcpStream) {

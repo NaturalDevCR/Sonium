@@ -1,12 +1,12 @@
 {
   "users": [
     {
-      "id": "4bf7e599-7074-4dce-b61b-9b10d583dfe8",
+      "id": "ca35bfae-cd57-4a8a-ad69-91253a81baa9",
       "username": "admin",
-      "password_hash": "$argon2id$v=19$m=19456,t=2,p=1$TuZMr0DXPhRye43WFYO2xw$pWrHYyl7mKS1CN8PRwZA/e3p5yhW7BAgCMwjvK4hawA",
+      "password_hash": "$argon2id$v=19$m=19456,t=2,p=1$qjI8ehQqMK9wUS1JGWxV/Q$sWDr29TWNc5DlSDsCjiN5UvLCHyJ+ZDL6nW5a2RnsSQ",
       "role": "admin",
       "must_change_password": false
     }
   ],
-  "jwt_secret": "DUGKWQp5ZomNRDrTnKdn7Z9FPXHxE9e4OOU3AUZn40zmXqLgAhovJmLlWSa98RKq"
+  "jwt_secret": "uIk2iOrnjlJS5koBXB7KBTpKXaU7mTZ6l4blCp76wfbeEiDLaiTjj77WDbSlnbhW"
 }

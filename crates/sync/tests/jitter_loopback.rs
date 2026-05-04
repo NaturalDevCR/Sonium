@@ -33,10 +33,10 @@ fn test_sync_buffer_stale_drops() {
     let mut buf = SyncBuffer::new(fmt);
     buf.set_target_buffer_ms(100);
 
-    let now_us = 2_000_000;
+    let now_us = 10_000_000;
 
-    // Push a chunk that is already very stale (more than 100ms old)
-    let stale_playout = now_us - 500_000;
+    // Push a chunk that is already very stale (more than 5s + 100ms = 5.1s old)
+    let stale_playout = now_us - 6_000_000;
     buf.push(PcmChunk::new(stale_playout, vec![0i16; 100], fmt), now_us);
 
     // It should be dropped on pop_ready
