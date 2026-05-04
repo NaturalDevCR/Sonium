@@ -355,8 +355,10 @@ async fn connect_and_run(
                         eq_enabled = ss.eq_enabled;
                         server_buffer_ms = ss.buffer_ms;
                         server_latency_ms = ss.latency;
+                        let target_buffer_ms = server_buffer_ms + cfg.latency_ms + server_latency_ms;
+                        info!(server_buffer_ms, client_latency_ms = cfg.latency_ms, server_latency_ms, target_buffer_ms, "ServerSettings applied — buffer target");
                         if let Some(buf) = sync_buf.as_mut() {
-                            buf.set_target_buffer_ms(server_buffer_ms + cfg.latency_ms + server_latency_ms);
+                            buf.set_target_buffer_ms(target_buffer_ms);
                         }
                         if server_buffer_ms <= 50 {
                             time_provider.set_window_size(50);

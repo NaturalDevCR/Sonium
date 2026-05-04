@@ -616,6 +616,7 @@ async fn session_loop(
         let mut hdr = MessageHeader::new(MessageType::ServerSettings, 0);
         hdr.id = next_id();
         let _ = ctrl_tx.send(Message::ServerSettings(settings).encode_with_header(hdr));
+        info!(%peer, buffer_ms = current_buffer_ms, "ServerSettings sent to client");
     }
 
     info!(%peer, stream = %stream_id, transport = %effective_mode, "Session ready");
