@@ -216,9 +216,9 @@ impl TimeProvider {
 
     /// Apply a gentle correction to the group offset.
     ///
-    /// `diff_us` is `local_server_time - expected_server_time`.
-    /// A positive diff means the local clock is *ahead* of the group median,
-    /// so we subtract from group_offset to slow down local playout.
+    /// `diff_us` is `(offset_us + group_offset_us) - target_group_offset_us`.
+    /// A positive diff means the local total offset is *ahead* of the group
+    /// target, so we subtract from group_offset to slow down local playout.
     ///
     /// The correction is damped (5 % of the observed error) and clamped
     /// to ±50 ms to prevent runaway.
@@ -229,6 +229,15 @@ impl TimeProvider {
         let current = self.group_offset_us.load(Ordering::Relaxed);
         let new = (current - correction).clamp(-MAX_GROUP_OFFSET_US, MAX_GROUP_OFFSET_US);
         self.group_offset_us.store(new, Ordering::Relaxed);
+    }
+
+    /// Overwrite the group offset directly (e.g. on reconnect).
+    pub fn set_group_offset(&self, us: i64) {
+        const MAX_GROUP_OFFSET_US: i64 = 50_000;
+        self.group_offset_us.store(
+            us.clamp(-MAX_GROUP_OFFSET_US, MAX_GROUP_OFFSET_US),
+            Ordering::Relaxed,
+        );
     }
 
     /// Clone the underlying atomic for cheap lock-free reads from the audio

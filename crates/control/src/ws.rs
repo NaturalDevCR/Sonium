@@ -12,6 +12,7 @@ use tokio::sync::broadcast;
 /// All events that can be pushed to connected web UI clients.
 #[derive(Debug, Clone, Serialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
+#[allow(clippy::large_enum_variant)]
 pub enum Event {
     ClientConnected {
         client: ClientInfo,

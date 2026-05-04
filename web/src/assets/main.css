@@ -40,6 +40,8 @@
   --amber:          #fbbf24;
   --amber-dim:      rgba(251, 191, 36, 0.07);
 
+  --orange:         #fb923c;
+
   --text-primary:   #e8f0fe;
   --text-secondary: #8899ae;
   --text-muted:     #4a5a6e;
@@ -47,6 +49,8 @@
 
 /* ── Base ───────────────────────────────────────────────────────────────── */
 *, *::before, *::after { box-sizing: border-box; }
+
+html { scroll-behavior: smooth; }
 
 body {
   background: var(--bg-base);
@@ -57,6 +61,12 @@ body {
   -webkit-font-smoothing: antialiased;
   -moz-osx-font-smoothing: grayscale;
 }
+
+/* ── Scrollbar ──────────────────────────────────────────────────────────── */
+::-webkit-scrollbar { width: 6px; height: 6px; }
+::-webkit-scrollbar-track { background: transparent; }
+::-webkit-scrollbar-thumb { background: var(--border-mid); border-radius: 3px; }
+::-webkit-scrollbar-thumb:hover { background: var(--border-bright); }
 
 /* ── Animations ─────────────────────────────────────────────────────────── */
 @keyframes pulse-dot {
@@ -303,3 +313,11 @@ body {
 /* ── Safe areas ─────────────────────────────────────────────────────────── */
 .safe-top    { padding-top:    env(safe-area-inset-top); }
 .safe-bottom { padding-bottom: env(safe-area-inset-bottom); }
+
+/* ── Tailwind color aliases for text ────────────────────────────────────── */
+.text-primary   { color: var(--text-primary); }
+.text-secondary { color: var(--text-secondary); }
+.text-muted     { color: var(--text-muted); }
+.bg-surface     { background: var(--bg-surface); }
+.bg-elevated    { background: var(--bg-elevated); }
+.border-default { border-color: var(--border); }

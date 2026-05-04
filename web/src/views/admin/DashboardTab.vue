@@ -5,11 +5,7 @@ import StreamBadge from '@/components/StreamBadge.vue';
 
 const store = useServerStore();
 
-onMounted(async () => {
-  await store.loadAll();
-  store.startLiveUpdates();
-});
-onUnmounted(() => store.stopLiveUpdates());
+onMounted(() => store.loadAll());
 
 const stats = computed(() => [
   {

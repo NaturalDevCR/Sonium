@@ -1,21 +1,16 @@
 <script setup lang="ts">
 import { ref, computed, onMounted, onUnmounted } from 'vue';
-import { useRouter } from 'vue-router';
 import { useServerStore } from '@/stores/server';
 import { useAuthStore }   from '@/stores/auth';
 import SyncIndicator      from '@/components/SyncIndicator.vue';
 
 const store  = useServerStore();
 const auth   = useAuthStore();
-const router = useRouter();
 
-onMounted(async () => {
-  await store.loadAll();
-  store.startLiveUpdates();
-});
+onMounted(() => store.init());
 onUnmounted(() => store.stopLiveUpdates());
 
-// ── Sync health (mock — will be real when API provides it)
+// ── Sync health ────────────────────────────────────────────────────────────
 const syncHealth = computed(() => {
   const health: Record<string, { status: 'good' | 'fair' | 'poor' | 'unknown'; drift_ms: number; buffer_ms: number }> = {};
   for (const c of store.connectedClients) {
@@ -54,52 +49,25 @@ function copyChronyCommand() {
 }
 
 const copied = ref(false);
-
-// ── Uptime ─────────────────────────────────────────────────────────────────
-function fmtUptime(s: number) {
-  if (!s) return '—';
-  const h = Math.floor(s / 3600), m = Math.floor((s % 3600) / 60);
-  return h > 0 ? `${h}h ${m}m` : `${m}m`;
-}
 </script>
 
 <template>
-  <div class="sync-root safe-top">
-
-    <!-- ── Top bar ──────────────────────────────────────────────────────── -->
-    <header class="sync-header">
-      <div class="sync-header-inner">
-        <div class="flex items-center gap-3">
-          <button @click="router.push('/')" class="sync-back">
-            <span class="mdi mdi-arrow-left text-lg"></span>
-          </button>
-          <div>
-            <p class="sync-brand">Sync Monitor</p>
-            <p class="sync-tagline">
-              {{ store.connectedClients.length }} client{{ store.connectedClients.length !== 1 ? 's' : '' }} online
-              <span v-if="store.uptime" class="ml-2 opacity-60">· up {{ fmtUptime(store.uptime) }}</span>
-            </p>
-          </div>
-        </div>
-
-        <div class="flex items-center gap-2">
-          <SyncIndicator
-            :status="overallSync.status"
-            :issue-count="overallSync.issueCount"
-            :total-count="overallSync.totalCount"
-          />
-        </div>
-      </div>
-    </header>
+  <div class="sync-root">
+    <!-- ── Header row ───────────────────────────────────────────────────── -->
+    <div class="flex items-center justify-between mb-4">
+      <SyncIndicator
+        :status="overallSync.status"
+        :issue-count="overallSync.issueCount"
+        :total-count="overallSync.totalCount"
+      />
+    </div>
 
     <!-- ── Content ──────────────────────────────────────────────────────── -->
-    <main class="sync-main safe-bottom">
-
+    <main>
       <!-- Chrony recommendation if sync is poor -->
       <div
         v-if="overallSync.status === 'poor' || overallSync.status === 'fair'"
-        class="mx-4 mt-4 p-4 rounded-xl border"
-        style="background: rgba(245, 158, 11, 0.08); border-color: rgba(245, 158, 11, 0.3);"
+        class="chrony-banner"
       >
         <div class="flex items-start gap-3">
           <span class="mdi mdi-information-outline text-xl shrink-0" style="color: #f59e0b;"></span>
@@ -110,8 +78,7 @@ function fmtUptime(s: number) {
             </p>
             <button
               @click="copyChronyCommand"
-              class="mt-2 text-xs font-medium px-3 py-1.5 rounded-lg border"
-              style="border-color: rgba(245, 158, 11, 0.4); color: #fbbf24;"
+              class="chrony-btn"
             >
               <span class="mdi mr-1" :class="copied ? 'mdi-check' : 'mdi-content-copy'"></span>
               {{ copied ? 'Copied!' : 'Copy install command' }}
@@ -121,7 +88,7 @@ function fmtUptime(s: number) {
       </div>
 
       <!-- Client sync table -->
-      <div class="px-4 pt-4 pb-24 space-y-3">
+      <div class="pt-2 pb-8 space-y-3">
         <h2 class="section-label">Client Sync Status</h2>
 
         <div v-if="store.connectedClients.length === 0" class="text-center py-12">
@@ -154,22 +121,22 @@ function fmtUptime(s: number) {
             />
           </div>
 
-          <div class="grid grid-cols-3 gap-3 mt-3 pt-3 border-t" style="border-color: var(--border);">
+          <div class="sync-grid">
             <div>
-              <p class="text-xs" style="color: var(--text-muted);">Drift</p>
-              <p class="text-sm font-mono font-medium" style="color: var(--text-primary);">
+              <p class="sync-label">Drift</p>
+              <p class="sync-value">
                 {{ syncHealth[client.id]?.drift_ms.toFixed(1) ?? '—' }} ms
               </p>
             </div>
             <div>
-              <p class="text-xs" style="color: var(--text-muted);">Buffer</p>
-              <p class="text-sm font-mono font-medium" style="color: var(--text-primary);">
+              <p class="sync-label">Buffer</p>
+              <p class="sync-value">
                 {{ syncHealth[client.id]?.buffer_ms.toFixed(0) ?? '—' }} ms
               </p>
             </div>
             <div>
-              <p class="text-xs" style="color: var(--text-muted);">Latency</p>
-              <p class="text-sm font-mono font-medium" style="color: var(--text-primary);">
+              <p class="sync-label">Latency</p>
+              <p class="sync-value">
                 {{ client.latency_ms }} ms
               </p>
             </div>
@@ -177,67 +144,37 @@ function fmtUptime(s: number) {
         </div>
       </div>
     </main>
-
   </div>
 </template>
 
 <style scoped>
 .sync-root {
-  min-height: 100vh;
-  background: var(--bg-base);
-  position: relative;
-}
-
-.sync-header {
-  position: sticky;
-  top: 0;
-  z-index: 20;
-  background: rgba(4, 8, 15, 0.88);
-  backdrop-filter: blur(20px);
-  -webkit-backdrop-filter: blur(20px);
-  border-bottom: 1px solid var(--border);
-}
-.sync-header-inner {
   max-width: 720px;
   margin: 0 auto;
-  padding: 12px 16px;
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
 }
 
-.sync-back {
-  width: 36px;
-  height: 36px;
-  border-radius: 10px;
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  color: var(--text-muted);
+.chrony-banner {
+  margin-bottom: 16px;
+  padding: 16px;
+  border-radius: 12px;
+  background: rgba(245, 158, 11, 0.08);
+  border: 1px solid rgba(245, 158, 11, 0.3);
+}
+.chrony-btn {
+  margin-top: 8px;
+  font-size: 12px;
+  font-weight: 500;
+  padding: 6px 12px;
+  border-radius: 8px;
+  border: 1px solid rgba(245, 158, 11, 0.4);
+  color: #fbbf24;
   background: transparent;
-  border: none;
   cursor: pointer;
   transition: all 0.15s;
 }
-.sync-back:hover {
-  background: var(--bg-elevated);
-  color: var(--text-secondary);
+.chrony-btn:hover {
+  background: rgba(245, 158, 11, 0.1);
 }
-
-.sync-brand {
-  font-family: var(--font-display);
-  font-size: 14px;
-  font-weight: 700;
-  color: var(--text-primary);
-  line-height: 1;
-}
-.sync-tagline {
-  font-size: 11px;
-  color: var(--text-muted);
-  margin-top: 1px;
-}
-
-.sync-main { max-width: 720px; margin: 0 auto; }
 
 .client-sync-card {
   background: var(--bg-surface);
@@ -247,4 +184,24 @@ function fmtUptime(s: number) {
   transition: border-color 0.2s;
 }
 .client-sync-card:hover { border-color: var(--border-mid); }
+
+.sync-grid {
+  display: grid;
+  grid-template-columns: repeat(3, 1fr);
+  gap: 12px;
+  margin-top: 12px;
+  padding-top: 12px;
+  border-top: 1px solid var(--border);
+}
+.sync-label {
+  font-size: 11px;
+  color: var(--text-muted);
+  margin-bottom: 2px;
+}
+.sync-value {
+  font-size: 13px;
+  font-family: var(--font-mono);
+  font-weight: 500;
+  color: var(--text-primary);
+}
 </style>

@@ -69,6 +69,9 @@ pub struct ClientInfo {
     pub observability_enabled: bool,
     /// Real-time health metrics.
     pub health: Option<HealthReport>,
+    /// Last known NTP clock offset (ms) from health reports — used for group sync.
+    #[serde(skip)]
+    pub last_clock_offset_ms: Option<i32>,
 }
 
 impl ClientInfo {
@@ -252,6 +255,7 @@ impl ServerState {
                                 display_name: c.display_name.clone(),
                                 observability_enabled: c.observability_enabled,
                                 health: None,
+                                last_clock_offset_ms: None,
                             },
                         )
                     })
@@ -409,6 +413,7 @@ impl ServerState {
             display_name,
             observability_enabled,
             health: None,
+            last_clock_offset_ms: None,
         };
 
         // Place into the correct group (restored or default).
@@ -579,6 +584,42 @@ impl ServerState {
         } else {
             false
         }
+    }
+
+    /// Store the last clock offset (ms) from a health report — used for group sync.
+    pub fn set_client_clock_offset(&self, client_id: &str, offset_ms: i32) -> bool {
+        let mut clients = self.clients.write();
+        if let Some(c) = clients.get_mut(client_id) {
+            c.last_clock_offset_ms = Some(offset_ms);
+            true
+        } else {
+            false
+        }
+    }
+
+    /// Calculate the median clock offset (µs) for all connected clients in a group.
+    /// Returns `None` if no connected client has reported an offset yet.
+    pub fn group_median_clock_offset_us(&self, group_id: &str) -> Option<i64> {
+        let clients = self.clients.read();
+        let groups = self.groups.read();
+        let group = groups.get(group_id)?;
+        let mut offsets: Vec<i64> = group
+            .client_ids
+            .iter()
+            .filter_map(|cid| {
+                let c = clients.get(cid)?;
+                if c.is_connected() {
+                    c.last_clock_offset_ms.map(|ms| ms as i64 * 1000)
+                } else {
+                    None
+                }
+            })
+            .collect();
+        if offsets.is_empty() {
+            return None;
+        }
+        offsets.sort_unstable();
+        Some(offsets[offsets.len() / 2])
     }
 
     /// Move a client to a different group.

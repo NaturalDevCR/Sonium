@@ -820,16 +820,22 @@ async fn session_loop(
             // ── Group sync broadcast ──────────────────────────────────────
             _ = group_sync_tick.tick() => {
                 let server_now_us = sonium_sync::time_provider::now_us();
+                // Compute the target group offset as the median of all connected
+                // clients' NTP clock offsets in this group.  Every client should
+                // converge its total offset (NTP + group) to this value.
+                let group_offset_us = state
+                    .group_median_clock_offset_us(&group_id)
+                    .unwrap_or(0);
                 let gs = sonium_protocol::messages::GroupSync::new(
                     server_now_us,
-                    0, // group_offset_us: future smart group sync will compute median
+                    group_offset_us,
                     0, // rate_ppm: future drift correction
                     0.0, // source_quality: will be populated from chrony status when available
                 );
                 let mut hdr = MessageHeader::new(MessageType::GroupSync, 24);
                 hdr.id = next_id();
                 let _ = ctrl_tx.send(Message::GroupSync(gs).encode_with_header(hdr));
-                tracing::trace!(%peer, server_now_us, "GroupSync broadcast");
+                tracing::trace!(%peer, server_now_us, group_offset_us, "GroupSync broadcast");
             }
         }
     };
@@ -959,6 +965,11 @@ async fn handle_client_msg(
         }
         MessageType::HealthReport => {
             if let Ok(Message::HealthReport(health)) = Message::from_payload(&hdr, payload) {
+                // Always store the clock offset for group-sync calculations,
+                // regardless of observability setting.
+                ctx.state
+                    .set_client_clock_offset(ctx.client_id, health.latency_ms);
+
                 let health_state = ctx.health_tracker.observe(
                     ctx.client_id,
                     &ctx.transport_mode,
@@ -1003,14 +1014,9 @@ async fn handle_client_msg(
                     *ctx.current_buffer_ms = next_buffer_ms;
                     debug!(client_id = %ctx.client_id, buffer_ms = next_buffer_ms, "Auto buffer adjusted");
                 }
-                if ctx
-                    .state
-                    .get_client(ctx.client_id)
-                    .map(|c| c.observability_enabled)
-                    .unwrap_or(false)
-                {
-                    ctx.state.set_client_health(ctx.client_id, health);
-                }
+                // Always store the latest health snapshot so the sync page and
+                // group-sync calculations have up-to-date data.
+                ctx.state.set_client_health(ctx.client_id, health);
             }
         }
         other => debug!("Ignoring message: {other:?}"),

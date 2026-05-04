@@ -250,21 +250,38 @@ async fn connect_and_run(
 
             // Health report
             _ = health_tick.tick() => {
+                let now_server = time_provider.to_server_time(now_us());
                 let report_msg = if let Some(buf) = sync_buf.as_mut() {
-                    let now_server = time_provider.to_server_time(now_us());
-                    let mut report = buf.get_report(now_server);
-                    let mut player_health = player.as_ref().map(|p| p.take_health()).unwrap_or_default();
-                    if let Some(playback) = playback_handle.as_ref() {
-                        let (drops, dups) = playback.take_drift_metrics();
-                        player_health.drift_drop_count += drops;
-                        player_health.drift_dup_count += dups;
-                    } else {
-                        player_health.drift_drop_count += buf.take_drift_drop_count();
-                        player_health.drift_dup_count += buf.take_drift_dup_count();
-                    }
-                    report.underrun_count += player_health.underrun_count;
+                    let player_health = player.as_ref().map(|p| p.take_health()).unwrap_or_default();
 
-                    let jitter = (buf.jitter_us() / 1000) as u32;
+                    // When the experimental callback path is active, audio lives in
+                    // PlaybackTimeline (playback_handle), not in the legacy SyncBuffer.
+                    // Pull metrics from the right source so the server sees real data.
+                    let (jitter, buffer_depth_ms, stale_drops, underruns, buf_len, drift_drops, drift_dups) =
+                        if let Some(playback) = playback_handle.as_ref() {
+                            let rep = playback.get_report(now_server);
+                            (
+                                (playback.jitter_us() / 1000) as u32,
+                                rep.buffer_depth_ms,
+                                rep.stale_drop_count,
+                                rep.underrun_count,
+                                playback.len() as u32,
+                                player_health.drift_drop_count + buf.take_drift_drop_count(),
+                                player_health.drift_dup_count + buf.take_drift_dup_count(),
+                            )
+                        } else {
+                            let report = buf.get_report(now_server);
+                            (
+                                (buf.jitter_us() / 1000) as u32,
+                                report.buffer_depth_ms,
+                                report.stale_drop_count,
+                                report.underrun_count + player_health.underrun_count,
+                                buf.len() as u32,
+                                player_health.drift_drop_count + buf.take_drift_drop_count(),
+                                player_health.drift_dup_count + buf.take_drift_dup_count(),
+                            )
+                        };
+
                     let output_buffer_ms = player
                         .as_ref()
                         .map(|p| (p.buffered_us().max(0) / 1000) as u32)
@@ -272,14 +289,14 @@ async fn connect_and_run(
                     let target_playout_latency_ms =
                         (server_buffer_ms + cfg.latency_ms + server_latency_ms).max(0) as u32;
                     sonium_protocol::messages::HealthReport::new(
-                        report.underrun_count,
+                        underruns,
                         player_health.overrun_count,
-                        report.stale_drop_count,
-                        report.buffer_depth_ms as u32,
+                        stale_drops,
+                        buffer_depth_ms,
                         jitter,
                         (time_provider.offset_us() / 1000) as i32,
                     )
-                    .with_queue_metrics(output_buffer_ms, buf.len() as u32, target_playout_latency_ms)
+                    .with_queue_metrics(output_buffer_ms, buf_len, target_playout_latency_ms)
                     .with_callback_metrics(
                         player_health.callback_starvation_count,
                         player_health.audio_callback_xrun_count,
@@ -290,7 +307,7 @@ async fn connect_and_run(
                         rtp_decode_error_count,
                         rtp_concealed_packets,
                     )
-                    .with_drift_metrics(player_health.drift_drop_count, player_health.drift_dup_count)
+                    .with_drift_metrics(drift_drops, drift_dups)
                 } else {
                     // Send idle report to keep status "Connected"
                     sonium_protocol::messages::HealthReport::new(
@@ -500,18 +517,18 @@ async fn connect_and_run(
                                 debug!("GroupSync ignored: NTP sync not yet stable");
                                 continue;
                             }
-                            let local_now_us = now_us();
-                            let local_server_time = time_provider.to_server_time(local_now_us);
-                            let diff_us = local_server_time - gs.server_now_us;
+                            // diff = (current total offset) - (target group offset from server)
+                            // We want total_offset to converge to group_offset_us.
+                            let diff_us = time_provider.total_offset_us() - gs.group_offset_us;
                             let diff_ms = diff_us / 1000;
                             // Ignore single network spikes (> 100 ms).
                             if diff_ms.abs() > 100 {
                                 warn!(diff_ms, "GroupSync spike ignored (network jitter?)");
                             } else {
-                                if diff_ms.abs() > 10 {
-                                    warn!(diff_ms, "GroupSync drift > 10ms — nudging");
+                                if diff_ms.abs() > 5 {
+                                    debug!(diff_ms, target_ms = gs.group_offset_us / 1000, "GroupSync nudging");
                                 } else {
-                                    debug!(diff_ms, "GroupSync ok");
+                                    debug!(diff_ms, target_ms = gs.group_offset_us / 1000, "GroupSync on target");
                                 }
                                 time_provider.nudge_group_offset(diff_us);
                             }
