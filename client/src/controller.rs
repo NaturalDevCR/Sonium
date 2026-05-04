@@ -532,9 +532,14 @@ async fn connect_and_run(
                                 }
                                 time_provider.nudge_group_offset(diff_us);
                             }
-                            // Propagate the corrected total offset to the audio callback.
+                            // Propagate the corrected total offset to the audio callback,
+                            // but only if the change is large enough to matter (> 0.5 ms).
                             if let Some(offset) = playback_offset.as_ref() {
-                                offset.store(time_provider.total_offset_us(), std::sync::atomic::Ordering::Relaxed);
+                                let new_total = time_provider.total_offset_us();
+                                let old_total = offset.load(std::sync::atomic::Ordering::Relaxed);
+                                if (new_total - old_total).abs() > 500 {
+                                    offset.store(new_total, std::sync::atomic::Ordering::Relaxed);
+                                }
                             }
                         }
                     }

@@ -598,7 +598,8 @@ impl ServerState {
     }
 
     /// Calculate the median clock offset (µs) for all connected clients in a group.
-    /// Returns `None` if no connected client has reported an offset yet.
+    /// Returns `None` if fewer than 2 connected clients have reported an offset
+    /// (group sync is pointless with a single client).
     pub fn group_median_clock_offset_us(&self, group_id: &str) -> Option<i64> {
         let clients = self.clients.read();
         let groups = self.groups.read();
@@ -615,11 +616,16 @@ impl ServerState {
                 }
             })
             .collect();
-        if offsets.is_empty() {
+        if offsets.len() < 2 {
             return None;
         }
         offsets.sort_unstable();
-        Some(offsets[offsets.len() / 2])
+        let mid = offsets.len() / 2;
+        if offsets.len().is_multiple_of(2) {
+            Some((offsets[mid - 1] + offsets[mid]) / 2)
+        } else {
+            Some(offsets[mid])
+        }
     }
 
     /// Move a client to a different group.

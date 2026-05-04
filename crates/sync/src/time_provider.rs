@@ -223,7 +223,10 @@ impl TimeProvider {
     /// The correction is damped (5 % of the observed error) and clamped
     /// to ±50 ms to prevent runaway.
     pub fn nudge_group_offset(&self, diff_us: i64) {
-        const DAMPING: f64 = 20.0;
+        // Very gentle correction: 2 % of the observed error per nudge.
+        // At 500 ms GroupSync interval this gives a ~25 s time-constant,
+        // slow enough to be inaudible but fast enough to track drift.
+        const DAMPING: f64 = 50.0;
         const MAX_GROUP_OFFSET_US: i64 = 50_000;
         let correction = (diff_us as f64 / DAMPING) as i64;
         let current = self.group_offset_us.load(Ordering::Relaxed);
