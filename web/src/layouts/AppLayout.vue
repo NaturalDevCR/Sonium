@@ -1,6 +1,6 @@
 <script setup lang="ts">
 import { computed, ref } from 'vue';
-import { useRoute, useRouter } from 'vue-router';
+import { useRoute, useRouter, RouterView } from 'vue-router';
 import { useAuthStore } from '@/stores/auth';
 import { useServerStore } from '@/stores/server';
 
@@ -221,7 +221,7 @@ const connectionText = computed(() => {
 
       <!-- Page Content -->
       <main class="flex-1 px-4 pb-24 lg:px-8 lg:pb-8">
-        <slot />
+        <RouterView />
       </main>
     </div>
   </div>

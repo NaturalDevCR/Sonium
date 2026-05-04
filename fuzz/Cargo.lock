@@ -312,7 +312,7 @@ dependencies = [
 
 [[package]]
 name = "sonium-common"
-version = "0.1.78"
+version = "0.1.81"
 dependencies = [
  "anyhow",
  "serde",
@@ -334,7 +334,7 @@ dependencies = [
 
 [[package]]
 name = "sonium-protocol"
-version = "0.1.78"
+version = "0.1.81"
 dependencies = [
  "bytes",
  "serde",
@@ -345,7 +345,7 @@ dependencies = [
 
 [[package]]
 name = "sonium-transport"
-version = "0.1.78"
+version = "0.1.81"
 dependencies = [
  "anyhow",
  "bytes",

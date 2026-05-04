@@ -1,0 +1,1 @@
+import{d as t,p as s,q as n,s as a,c as r,y as c,o as i,B as m}from"./index-Bri3AorO.js";const p={class:"max-w-5xl mx-auto"},v=t({__name:"AdminView",setup(_){const e=s();return n(()=>e.init()),a(()=>e.stopLiveUpdates()),(d,u)=>{const o=m("RouterView");return i(),r("div",p,[c(o)])}}});export{v as default};
