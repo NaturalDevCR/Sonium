@@ -10,3 +10,4 @@ thiserror     = { workspace = true }
 rubato        = { workspace = true }
 parking_lot   = "0.12"
 sonium-protocol = { version = "0.1.61", path = "../protocol" }
+tracing       = { workspace = true }

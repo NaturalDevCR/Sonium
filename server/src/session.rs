@@ -67,32 +67,104 @@ const AUTO_BUFFER_STALE_BURST_THRESHOLD: u32 = 4;
 /// select loop never blocks on a TCP write.  Audio frames arrive via a bounded
 /// channel (`try_send` — drop oldest on full); control messages use a separate
 /// unbounded channel so they are never lost.
+///
+/// Audio is latency-sensitive: the writer always drains the audio queue first
+/// with non-blocking `try_recv` before blocking on either channel.  This
+/// prevents a slow control write (e.g. TCP backpressure on a Time reply) from
+/// delaying audio and causing the bounded channel to fill up.
 async fn tcp_writer_task(
     mut writer: OwnedWriteHalf,
     mut audio_rx: mpsc::Receiver<bytes::Bytes>,
     mut ctrl_rx: mpsc::UnboundedReceiver<Vec<u8>>,
     peer: SocketAddr,
 ) {
+    let mut audio_frames_written: u64 = 0;
+    let audio_frames_dropped: u64 = 0;
+    let mut slow_writes: u64 = 0;
+
     loop {
-        tokio::select! {
-            biased;
-            // Prioritise control messages (Time replies, settings) over audio.
-            msg = ctrl_rx.recv() => {
-                let Some(buf) = msg else { break };
-                if let Err(e) = write_all_with_timeout(&mut writer, &buf).await {
-                    warn!(%peer, error = %e, "TCP control write failed");
-                    break;
-                }
-            }
-            msg = audio_rx.recv() => {
-                let Some(buf) = msg else { break };
+        // Drain audio first — non-blocking so control never starves.
+        match audio_rx.try_recv() {
+            Ok(buf) => {
+                let t0 = std::time::Instant::now();
                 if let Err(e) = write_all_with_timeout(&mut writer, &buf).await {
                     warn!(%peer, error = %e, "TCP audio write failed");
                     break;
                 }
+                let elapsed_ms = t0.elapsed().as_millis();
+                audio_frames_written += 1;
+                if elapsed_ms > 20 {
+                    slow_writes += 1;
+                    warn!(%peer, elapsed_ms, audio_frames_written, slow_writes, "SLOW audio write (TCP backpressure?)");
+                } else {
+                    tracing::trace!(%peer, elapsed_ms, audio_frames_written, "audio write ok");
+                }
+
+                if audio_frames_written.is_multiple_of(500) {
+                    tracing::debug!(
+                        %peer,
+                        audio_frames_written,
+                        audio_frames_dropped,
+                        slow_writes,
+                        drop_rate_pct = audio_frames_dropped * 100 / audio_frames_written.max(1),
+                        "writer task stats"
+                    );
+                }
+                continue;
+            }
+            Err(mpsc::error::TryRecvError::Disconnected) => break,
+            Err(mpsc::error::TryRecvError::Empty) => {
+                // No audio pending — block on either channel.
+            }
+        }
+
+        tokio::select! {
+            msg = ctrl_rx.recv() => {
+                let Some(buf) = msg else { break };
+                let t0 = std::time::Instant::now();
+                if let Err(e) = write_all_with_timeout(&mut writer, &buf).await {
+                    warn!(%peer, error = %e, "TCP control write failed");
+                    break;
+                }
+                let elapsed_ms = t0.elapsed().as_millis();
+                if elapsed_ms > 5 {
+                    slow_writes += 1;
+                    warn!(%peer, elapsed_ms, slow_writes, "SLOW control write (TCP backpressure?)");
+                } else {
+                    tracing::trace!(%peer, elapsed_ms, "ctrl write ok");
+                }
+            }
+            msg = audio_rx.recv() => {
+                let Some(buf) = msg else { break };
+                let t0 = std::time::Instant::now();
+                if let Err(e) = write_all_with_timeout(&mut writer, &buf).await {
+                    warn!(%peer, error = %e, "TCP audio write failed");
+                    break;
+                }
+                let elapsed_ms = t0.elapsed().as_millis();
+                audio_frames_written += 1;
+                if elapsed_ms > 20 {
+                    slow_writes += 1;
+                    warn!(%peer, elapsed_ms, audio_frames_written, slow_writes, "SLOW audio write (TCP backpressure?)");
+                } else {
+                    tracing::trace!(%peer, elapsed_ms, audio_frames_written, "audio write ok");
+                }
+
+                if audio_frames_written.is_multiple_of(500) {
+                    tracing::debug!(
+                        %peer,
+                        audio_frames_written,
+                        audio_frames_dropped,
+                        slow_writes,
+                        drop_rate_pct = audio_frames_dropped * 100 / audio_frames_written.max(1),
+                        "writer task stats"
+                    );
+                }
             }
         }
     }
+
+    warn!(%peer, audio_frames_written, audio_frames_dropped, slow_writes, "writer task exiting");
 }
 
 #[derive(Debug)]
@@ -622,11 +694,34 @@ async fn session_loop(
             frame = recv_audio(&mut audio_rx) => {
                 match frame {
                     Ok(f) => {
-                        // Both TCP and RTP: forward to the writer task via channel.
-                        // try_send drops the frame if the queue is full (client can't keep up)
-                        // instead of blocking the select loop.
-                        if audio_tx.try_send(f.wire_bytes.clone()).is_err() {
-                            debug!(%peer, "Audio queue full — dropping frame");
+                        // Try to send immediately; if the queue is full, wait up to
+                        // 50 ms for the writer task to drain.  This applies gentle
+                        // backpressure without stalling the session loop long enough
+                        // to miss control messages.
+                        match audio_tx.try_send(f.wire_bytes.clone()) {
+                            Ok(()) => {}
+                            Err(mpsc::error::TrySendError::Full(bytes)) => {
+                                let t0 = std::time::Instant::now();
+                                match tokio::time::timeout(
+                                    Duration::from_millis(50),
+                                    audio_tx.send(bytes),
+                                )
+                                .await
+                                {
+                                    Ok(Ok(())) => {
+                                        let waited_ms = t0.elapsed().as_millis();
+                                        if waited_ms > 10 {
+                                            warn!(%peer, waited_ms, "Audio send waited (queue drain)");
+                                        }
+                                    }
+                                    Ok(Err(_)) => break Ok(()),
+                                    Err(_) => {
+                                        let queue_cap = audio_tx.max_capacity();
+                                        warn!(%peer, queue_cap, "Audio queue STUCK — frame dropped after 50ms wait (client cannot consume)");
+                                    }
+                                }
+                            }
+                            Err(mpsc::error::TrySendError::Closed(_)) => break Ok(()),
                         }
                     }
                     Err(broadcast::error::RecvError::Lagged(n)) => {
@@ -843,6 +938,15 @@ async fn handle_client_msg(
                 sec: now.sec - hdr.sent.sec,
                 usec: now.usec - hdr.sent.usec,
             };
+            // Log c2s latency (client→server transit time in ms).
+            // High values indicate TCP congestion or event-loop stall on client side.
+            let c2s_us = (diff.sec as i64) * 1_000_000 + diff.usec as i64;
+            let c2s_ms = c2s_us / 1000;
+            if c2s_ms > 20 {
+                warn!(client_id = %ctx.client_id, c2s_ms, "High Time sync c2s latency (network congestion?)");
+            } else {
+                tracing::debug!(client_id = %ctx.client_id, c2s_ms, "Time sync");
+            }
             let mut reply = MessageHeader::new(MessageType::Time, 8);
             reply.id = next_id();
             reply.refers_to = hdr.id;

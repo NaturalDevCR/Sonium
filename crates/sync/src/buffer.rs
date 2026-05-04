@@ -19,6 +19,7 @@
 
 use sonium_common::SampleFormat;
 use std::collections::VecDeque;
+use tracing::warn;
 
 /// Tracks drift between local audio hardware and server stream timing.
 #[derive(Debug, Default, Clone, Copy)]
@@ -212,11 +213,18 @@ impl SyncBuffer {
         while let Some(front) = self.chunks.front() {
             let end_us = front.playout_us + front.remaining_us();
             if end_us < now_server_us - stale_threshold_us {
+                let age_ms = (now_server_us - end_us) / 1000;
                 let dropped = self.chunks.pop_front().unwrap();
                 self.buffered_samples = self
                     .buffered_samples
                     .saturating_sub(dropped.remaining_samples());
                 self.stale_drop_count += 1;
+                warn!(
+                    stale_drops = self.stale_drop_count,
+                    age_ms,
+                    target_buffer_ms = self.target_buffer_us / 1000,
+                    "SyncBuffer: stale chunk dropped (clock offset bad?)"
+                );
                 continue;
             }
             break;
@@ -233,6 +241,11 @@ impl SyncBuffer {
                 .buffered_samples
                 .saturating_sub(dropped.remaining_samples());
             self.stale_drop_count += 1;
+            warn!(
+                buffer_depth_ms = self.buffer_depth_us() / 1000,
+                max_buffer_ms = max_buffer_us / 1000,
+                "SyncBuffer: excess buffer drop (client is behind?)"
+            );
         }
     }
 
@@ -343,6 +356,10 @@ impl SyncBuffer {
             None => {
                 // Buffer empty while Playing → genuine underrun.
                 self.underrun_count += 1;
+                warn!(
+                    underruns = self.underrun_count,
+                    "SyncBuffer: underrun (buffer empty while playing)"
+                );
                 return None;
             }
         };

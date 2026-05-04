@@ -44,6 +44,25 @@ const MAX_CONCEALMENT_PACKETS_PER_GAP: u16 = 10;
 const READ_TIMEOUT: Duration = Duration::from_secs(20);
 const WRITE_TIMEOUT: Duration = Duration::from_secs(5);
 
+/// Dedicated TCP writer task — owns the write half exclusively so the
+/// main select! loop never blocks on a TCP write.  Control messages
+/// (time-sync requests, health reports) arrive via an unbounded channel
+/// and are written to the socket sequentially.
+async fn tcp_writer_task(
+    mut writer: OwnedWriteHalf,
+    mut ctrl_rx: mpsc::UnboundedReceiver<Vec<u8>>,
+) {
+    loop {
+        let Some(buf) = ctrl_rx.recv().await else {
+            break;
+        };
+        if let Err(e) = write_all_with_timeout(&mut writer, &buf).await {
+            warn!("Client writer task error: {e}");
+            break;
+        }
+    }
+}
+
 #[derive(Debug, Clone, serde::Serialize)]
 pub enum ConnectionStatus {
     Connecting,
@@ -132,7 +151,7 @@ async fn connect_and_run(
     let udp_port = udp_socket.local_addr()?.port();
     debug!(udp_port, "UDP media socket bound");
 
-    // 1. Send Hello
+    // 1. Send Hello (direct write, before the writer task takes ownership)
     let hostname = hostname::get()
         .map(|h| h.to_string_lossy().to_string())
         .unwrap_or_else(|_| "sonium-client".into());
@@ -145,6 +164,11 @@ async fn connect_and_run(
     let hello = Message::Hello(hello_msg);
     write_all_with_timeout(&mut writer, &hello.encode()).await?;
     info!(udp_port, "Hello sent");
+
+    // Channel and writer task: all subsequent writes go through the channel
+    // so the main select! loop never blocks on TCP backpressure.
+    let (ctrl_tx, ctrl_rx) = mpsc::unbounded_channel::<Vec<u8>>();
+    let writer_task = tokio::spawn(tcp_writer_task(writer, ctrl_rx));
 
     // 2. Wait for CodecHeader, then ServerSettings
     let mut decoder: Option<ActiveDecoder> = None;
@@ -181,7 +205,7 @@ async fn connect_and_run(
     let mut sync_tick = tokio::time::interval(tokio::time::Duration::from_millis(100));
     let mut health_tick = tokio::time::interval(tokio::time::Duration::from_secs(2));
     let mut sync_seq: u16 = 0;
-    send_time_request(&mut writer, &mut sync_seq, &mut pending_time).await?;
+    queue_time_request(&ctrl_tx, &mut sync_seq, &mut pending_time);
 
     let result = loop {
         tokio::select! {
@@ -225,10 +249,7 @@ async fn connect_and_run(
                     sync_tick.tick().await;
                 }
 
-                if let Err(e) = send_time_request(&mut writer, &mut sync_seq, &mut pending_time).await {
-                    warn!("Failed to send sync request: {e}");
-                    break Ok(());
-                }
+                queue_time_request(&ctrl_tx, &mut sync_seq, &mut pending_time);
             }
 
             // Health report
@@ -287,8 +308,8 @@ async fn connect_and_run(
                 }
 
                 let msg = Message::HealthReport(report_msg).encode();
-                if let Err(e) = write_all_with_timeout(&mut writer, &msg).await {
-                    warn!("Failed to send health report: {e}");
+                if ctrl_tx.send(msg).is_err() {
+                    warn!("Writer task died — cannot send health report");
                     break Ok(());
                 }
             }
@@ -451,16 +472,26 @@ async fn connect_and_run(
                         if let Some((expected_id, sent_us)) = pending_time.take() {
                             if hdr.refers_to == expected_id {
                                 let recv_us = now_us();
+                                let rtt_us = recv_us - sent_us;
                                 let time_msg = TimeMsg::decode(&payload)?;
                                 let server_lat_us = time_msg.latency.to_micros();
                                 time_provider.update(sent_us, recv_us, server_lat_us);
                                 if let Some(offset) = playback_offset.as_ref() {
                                     offset.store(time_provider.offset_us(), std::sync::atomic::Ordering::Relaxed);
                                 }
-                                debug!(
-                                    offset_ms = time_provider.offset_us() / 1000,
-                                    "Clock sync updated"
-                                );
+                                let offset_ms = time_provider.offset_us() / 1000;
+                                let rtt_ms = rtt_us / 1000;
+                                let server_lat_ms = server_lat_us / 1000;
+                                if rtt_ms > 50 || offset_ms.abs() > 200 {
+                                    warn!(
+                                        rtt_ms,
+                                        server_lat_ms,
+                                        offset_ms,
+                                        "POOR clock sync — high RTT or large offset"
+                                    );
+                                } else {
+                                    debug!(rtt_ms, server_lat_ms, offset_ms, "Clock sync updated");
+                                }
                             }
                         }
                     }
@@ -589,6 +620,7 @@ async fn connect_and_run(
     };
 
     read_task.abort();
+    writer_task.abort();
     if let Some(task) = udp_recv_task {
         task.abort();
     }
@@ -631,19 +663,24 @@ fn configure_tcp_stream(stream: &TcpStream) {
     }
 }
 
-async fn send_time_request(
-    stream: &mut OwnedWriteHalf,
+/// Queue a time-sync request through the writer channel.
+///
+/// The `Timestamp::now()` embedded in the header is captured *here* (at queue
+/// time), not at the actual TCP send time.  This is correct: the NTP-like
+/// clock-sync algorithm measures client→server→client transit, which starts
+/// when we create the message, not when the kernel puts it on the wire.
+fn queue_time_request(
+    ctrl_tx: &mpsc::UnboundedSender<Vec<u8>>,
     sync_seq: &mut u16,
     pending_time: &mut Option<(u16, i64)>,
-) -> anyhow::Result<()> {
+) {
     *sync_seq = sync_seq.wrapping_add(1);
     let mut hdr = MessageHeader::new(MessageType::Time, 8);
     hdr.id = *sync_seq;
     let sent_us = hdr.sent.to_micros();
     let msg = Message::Time(TimeMsg::zero()).encode_with_header(hdr);
-    write_all_with_timeout(stream, &msg).await?;
+    let _ = ctrl_tx.send(msg);
     *pending_time = Some((*sync_seq, sent_us));
-    Ok(())
 }
 
 async fn read_exact_with_timeout(reader: &mut OwnedReadHalf, buf: &mut [u8]) -> anyhow::Result<()> {
