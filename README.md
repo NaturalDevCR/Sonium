@@ -29,20 +29,23 @@ music source -> sonium-server -> LAN -> sonium-client -> speaker
 
 ## What Works Today
 
-- Built-in web UI with control view and admin dashboard.
-- Users, roles, JWT auth, first-run/admin setup, and role-aware UI.
-- Groups, per-client volume/mute/latency, EQ, and live stream switching.
-- Multiple configured streams, including FIFO/files, TCP, `pipe://` external
+- **Built-in web UI** with control view, admin dashboard, and **real-time sync
+  monitor**.
+- **Users, roles, JWT auth**, first-run/admin setup, and role-aware UI.
+- **Groups, per-client volume/mute/latency, EQ**, and live stream switching.
+- **Multiple configured streams**, including FIFO/files, TCP, `pipe://` external
   processes, ffmpeg-style radio sources, and meta streams.
-- External stream recovery: `pipe://` sources restart with backoff if their
+- **External stream recovery**: `pipe://` sources restart with backoff if their
   stdout closes.
-- System/admin tooling: dependency checks, raw TOML editing, log viewer with
+- **System/admin tooling**: dependency checks, raw TOML editing, log viewer with
   time filters, and restart requests when systemd permissions are installed.
-- Local-time structured logs with ANSI disabled for easier journal/UI reading.
-- Sonium Desktop Agent for macOS/Windows to configure client instances.
-- Client audio output through CPAL with a dedicated audio thread, underrun
-  crossfade, device hotplug recovery, output prefill, and manual stream
-  `chunk_ms` control.
+- **Multi-room sync foundation**: GroupSync protocol, timezone config, and
+  chrony integration guidance.
+- **Same-machine optimization**: `--on-server` flag skips network sync when
+  client and server share a machine.
+- **Sonium Desktop Agent** for macOS/Windows to configure client instances.
+- **Client audio output** through CPAL with dedicated audio thread, underrun
+  crossfade, device hotplug recovery, output prefill, and `chunk_ms` control.
 
 ## Install
 
@@ -95,8 +98,10 @@ bind = "0.0.0.0"
 stream_port = 1710
 control_port = 1711
 mdns = true
-buffer_ms = 1000
-chunk_ms = 20
+
+[server.audio]
+buffer_ms = 200
+chunk_ms = 10
 output_prefill_ms = 0
 
 [[streams]]
@@ -148,36 +153,42 @@ changes between releases.
 
 ### Known Challenges
 
-- **Low-latency reliability:** buffers below ~1000 ms can still produce
-  dropouts on some machines/networks. Recent client-side output prefill and
-  `chunk_ms` support help, but this needs more real-world tuning.
-- **Clock sync precision:** software sync works, but sub-millisecond sync across
-  varied hardware is not proven yet.
-- **Source supervision:** `pipe://` sources now recover, but we still need better
-  diagnostics for ffmpeg/network-radio failure modes.
+- **Low-latency reliability:** TCP streaming is now stable at 200 ms buffer on
+  most LANs, but Wi-Fi and mixed networks may need 400–800 ms. Auto-buffer
+  tuning is available but still experimental.
+- **Clock sync precision:** built-in protocol achieves ~10–50 ms. For < 1 ms
+  accuracy, chrony/NTP is required. PTP hardware support is planned.
+- **Source supervision:** `pipe://` sources recover automatically, but ffmpeg
+  stderr diagnostics are not yet surfaced in the UI.
 - **Upgrade/installer edges:** Linux systemd installs work best through the
   installer; hand-written services may miss the sudoers restart permission.
-- **Observability:** logs are clearer and filterable, but there is no complete
-  troubleshooting workflow for buffer underruns, network jitter, or device
-  callback timing.
+- **Observability:** health reports, sync status, and logs are visible in the UI,
+  but automated troubleshooting workflows are not yet implemented.
 - **Compatibility:** Snapcast discovery/migration pieces exist, but full
   drop-in compatibility is not guaranteed.
 
 ### Roadmap
 
-- Stabilize client playback under lower buffer sizes: adaptive output prefill,
-  better jitter metrics, and automatic buffer recommendations.
-- Make stream tuning friendlier: optional auto mode for `buffer_ms`/`chunk_ms`,
-  while keeping manual controls for advanced users.
-- Improve diagnostics: surface underruns, stale drops, jitter, process restarts,
-  and ffmpeg stderr in the admin UI.
-- Harden restart/config flows: clearer prompts, permission checks, and safer
-  partial reloads when a full server restart is not needed.
-- Validate synchronization on real multi-device hardware, including Raspberry Pi
-  and mixed macOS/Linux clients.
-- Continue packaging polish for Linux, macOS, and Windows Desktop Agent.
-- Longer term: PTP/hardware timestamp support, relay/cross-subnet modes, TLS,
-  and richer source integrations.
+**Recently Completed (v0.1.78):**
+- ✅ TCP streaming stability: dedicated writer task, audio-first drain loop
+- ✅ Remove faulty RTT filter, eliminate State::Buffering gate
+- ✅ GroupSync protocol for multi-room shared timeline
+- ✅ Timezone config support
+- ✅ `--on-server` flag for same-machine optimization
+- ✅ Web UI redesign: Dashboard, Sync Monitor, Expert mode toggle
+
+**In Progress:**
+- Smart GroupSync: compute median group offset server-side
+- Source quality reporting in GroupSync (chrony integration)
+- Web UI setup wizard for first-time users
+- Auto-buffer tuning validation on real hardware
+
+**Planned:**
+- Improve diagnostics: surface ffmpeg stderr, automated troubleshooting
+- Harden restart/config flows: partial reloads, permission checks
+- PTP/hardware timestamp support for sub-microsecond sync
+- Relay/cross-subnet modes, TLS, richer source integrations
+- Continue packaging polish for Linux, macOS, and Windows Desktop Agent
 
 ## License
 

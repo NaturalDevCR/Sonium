@@ -72,6 +72,11 @@ struct Cli {
     /// Uninstall Sonium Client and remove all background services.
     #[arg(long)]
     uninstall: bool,
+
+    /// Assume the client is running on the same machine as the server.
+    /// Skips network time sync and assumes zero clock offset.
+    #[arg(long, env = "SONIUM_ON_SERVER")]
+    on_server: bool,
 }
 
 #[tokio::main]
@@ -139,9 +144,20 @@ async fn main() -> anyhow::Result<()> {
         "Sonium client starting"
     );
 
-    controller::run(server_addr, cfg, None)
+    let on_server = cli.on_server || is_localhost(&server_host);
+    if on_server {
+        info!(%server_addr, "Client and server on same machine — skipping network time sync");
+    }
+
+    controller::run(server_addr, cfg, None, on_server)
         .await
         .context("client controller error")
+}
+
+/// Check if the server host is localhost (same machine).
+fn is_localhost(host: &str) -> bool {
+    let lower = host.to_lowercase();
+    lower == "localhost" || lower == "127.0.0.1" || lower == "::1" || lower == "0.0.0.0"
 }
 
 /// Run mDNS discovery for `timeout_secs` and return the chosen server.

@@ -166,9 +166,14 @@ async fn save_instances(
             let instance_id = config.id;
 
             let handle = tauri::async_runtime::spawn(async move {
-                let _ =
-                    controller::run_with_status(server_addr, cfg, Some(health_tx), Some(status_tx))
-                        .await;
+                let _ = controller::run_with_status(
+                    server_addr,
+                    cfg,
+                    Some(health_tx),
+                    Some(status_tx),
+                    false,
+                )
+                .await;
             });
 
             // Monitor health for this instance
@@ -274,7 +279,8 @@ async fn start_instance(
 
     let handle = tauri::async_runtime::spawn(async move {
         let _ =
-            controller::run_with_status(server_addr, cfg, Some(health_tx), Some(status_tx)).await;
+            controller::run_with_status(server_addr, cfg, Some(health_tx), Some(status_tx), false)
+                .await;
     });
 
     // Monitor health for this instance

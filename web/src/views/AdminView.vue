@@ -32,13 +32,19 @@ const nav = [
   { name: 'matrix',          icon: 'mdi-grid',                  label: 'Matrix'    },
   { name: 'admin-groups',    icon: 'mdi-speaker-multiple',      label: 'Groups'    },
   { name: 'admin-clients',   icon: 'mdi-devices',               label: 'Clients'   },
-  { name: 'admin-health',    icon: 'mdi-pulse',                 label: 'Observability' },
+  { name: 'sync',            icon: 'mdi-sync',                  label: 'Sync'      },
   { name: 'admin-system',    icon: 'mdi-toolbox-outline',        label: 'System'    },
   { name: 'admin-config',    icon: 'mdi-code-braces',            label: 'Config'    },
   { name: 'admin-users',     icon: 'mdi-account-multiple-outline', label: 'Users'   },
 ];
 
-const mobileNav = nav.slice(0, 5);
+const mobileNav = [
+  { name: 'admin-dashboard', icon: 'mdi-view-dashboard-outline', label: 'Overview' },
+  { name: 'admin-streams',   icon: 'mdi-music-box-multiple-outline', label: 'Streams' },
+  { name: 'matrix',          icon: 'mdi-grid',                  label: 'Matrix' },
+  { name: 'admin-groups',    icon: 'mdi-speaker-multiple',      label: 'Groups' },
+  { name: 'sync',            icon: 'mdi-sync',                  label: 'Sync' },
+];
 
 function isActive(name: string) {
   return route.name === name;

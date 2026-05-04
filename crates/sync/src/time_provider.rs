@@ -46,6 +46,8 @@ pub struct TimeProvider {
     group_offset_us: Arc<AtomicI64>,
     samples: parking_lot::Mutex<SampleBuffer>,
     last_sync: parking_lot::Mutex<Option<Instant>>,
+    /// When true, client and server are on the same machine — skip network sync.
+    on_server: bool,
 }
 
 struct SampleBuffer {
@@ -98,7 +100,13 @@ impl TimeProvider {
             group_offset_us: Arc::new(AtomicI64::new(0)),
             samples: parking_lot::Mutex::new(SampleBuffer::new(DEFAULT_SAMPLE_BUFFER_SIZE)),
             last_sync: parking_lot::Mutex::new(None),
+            on_server: false,
         }
+    }
+
+    /// Mark this provider as "same machine" — skips network time sync.
+    pub fn set_on_server(&mut self, on_server: bool) {
+        self.on_server = on_server;
     }
 
     /// Update the window size for the median filter.
@@ -132,6 +140,9 @@ impl TimeProvider {
     /// - `t_recv_us`        — local clock when the server echo was received
     /// - `server_latency_us` — `(t_server_recv - t_client_sent)` as reported by the server
     pub fn update(&self, t_sent_us: i64, t_recv_us: i64, server_latency_us: i64) {
+        if self.on_server {
+            return;
+        }
         let rtt_us = t_recv_us - t_sent_us;
 
         let diff_us = server_latency_us - (rtt_us / 2);
@@ -171,11 +182,17 @@ impl TimeProvider {
 
     /// Number of samples collected since the last [`reset`][Self::reset].
     pub fn sample_count(&self) -> usize {
+        if self.on_server {
+            return 1;
+        }
         self.samples.lock().len()
     }
 
     /// `true` if no sync has been received in the last 60 seconds.
     pub fn is_stale(&self) -> bool {
+        if self.on_server {
+            return false;
+        }
         match *self.last_sync.lock() {
             None => true,
             Some(t) => t.elapsed() > Duration::from_secs(STALE_TIMEOUT_SECS),

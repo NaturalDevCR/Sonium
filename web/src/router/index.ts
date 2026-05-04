@@ -18,8 +18,14 @@ const router = createRouter({
     },
     {
       path: '/',
-      name: 'control',
-      component: () => import('@/views/ControlView.vue'),
+      name: 'dashboard',
+      component: () => import('@/views/DashboardView.vue'),
+      meta: { requiresAuth: true },
+    },
+    {
+      path: '/sync',
+      name: 'sync',
+      component: () => import('@/views/SyncMonitorView.vue'),
       meta: { requiresAuth: true },
     },
     {

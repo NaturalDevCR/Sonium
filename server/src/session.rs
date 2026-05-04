@@ -824,8 +824,9 @@ async fn session_loop(
                     server_now_us,
                     0, // group_offset_us: future smart group sync will compute median
                     0, // rate_ppm: future drift correction
+                    0.0, // source_quality: will be populated from chrony status when available
                 );
-                let mut hdr = MessageHeader::new(MessageType::GroupSync, 20);
+                let mut hdr = MessageHeader::new(MessageType::GroupSync, 24);
                 hdr.id = next_id();
                 let _ = ctrl_tx.send(Message::GroupSync(gs).encode_with_header(hdr));
                 tracing::trace!(%peer, server_now_us, "GroupSync broadcast");

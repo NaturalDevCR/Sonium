@@ -78,8 +78,9 @@ pub async fn run(
     server_addr: String,
     cfg: ClientConfig,
     health_tx: Option<mpsc::UnboundedSender<HealthReport>>,
+    on_server: bool,
 ) -> anyhow::Result<()> {
-    run_with_status(server_addr, cfg, health_tx, None).await
+    run_with_status(server_addr, cfg, health_tx, None, on_server).await
 }
 
 pub async fn run_with_status(
@@ -87,6 +88,7 @@ pub async fn run_with_status(
     cfg: ClientConfig,
     health_tx: Option<mpsc::UnboundedSender<HealthReport>>,
     status_tx: Option<mpsc::UnboundedSender<ConnectionStatus>>,
+    on_server: bool,
 ) -> anyhow::Result<()> {
     let mut backoff = Duration::from_millis(500);
 
@@ -101,6 +103,7 @@ pub async fn run_with_status(
             health_tx.clone(),
             status_tx.clone(),
             &mut backoff,
+            on_server,
         )
         .await
         {
@@ -132,6 +135,7 @@ async fn connect_and_run(
     health_tx: Option<mpsc::UnboundedSender<HealthReport>>,
     status_tx: Option<mpsc::UnboundedSender<ConnectionStatus>>,
     backoff: &mut Duration,
+    on_server: bool,
 ) -> anyhow::Result<()> {
     let stream = TcpStream::connect(addr).await?;
     stream.set_nodelay(true)?;
@@ -143,7 +147,8 @@ async fn connect_and_run(
         .map(|tx| tx.send(ConnectionStatus::Connected));
     info!(%addr, "Connected to server (TCP_NODELAY=true)");
 
-    let time_provider = TimeProvider::new();
+    let mut time_provider = TimeProvider::new();
+    time_provider.set_on_server(on_server);
 
     // Bind a local UDP socket for RTP media reception.
     // Port 0 lets the OS assign an ephemeral port; we advertise it in Hello.
