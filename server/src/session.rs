@@ -919,7 +919,7 @@ async fn handle_client_msg(
             // High values indicate TCP congestion or event-loop stall on client side.
             let c2s_us = (diff.sec as i64) * 1_000_000 + diff.usec as i64;
             let c2s_ms = c2s_us / 1000;
-            if c2s_ms > 20 {
+            if c2s_ms > 300 {
                 warn!(client_id = %ctx.client_id, c2s_ms, "High Time sync c2s latency (network congestion?)");
             } else {
                 tracing::debug!(client_id = %ctx.client_id, c2s_ms, "Time sync");
