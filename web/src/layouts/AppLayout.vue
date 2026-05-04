@@ -1,468 +1,228 @@
 <script setup lang="ts">
-import { computed, ref, watch } from 'vue';
+import { computed, ref } from 'vue';
 import { useRoute, useRouter } from 'vue-router';
 import { useAuthStore } from '@/stores/auth';
 import { useServerStore } from '@/stores/server';
-import ConnectionStatus from '@/components/ConnectionStatus.vue';
 
 const auth = useAuthStore();
 const store = useServerStore();
 const route = useRoute();
 const router = useRouter();
 
-const version = computed(() => store.serverVersion || '0.1.79');
+const mobileMenuOpen = ref(false);
 
 const isAdminRoute = computed(() => route.path.startsWith('/admin'));
 
-// Collapsible sidebar on desktop
-const sidebarCollapsed = ref(false);
-
-// Navigation items (operator+ see all; viewer sees limited)
-const mainNav = computed(() => [
-  { path: '/',          name: 'dashboard',    icon: 'mdi-view-dashboard',     label: 'Dashboard',   show: true },
-  { path: '/matrix',    name: 'matrix',       icon: 'mdi-grid',               label: 'Matrix',      show: auth.isOperator },
-  { path: '/sync',      name: 'sync',         icon: 'mdi-sync',               label: 'Sync',        show: auth.isOperator },
-  { path: '/admin',     name: 'admin',        icon: 'mdi-cog-outline',        label: 'Admin',       show: auth.isAdmin },
+const navItems = computed(() => [
+  { to: '/',        label: 'Dashboard', icon: 'mdi-view-dashboard',    show: true },
+  { to: '/matrix',  label: 'Matrix',    icon: 'mdi-grid',              show: auth.isOperator },
+  { to: '/sync',    label: 'Sync',      icon: 'mdi-sync',              show: auth.isOperator },
+  { to: '/admin',   label: 'Admin',     icon: 'mdi-shield-crown-outline', show: auth.isAdmin },
 ]);
 
-const adminSubNav = [
-  { path: '/admin',          name: 'admin-dashboard', icon: 'mdi-view-dashboard-outline', label: 'Overview' },
-  { path: '/admin/streams',  name: 'admin-streams',   icon: 'mdi-music-box-multiple-outline', label: 'Streams' },
-  { path: '/admin/groups',   name: 'admin-groups',    icon: 'mdi-speaker-multiple',      label: 'Groups' },
-  { path: '/admin/clients',  name: 'admin-clients',   icon: 'mdi-devices',               label: 'Clients' },
-  { path: '/admin/health',   name: 'admin-health',    icon: 'mdi-heart-pulse',           label: 'Health' },
-  { path: '/admin/system',   name: 'admin-system',    icon: 'mdi-toolbox-outline',       label: 'System' },
-  { path: '/admin/config',   name: 'admin-config',    icon: 'mdi-code-braces',           label: 'Config' },
-  { path: '/admin/users',    name: 'admin-users',     icon: 'mdi-account-multiple-outline', label: 'Users' },
+const adminItems = [
+  { to: '/admin',          label: 'Overview', icon: 'mdi-view-dashboard-outline' },
+  { to: '/admin/streams',  label: 'Streams',  icon: 'mdi-music-box-multiple-outline' },
+  { to: '/admin/groups',   label: 'Groups',   icon: 'mdi-speaker-multiple' },
+  { to: '/admin/clients',  label: 'Clients',  icon: 'mdi-devices' },
+  { to: '/admin/health',   label: 'Health',   icon: 'mdi-heart-pulse' },
+  { to: '/admin/system',   label: 'System',   icon: 'mdi-toolbox-outline' },
+  { to: '/admin/config',   label: 'Config',   icon: 'mdi-code-braces' },
+  { to: '/admin/users',    label: 'Users',    icon: 'mdi-account-multiple-outline' },
 ];
 
-function isActive(itemPath: string) {
-  if (itemPath === '/') return route.path === '/';
-  if (itemPath === '/admin') return route.path === '/admin' || route.path === '/admin/';
-  return route.path.startsWith(itemPath);
+function isActive(path: string) {
+  if (path === '/') return route.path === '/';
+  return route.path.startsWith(path);
 }
 
-const mobileNav = computed(() => {
-  const items = mainNav.value.filter(n => n.show);
-  // On admin pages, show admin sub-nav in mobile bottom bar too
-  if (isAdminRoute.value) {
-    return adminSubNav.slice(0, 5).map(n => ({ ...n, path: n.path }));
-  }
-  return items.map(n => ({ ...n, path: n.path }));
+const connectionColor = computed(() => {
+  if (store.connected) return 'bg-emerald-400';
+  if (store.connecting) return 'bg-amber-400';
+  return 'bg-rose-400';
 });
 
-watch(() => route.path, () => {
-  // Auto-expand sidebar when entering admin on desktop
-  if (isAdminRoute.value) sidebarCollapsed.value = false;
+const connectionText = computed(() => {
+  if (store.connected) return 'Live';
+  if (store.connecting) return 'Connecting';
+  return 'Offline';
 });
 </script>
 
 <template>
-  <div class="app-shell">
+  <div class="min-h-screen bg-slate-950 text-slate-100 flex">
+    <!-- Ambient background glows -->
+    <div class="fixed inset-0 overflow-hidden pointer-events-none z-0">
+      <div class="absolute -top-[20%] -left-[10%] w-[50%] h-[50%] rounded-full bg-cyan-500/[0.03] blur-[120px]"></div>
+      <div class="absolute top-[40%] -right-[10%] w-[40%] h-[40%] rounded-full bg-violet-500/[0.03] blur-[120px]"></div>
+      <div class="absolute -bottom-[10%] left-[20%] w-[35%] h-[35%] rounded-full bg-rose-500/[0.02] blur-[120px]"></div>
+    </div>
+
     <!-- ── Desktop Sidebar ─────────────────────────────────────────────── -->
-    <aside
-      class="hidden lg:flex flex-col sidebar"
-      :class="{ collapsed: sidebarCollapsed }"
-    >
-      <!-- Brand -->
-      <div class="sidebar-brand">
-        <img src="/sonium-logo.png" alt="Sonium" class="logo-img" />
-        <div v-if="!sidebarCollapsed" class="brand-text">
-          <span class="brand-name">SONIUM</span>
-          <span class="brand-version">v{{ version }}</span>
-        </div>
-      </div>
+    <aside class="hidden lg:flex flex-col w-[220px] shrink-0 fixed inset-y-0 left-0 z-40">
+      <!-- Glass background -->
+      <div class="absolute inset-0 bg-slate-950/80 backdrop-blur-xl border-r border-white/[0.06]"></div>
 
-      <!-- Connection status -->
-      <div class="sidebar-conn">
-        <ConnectionStatus />
-      </div>
-
-      <!-- Main nav -->
-      <nav class="sidebar-nav">
-        <router-link
-          v-for="item in mainNav.filter(n => n.show)"
-          :key="item.name"
-          :to="item.path"
-          class="nav-row"
-          :class="{ active: isActive(item.path) }"
-          :title="item.label"
-        >
-          <span class="mdi text-lg" :class="item.icon"></span>
-          <span v-if="!sidebarCollapsed" class="nav-label">{{ item.label }}</span>
-        </router-link>
-      </nav>
-
-      <!-- Admin sub-nav (only when inside admin) -->
-      <nav v-if="isAdminRoute && !sidebarCollapsed" class="sidebar-subnav">
-        <div class="subnav-divider"></div>
-        <span class="subnav-title">Administration</span>
-        <router-link
-          v-for="item in adminSubNav"
-          :key="item.name"
-          :to="item.path"
-          class="nav-row sub"
-          :class="{ active: route.name === item.name }"
-        >
-          <span class="mdi text-base" :class="item.icon"></span>
-          <span class="nav-label">{{ item.label }}</span>
-        </router-link>
-      </nav>
-
-      <div class="flex-1"></div>
-
-      <!-- Bottom actions -->
-      <div class="sidebar-footer">
-        <button
-          v-if="!sidebarCollapsed"
-          @click="sidebarCollapsed = true"
-          class="nav-row"
-          title="Collapse sidebar"
-        >
-          <span class="mdi mdi-chevron-left text-lg"></span>
-          <span class="nav-label">Collapse</span>
-        </button>
-        <button
-          v-else
-          @click="sidebarCollapsed = false"
-          class="nav-row justify-center"
-          title="Expand sidebar"
-        >
-          <span class="mdi mdi-chevron-right text-lg"></span>
-        </button>
-
-        <button
-          @click="auth.logout(); router.push('/login')"
-          class="nav-row danger"
-          title="Sign out"
-        >
-          <span class="mdi mdi-logout text-lg"></span>
-          <span v-if="!sidebarCollapsed" class="nav-label">Sign out</span>
-        </button>
-      </div>
-    </aside>
-
-    <!-- ── Main area ───────────────────────────────────────────────────── -->
-    <div class="main-area">
-      <!-- Mobile top bar -->
-      <header class="lg:hidden mobile-header safe-top">
-        <div class="flex items-center gap-3">
-          <img src="/sonium-logo.png" alt="" class="h-7 w-7 object-contain" />
-          <span class="font-display text-sm font-extrabold tracking-widest text-primary">SONIUM</span>
-        </div>
-        <ConnectionStatus />
-      </header>
-
-      <!-- Desktop top bar (contextual) -->
-      <header class="hidden lg:flex desktop-header">
-        <div class="flex items-center gap-3">
-          <h1 class="page-title">{{ route.meta?.title || 'Sonium' }}</h1>
-        </div>
-        <div class="flex items-center gap-3">
-          <div v-if="store.connectedClients.length" class="header-stat">
-            <span class="mdi mdi-speaker text-sm"></span>
-            {{ store.connectedClients.length }} online
-          </div>
-          <div class="flex items-center gap-2">
-            <div class="user-badge">
-              <span class="mdi mdi-account-circle text-lg"></span>
-              <span class="text-sm">{{ auth.user?.username || 'User' }}</span>
-              <span class="role-pill">{{ auth.user?.role }}</span>
+      <div class="relative flex flex-col h-full">
+        <!-- Brand -->
+        <div class="px-5 pt-6 pb-4">
+          <div class="flex items-center gap-3">
+            <div class="relative">
+              <img src="/sonium-logo.png" alt="Sonium" class="w-8 h-8 object-contain relative z-10" />
+              <div class="absolute inset-0 bg-cyan-400/20 blur-lg rounded-full"></div>
+            </div>
+            <div>
+              <div class="font-display text-sm font-extrabold tracking-[0.15em] text-white">SONIUM</div>
+              <div class="text-[10px] text-slate-500 font-medium tracking-wider">SERVER UI</div>
             </div>
           </div>
         </div>
+
+        <!-- Connection indicator -->
+        <div class="px-5 pb-4">
+          <div class="flex items-center gap-2 px-3 py-1.5 rounded-full bg-white/[0.03] border border-white/[0.06] w-fit">
+            <span class="w-1.5 h-1.5 rounded-full animate-pulse-glow" :class="connectionColor"></span>
+            <span class="text-[11px] font-semibold text-slate-400">{{ connectionText }}</span>
+          </div>
+        </div>
+
+        <!-- Main Nav -->
+        <nav class="px-3 flex flex-col gap-1">
+          <router-link
+            v-for="item in navItems.filter(n => n.show)"
+            :key="item.to"
+            :to="item.to"
+            class="group flex items-center gap-3 px-3 py-2.5 rounded-xl text-sm font-medium transition-all duration-200"
+            :class="isActive(item.to)
+              ? 'bg-white/[0.08] text-cyan-300 border border-white/[0.08] shadow-[0_0_20px_rgba(34,211,238,0.08)]'
+              : 'text-slate-400 hover:text-slate-200 hover:bg-white/[0.04] border border-transparent'"
+          >
+            <span class="mdi text-lg transition-transform group-hover:scale-110" :class="item.icon"></span>
+            {{ item.label }}
+          </router-link>
+        </nav>
+
+        <!-- Admin subnav -->
+        <div v-if="isAdminRoute" class="px-3 mt-4">
+          <div class="px-3 mb-2 text-[10px] font-bold tracking-[0.12em] text-slate-600 uppercase">Administration</div>
+          <nav class="flex flex-col gap-0.5">
+            <router-link
+              v-for="item in adminItems"
+              :key="item.to"
+              :to="item.to"
+              class="group flex items-center gap-3 px-3 py-2 rounded-lg text-xs font-medium transition-all duration-200"
+              :class="isActive(item.to)
+                ? 'text-cyan-300 bg-white/[0.05]'
+                : 'text-slate-500 hover:text-slate-300 hover:bg-white/[0.03]'"
+            >
+              <span class="mdi text-base" :class="item.icon"></span>
+              {{ item.label }}
+            </router-link>
+          </nav>
+        </div>
+
+        <div class="flex-1"></div>
+
+        <!-- User + Logout -->
+        <div class="p-4 border-t border-white/[0.06]">
+          <div class="flex items-center gap-3 mb-3 px-1">
+            <div class="w-8 h-8 rounded-full bg-gradient-to-br from-cyan-400/20 to-violet-500/20 border border-white/[0.08] flex items-center justify-center">
+              <span class="mdi mdi-account text-slate-300 text-sm"></span>
+            </div>
+            <div class="min-w-0">
+              <div class="text-xs font-semibold text-slate-300 truncate">{{ auth.user?.username }}</div>
+              <div class="text-[10px] text-slate-500 uppercase tracking-wider">{{ auth.user?.role }}</div>
+            </div>
+          </div>
+          <button
+            @click="auth.logout(); router.push('/login')"
+            class="w-full flex items-center justify-center gap-2 px-3 py-2 rounded-xl text-xs font-medium text-rose-400/80 hover:text-rose-300 hover:bg-rose-500/[0.08] border border-transparent hover:border-rose-500/20 transition-all"
+          >
+            <span class="mdi mdi-logout"></span>
+            Sign out
+          </button>
+        </div>
+      </div>
+    </aside>
+
+    <!-- ── Main Content ────────────────────────────────────────────────── -->
+    <div class="flex-1 flex flex-col min-w-0 lg:ml-[220px] relative z-10">
+      <!-- Mobile Header -->
+      <header class="lg:hidden flex items-center justify-between px-4 py-3 sticky top-0 z-40 bg-slate-950/90 backdrop-blur-xl border-b border-white/[0.06]">
+        <div class="flex items-center gap-2.5">
+          <img src="/sonium-logo.png" alt="" class="w-7 h-7 object-contain" />
+          <span class="font-display text-sm font-extrabold tracking-[0.15em]">SONIUM</span>
+        </div>
+        <div class="flex items-center gap-2">
+          <div class="flex items-center gap-1.5 px-2.5 py-1 rounded-full bg-white/[0.03] border border-white/[0.06]">
+            <span class="w-1.5 h-1.5 rounded-full" :class="connectionColor"></span>
+            <span class="text-[10px] text-slate-400">{{ connectionText }}</span>
+          </div>
+          <button @click="mobileMenuOpen = !mobileMenuOpen" class="w-8 h-8 flex items-center justify-center rounded-lg bg-white/[0.05] text-slate-300">
+            <span class="mdi text-lg" :class="mobileMenuOpen ? 'mdi-close' : 'mdi-menu'"></span>
+          </button>
+        </div>
       </header>
 
-      <!-- Page content -->
-      <main class="page-content safe-bottom">
+      <!-- Mobile Menu Dropdown -->
+      <div v-if="mobileMenuOpen" class="lg:hidden fixed inset-x-0 top-[53px] z-30 bg-slate-950/95 backdrop-blur-xl border-b border-white/[0.06] p-4 space-y-1 animate-fade-up">
+        <router-link
+          v-for="item in navItems.filter(n => n.show)"
+          :key="item.to"
+          :to="item.to"
+          @click="mobileMenuOpen = false"
+          class="flex items-center gap-3 px-4 py-3 rounded-xl text-sm font-medium transition-all"
+          :class="isActive(item.to) ? 'bg-white/[0.08] text-cyan-300' : 'text-slate-400'"
+        >
+          <span class="mdi text-lg" :class="item.icon"></span>
+          {{ item.label }}
+        </router-link>
+        <div v-if="isAdminRoute" class="pt-2 mt-2 border-t border-white/[0.06]">
+          <div class="px-4 py-2 text-[10px] font-bold tracking-wider text-slate-600 uppercase">Admin</div>
+          <router-link
+            v-for="item in adminItems"
+            :key="item.to"
+            :to="item.to"
+            @click="mobileMenuOpen = false"
+            class="flex items-center gap-3 px-4 py-2.5 rounded-xl text-xs font-medium transition-all"
+            :class="isActive(item.to) ? 'text-cyan-300 bg-white/[0.05]' : 'text-slate-500'"
+          >
+            <span class="mdi text-base" :class="item.icon"></span>
+            {{ item.label }}
+          </router-link>
+        </div>
+        <button
+          @click="auth.logout(); router.push('/login'); mobileMenuOpen = false"
+          class="w-full flex items-center gap-3 px-4 py-3 rounded-xl text-sm font-medium text-rose-400/80 mt-2"
+        >
+          <span class="mdi mdi-logout"></span>
+          Sign out
+        </button>
+      </div>
+
+      <!-- Desktop Header -->
+      <header class="hidden lg:flex items-center justify-between px-8 py-5">
+        <div>
+          <h1 class="text-xl font-display font-bold text-white tracking-tight">{{ route.meta?.title || 'Sonium' }}</h1>
+          <p class="text-xs text-slate-500 mt-0.5">Multi-room audio server control</p>
+        </div>
+        <div class="flex items-center gap-3">
+          <div v-if="store.connectedClients.length" class="flex items-center gap-2 px-4 py-2 rounded-full glass text-xs font-medium text-slate-300">
+            <span class="mdi mdi-speaker text-emerald-400"></span>
+            {{ store.connectedClients.length }} clients online
+          </div>
+          <div class="flex items-center gap-2 px-4 py-2 rounded-full glass text-xs font-medium text-slate-300">
+            <span class="mdi mdi-account-circle text-slate-400"></span>
+            {{ auth.user?.username }}
+            <span class="px-1.5 py-0.5 rounded-md bg-cyan-500/10 text-cyan-400 text-[10px] font-bold uppercase tracking-wider border border-cyan-500/20">{{ auth.user?.role }}</span>
+          </div>
+        </div>
+      </header>
+
+      <!-- Page Content -->
+      <main class="flex-1 px-4 pb-24 lg:px-8 lg:pb-8">
         <slot />
       </main>
-
-      <!-- Mobile bottom nav -->
-      <nav class="lg:hidden mobile-bottomnav safe-bottom">
-        <router-link
-          v-for="item in mobileNav"
-          :key="item.name"
-          :to="item.path"
-          class="mobile-nav-item"
-          :class="{ active: isActive(item.path) }"
-        >
-          <span class="mdi text-xl" :class="item.icon"></span>
-          <span class="text-[10px] font-medium mt-0.5">{{ item.label }}</span>
-        </router-link>
-      </nav>
     </div>
   </div>
 </template>
-
-<style scoped>
-.app-shell {
-  display: flex;
-  min-height: 100vh;
-  background: var(--bg-base);
-}
-
-/* ── Sidebar ──────────────────────────────────────────────────────────── */
-.sidebar {
-  width: 240px;
-  background: var(--bg-surface);
-  border-right: 1px solid var(--border);
-  position: fixed;
-  inset: 0 auto 0 0;
-  z-index: 40;
-  transition: width 0.25s cubic-bezier(0.16, 1, 0.3, 1);
-}
-.sidebar.collapsed {
-  width: 64px;
-}
-.sidebar.collapsed .sidebar-brand {
-  justify-content: center;
-  padding: 16px 0;
-}
-.sidebar.collapsed .logo-img {
-  width: 32px;
-  height: 32px;
-}
-
-.sidebar-brand {
-  display: flex;
-  align-items: center;
-  gap: 10px;
-  padding: 18px 16px 12px;
-  transition: all 0.25s;
-}
-.logo-img {
-  width: 28px;
-  height: 28px;
-  object-fit: contain;
-  flex-shrink: 0;
-}
-.brand-name {
-  font-family: var(--font-display);
-  font-size: 14px;
-  font-weight: 800;
-  letter-spacing: 0.14em;
-  color: var(--text-primary);
-  line-height: 1;
-}
-.brand-version {
-  font-size: 10px;
-  color: var(--text-muted);
-  letter-spacing: 0.02em;
-}
-.brand-text {
-  display: flex;
-  flex-direction: column;
-  gap: 1px;
-}
-
-.sidebar-conn {
-  padding: 0 16px 12px;
-}
-.sidebar.collapsed .sidebar-conn {
-  display: flex;
-  justify-content: center;
-  padding: 0 0 12px;
-}
-.sidebar.collapsed .sidebar-conn :deep(.conn-label) {
-  display: none;
-}
-
-.sidebar-nav {
-  padding: 0 10px;
-  display: flex;
-  flex-direction: column;
-  gap: 2px;
-}
-.sidebar-subnav {
-  padding: 0 10px;
-  display: flex;
-  flex-direction: column;
-  gap: 2px;
-  margin-top: 8px;
-}
-.subnav-divider {
-  height: 1px;
-  background: var(--border);
-  margin: 4px 6px 10px;
-}
-.subnav-title {
-  font-size: 10px;
-  font-weight: 700;
-  letter-spacing: 0.08em;
-  text-transform: uppercase;
-  color: var(--text-muted);
-  padding: 0 8px 6px;
-}
-
-.nav-row {
-  display: flex;
-  align-items: center;
-  gap: 10px;
-  padding: 8px 10px;
-  border-radius: 10px;
-  font-size: 13px;
-  font-weight: 500;
-  color: var(--text-muted);
-  transition: all 0.15s ease;
-  cursor: pointer;
-  border: 1px solid transparent;
-  text-decoration: none;
-}
-.nav-row:hover {
-  color: var(--text-secondary);
-  background: var(--bg-hover);
-}
-.nav-row.active {
-  color: var(--accent);
-  background: var(--accent-dim);
-  border-color: var(--accent-border);
-}
-.nav-row.sub {
-  font-size: 12.5px;
-  padding: 7px 10px;
-}
-.nav-row.danger:hover {
-  color: var(--red);
-  background: var(--red-dim);
-  border-color: var(--red-border);
-}
-.nav-label {
-  white-space: nowrap;
-  overflow: hidden;
-}
-
-.sidebar-footer {
-  padding: 10px;
-  border-top: 1px solid var(--border);
-  display: flex;
-  flex-direction: column;
-  gap: 2px;
-}
-
-/* ── Main area ────────────────────────────────────────────────────────── */
-.main-area {
-  flex: 1;
-  display: flex;
-  flex-direction: column;
-  min-width: 0;
-  margin-left: 240px;
-  transition: margin-left 0.25s cubic-bezier(0.16, 1, 0.3, 1);
-}
-.sidebar.collapsed ~ .main-area {
-  margin-left: 64px;
-}
-
-/* Desktop header */
-.desktop-header {
-  position: sticky;
-  top: 0;
-  z-index: 30;
-  background: rgba(4, 8, 15, 0.85);
-  backdrop-filter: blur(20px);
-  -webkit-backdrop-filter: blur(20px);
-  border-bottom: 1px solid var(--border);
-  padding: 12px 24px;
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-}
-.page-title {
-  font-family: var(--font-display);
-  font-size: 18px;
-  font-weight: 700;
-  color: var(--text-primary);
-  letter-spacing: -0.01em;
-}
-.header-stat {
-  display: inline-flex;
-  align-items: center;
-  gap: 6px;
-  padding: 5px 12px;
-  border-radius: 20px;
-  background: var(--bg-elevated);
-  border: 1px solid var(--border);
-  font-size: 12px;
-  color: var(--text-secondary);
-}
-.user-badge {
-  display: flex;
-  align-items: center;
-  gap: 8px;
-  padding: 5px 12px;
-  border-radius: 20px;
-  background: var(--bg-elevated);
-  border: 1px solid var(--border);
-  color: var(--text-secondary);
-}
-.role-pill {
-  font-size: 9px;
-  font-weight: 700;
-  text-transform: uppercase;
-  letter-spacing: 0.06em;
-  padding: 2px 7px;
-  border-radius: 6px;
-  background: var(--accent-dim);
-  color: var(--accent);
-  border: 1px solid var(--accent-border);
-}
-
-/* Mobile header */
-.mobile-header {
-  position: sticky;
-  top: 0;
-  z-index: 30;
-  background: rgba(4, 8, 15, 0.92);
-  backdrop-filter: blur(16px);
-  -webkit-backdrop-filter: blur(16px);
-  border-bottom: 1px solid var(--border);
-  padding: 10px 16px;
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-}
-
-/* Page content */
-.page-content {
-  flex: 1;
-  padding: 16px;
-  max-width: 1200px;
-  width: 100%;
-  margin: 0 auto;
-}
-@media (min-width: 1024px) {
-  .page-content {
-    padding: 24px;
-  }
-}
-
-/* Mobile bottom nav */
-.mobile-bottomnav {
-  position: fixed;
-  bottom: 0;
-  left: 0;
-  right: 0;
-  z-index: 40;
-  background: rgba(4, 8, 15, 0.94);
-  backdrop-filter: blur(20px);
-  -webkit-backdrop-filter: blur(20px);
-  border-top: 1px solid var(--border);
-  display: flex;
-  justify-content: space-around;
-  padding-bottom: env(safe-area-inset-bottom);
-}
-.mobile-nav-item {
-  flex: 1;
-  display: flex;
-  flex-direction: column;
-  align-items: center;
-  justify-content: center;
-  padding: 8px 4px;
-  color: var(--text-muted);
-  text-decoration: none;
-  transition: color 0.15s;
-}
-.mobile-nav-item.active {
-  color: var(--accent);
-}
-</style>

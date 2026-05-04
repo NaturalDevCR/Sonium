@@ -1,207 +1,115 @@
 <script setup lang="ts">
-import { ref, computed, onMounted, onUnmounted } from 'vue';
+import { computed, onMounted, onUnmounted } from 'vue';
 import { useServerStore } from '@/stores/server';
-import { useAuthStore }   from '@/stores/auth';
-import SyncIndicator      from '@/components/SyncIndicator.vue';
+import SyncIndicator from '@/components/SyncIndicator.vue';
 
-const store  = useServerStore();
-const auth   = useAuthStore();
+const store = useServerStore();
 
 onMounted(() => store.init());
 onUnmounted(() => store.stopLiveUpdates());
 
-// ── Sync health ────────────────────────────────────────────────────────────
 const syncHealth = computed(() => {
-  const health: Record<string, { status: 'good' | 'fair' | 'poor' | 'unknown'; drift_ms: number; buffer_ms: number }> = {};
+  const h: Record<string, { status: 'good' | 'fair' | 'poor' | 'unknown'; drift: number; buffer: number }> = {};
   for (const c of store.connectedClients) {
     const jitter = c.health?.jitter_ms ?? 0;
     const buffer = c.health?.buffer_depth_ms ?? 0;
-    if (jitter === 0) {
-      health[c.id] = { status: 'unknown', drift_ms: 0, buffer_ms: buffer };
-    } else if (jitter < 10) {
-      health[c.id] = { status: 'good', drift_ms: jitter, buffer_ms: buffer };
-    } else if (jitter < 50) {
-      health[c.id] = { status: 'fair', drift_ms: jitter, buffer_ms: buffer };
-    } else {
-      health[c.id] = { status: 'poor', drift_ms: jitter, buffer_ms: buffer };
-    }
+    if (jitter === 0) h[c.id] = { status: 'unknown', drift: 0, buffer };
+    else if (jitter < 10) h[c.id] = { status: 'good', drift: jitter, buffer };
+    else if (jitter < 50) h[c.id] = { status: 'fair', drift: jitter, buffer };
+    else h[c.id] = { status: 'poor', drift: jitter, buffer };
   }
-  return health;
+  return h;
 });
 
-const overallSync = computed(() => {
-  const clients = store.connectedClients;
-  if (clients.length === 0) return { status: 'unknown' as const, issueCount: 0, totalCount: 0 };
-  const healths = clients.map(c => syncHealth.value[c.id]?.status ?? 'unknown');
-  const poor = healths.filter(h => h === 'poor').length;
-  const fair = healths.filter(h => h === 'fair').length;
-  if (poor > 0) return { status: 'poor' as const, issueCount: poor + fair, totalCount: clients.length };
-  if (fair > 0) return { status: 'fair' as const, issueCount: fair, totalCount: clients.length };
-  if (healths.every(h => h === 'good')) return { status: 'good' as const, issueCount: 0, totalCount: clients.length };
-  return { status: 'unknown' as const, issueCount: 0, totalCount: clients.length };
+const overall = computed(() => {
+  const cc = store.connectedClients;
+  if (!cc.length) return { status: 'unknown' as const, issues: 0, total: 0 };
+  const hs = cc.map(c => syncHealth.value[c.id]?.status ?? 'unknown');
+  const poor = hs.filter(h => h === 'poor').length;
+  const fair = hs.filter(h => h === 'fair').length;
+  if (poor) return { status: 'poor' as const, issues: poor + fair, total: cc.length };
+  if (fair) return { status: 'fair' as const, issues: fair, total: cc.length };
+  if (hs.every(h => h === 'good')) return { status: 'good' as const, issues: 0, total: cc.length };
+  return { status: 'unknown' as const, issues: 0, total: cc.length };
 });
-
-function copyChronyCommand() {
-  const cmd = 'sudo apt-get install chrony  # Debian/Ubuntu\nsudo systemctl enable --now chronyd';
-  navigator.clipboard.writeText(cmd);
-  copied.value = true;
-  setTimeout(() => copied.value = false, 2000);
-}
-
-const copied = ref(false);
 </script>
 
 <template>
-  <div class="sync-root">
-    <!-- ── Header row ───────────────────────────────────────────────────── -->
-    <div class="flex items-center justify-between mb-4">
-      <SyncIndicator
-        :status="overallSync.status"
-        :issue-count="overallSync.issueCount"
-        :total-count="overallSync.totalCount"
-      />
+  <div class="max-w-3xl mx-auto space-y-5">
+    <!-- Overall Status Card -->
+    <div class="glass p-5 flex items-center justify-between">
+      <div class="flex items-center gap-4">
+        <div
+          class="w-12 h-12 rounded-2xl flex items-center justify-center"
+          :class="overall.status === 'good' ? 'bg-emerald-500/10 border border-emerald-500/20' :
+                  overall.status === 'fair' ? 'bg-amber-500/10 border border-amber-500/20' :
+                  overall.status === 'poor' ? 'bg-rose-500/10 border border-rose-500/20' :
+                  'bg-slate-500/10 border border-slate-500/20'"
+        >
+          <span class="mdi text-xl"
+            :class="overall.status === 'good' ? 'mdi-check-circle text-emerald-400' :
+                    overall.status === 'fair' ? 'mdi-alert-circle text-amber-400' :
+                    overall.status === 'poor' ? 'mdi-close-circle text-rose-400' :
+                    'mdi-help-circle text-slate-500'"
+          ></span>
+        </div>
+        <div>
+          <div class="text-sm font-semibold text-white">
+            {{ overall.status === 'good' ? 'Sync is healthy' :
+               overall.status === 'fair' ? 'Sync could be better' :
+               overall.status === 'poor' ? 'Sync issues detected' : 'Sync status unknown' }}
+          </div>
+          <div class="text-xs text-slate-500">
+            {{ store.connectedClients.length }} clients · {{ overall.issues }} issues
+          </div>
+        </div>
+      </div>
+      <SyncIndicator :status="overall.status" :issue-count="overall.issues" :total-count="overall.total" />
     </div>
 
-    <!-- ── Content ──────────────────────────────────────────────────────── -->
-    <main>
-      <!-- Chrony recommendation if sync is poor -->
+    <!-- Client List -->
+    <div class="space-y-3">
+      <div class="text-[10px] font-bold text-slate-600 uppercase tracking-wider px-1">Client Sync Status</div>
+
+      <div v-if="store.connectedClients.length === 0" class="glass p-10 text-center animate-fade-up">
+        <span class="mdi mdi-speaker-off text-3xl text-slate-700 block mb-3"></span>
+        <p class="text-sm text-slate-500">No clients connected</p>
+      </div>
+
       <div
-        v-if="overallSync.status === 'poor' || overallSync.status === 'fair'"
-        class="chrony-banner"
+        v-for="client in store.connectedClients"
+        :key="client.id"
+        class="glass p-4 animate-fade-up"
       >
-        <div class="flex items-start gap-3">
-          <span class="mdi mdi-information-outline text-xl shrink-0" style="color: #f59e0b;"></span>
+        <div class="flex items-center justify-between gap-3 mb-3">
+          <div class="flex items-center gap-2.5">
+            <span
+              class="w-2 h-2 rounded-full"
+              :class="syncHealth[client.id]?.status === 'good' ? 'bg-emerald-400 shadow-[0_0_8px_rgba(52,211,153,0.5)]' :
+                      syncHealth[client.id]?.status === 'fair' ? 'bg-amber-400 shadow-[0_0_8px_rgba(251,191,36,0.5)]' :
+                      syncHealth[client.id]?.status === 'poor' ? 'bg-rose-400 shadow-[0_0_8px_rgba(244,63,94,0.5)]' :
+                      'bg-slate-600'"
+            ></span>
+            <span class="text-sm font-medium text-white">{{ client.hostname }}</span>
+          </div>
+          <SyncIndicator :status="syncHealth[client.id]?.status ?? 'unknown'" :issue-count="0" :total-count="1" />
+        </div>
+
+        <div class="grid grid-cols-3 gap-3 pt-3 border-t border-white/[0.04]">
           <div>
-            <p class="font-semibold text-sm" style="color: #fbbf24;">Sync could be better</p>
-            <p class="text-xs mt-1" style="color: var(--text-muted);">
-              For sample-accurate multi-room sync, install chrony on all devices.
-            </p>
-            <button
-              @click="copyChronyCommand"
-              class="chrony-btn"
-            >
-              <span class="mdi mr-1" :class="copied ? 'mdi-check' : 'mdi-content-copy'"></span>
-              {{ copied ? 'Copied!' : 'Copy install command' }}
-            </button>
+            <div class="text-[10px] text-slate-600 uppercase tracking-wider mb-1">Drift</div>
+            <div class="text-sm font-mono font-medium text-slate-200">{{ syncHealth[client.id]?.drift.toFixed(1) ?? '—' }} <span class="text-slate-600 text-xs">ms</span></div>
+          </div>
+          <div>
+            <div class="text-[10px] text-slate-600 uppercase tracking-wider mb-1">Buffer</div>
+            <div class="text-sm font-mono font-medium text-slate-200">{{ syncHealth[client.id]?.buffer.toFixed(0) ?? '—' }} <span class="text-slate-600 text-xs">ms</span></div>
+          </div>
+          <div>
+            <div class="text-[10px] text-slate-600 uppercase tracking-wider mb-1">Latency</div>
+            <div class="text-sm font-mono font-medium text-slate-200">{{ client.latency_ms }} <span class="text-slate-600 text-xs">ms</span></div>
           </div>
         </div>
       </div>
-
-      <!-- Client sync table -->
-      <div class="pt-2 pb-8 space-y-3">
-        <h2 class="section-label">Client Sync Status</h2>
-
-        <div v-if="store.connectedClients.length === 0" class="text-center py-12">
-          <span class="mdi mdi-speaker-off text-4xl block mb-3" style="color: var(--text-muted);"></span>
-          <p style="color: var(--text-muted); font-size: 13px;">No clients connected</p>
-        </div>
-
-        <div
-          v-for="client in store.connectedClients"
-          :key="client.id"
-          class="client-sync-card"
-        >
-          <div class="flex items-center justify-between gap-3">
-            <div class="flex items-center gap-2.5 min-w-0">
-              <span
-                class="w-2 h-2 rounded-full shrink-0"
-                :style="{ background: syncHealth[client.id]?.status === 'good' ? '#22c55e' :
-                                  syncHealth[client.id]?.status === 'fair' ? '#f59e0b' :
-                                  syncHealth[client.id]?.status === 'poor' ? '#ef4444' :
-                                  'var(--text-muted)' }"
-              ></span>
-              <span class="font-medium truncate" style="font-size: 13px; color: var(--text-primary);">
-                {{ client.hostname }}
-              </span>
-            </div>
-            <SyncIndicator
-              :status="syncHealth[client.id]?.status ?? 'unknown'"
-              :issue-count="0"
-              :total-count="1"
-            />
-          </div>
-
-          <div class="sync-grid">
-            <div>
-              <p class="sync-label">Drift</p>
-              <p class="sync-value">
-                {{ syncHealth[client.id]?.drift_ms.toFixed(1) ?? '—' }} ms
-              </p>
-            </div>
-            <div>
-              <p class="sync-label">Buffer</p>
-              <p class="sync-value">
-                {{ syncHealth[client.id]?.buffer_ms.toFixed(0) ?? '—' }} ms
-              </p>
-            </div>
-            <div>
-              <p class="sync-label">Latency</p>
-              <p class="sync-value">
-                {{ client.latency_ms }} ms
-              </p>
-            </div>
-          </div>
-        </div>
-      </div>
-    </main>
+    </div>
   </div>
 </template>
-
-<style scoped>
-.sync-root {
-  max-width: 720px;
-  margin: 0 auto;
-}
-
-.chrony-banner {
-  margin-bottom: 16px;
-  padding: 16px;
-  border-radius: 12px;
-  background: rgba(245, 158, 11, 0.08);
-  border: 1px solid rgba(245, 158, 11, 0.3);
-}
-.chrony-btn {
-  margin-top: 8px;
-  font-size: 12px;
-  font-weight: 500;
-  padding: 6px 12px;
-  border-radius: 8px;
-  border: 1px solid rgba(245, 158, 11, 0.4);
-  color: #fbbf24;
-  background: transparent;
-  cursor: pointer;
-  transition: all 0.15s;
-}
-.chrony-btn:hover {
-  background: rgba(245, 158, 11, 0.1);
-}
-
-.client-sync-card {
-  background: var(--bg-surface);
-  border: 1px solid var(--border);
-  border-radius: 12px;
-  padding: 14px 16px;
-  transition: border-color 0.2s;
-}
-.client-sync-card:hover { border-color: var(--border-mid); }
-
-.sync-grid {
-  display: grid;
-  grid-template-columns: repeat(3, 1fr);
-  gap: 12px;
-  margin-top: 12px;
-  padding-top: 12px;
-  border-top: 1px solid var(--border);
-}
-.sync-label {
-  font-size: 11px;
-  color: var(--text-muted);
-  margin-bottom: 2px;
-}
-.sync-value {
-  font-size: 13px;
-  font-family: var(--font-mono);
-  font-weight: 500;
-  color: var(--text-primary);
-}
-</style>

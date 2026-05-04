@@ -1,39 +1,21 @@
 <script setup lang="ts">
 import { useRouter } from 'vue-router';
-
 const router = useRouter();
 </script>
 
 <template>
-  <div class="notfound-root">
-    <div class="text-center">
-      <span class="mdi mdi-magnify-close text-6xl block mb-4" style="color: var(--text-muted);"></span>
-      <h1 class="notfound-title">Page not found</h1>
-      <p class="notfound-sub">The page you are looking for doesn't exist.</p>
-      <button @click="router.push('/')" class="btn-primary mt-6 justify-center">
-        <span class="mdi mdi-arrow-left mr-1"></span>
-        Back to Dashboard
-      </button>
+  <div class="flex flex-col items-center justify-center py-24 animate-fade-up">
+    <div class="relative mb-6">
+      <div class="w-20 h-20 rounded-2xl bg-gradient-to-br from-cyan-500/10 to-violet-500/10 border border-white/[0.08] flex items-center justify-center">
+        <span class="mdi mdi-magnify-close text-3xl text-slate-600"></span>
+      </div>
+      <div class="absolute -inset-3 bg-cyan-500/5 blur-2xl rounded-full"></div>
     </div>
+    <h1 class="text-xl font-display font-bold text-white mb-1">Page not found</h1>
+    <p class="text-sm text-slate-500 mb-6">The page you are looking for doesn't exist.</p>
+    <button @click="router.push('/')" class="btn-gradient">
+      <span class="mdi mdi-arrow-left"></span>
+      Back to Dashboard
+    </button>
   </div>
 </template>
-
-<style scoped>
-.notfound-root {
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  min-height: 60vh;
-}
-.notfound-title {
-  font-family: var(--font-display);
-  font-size: 22px;
-  font-weight: 700;
-  color: var(--text-primary);
-  margin-bottom: 4px;
-}
-.notfound-sub {
-  font-size: 13px;
-  color: var(--text-muted);
-}
-</style>

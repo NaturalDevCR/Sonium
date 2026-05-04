@@ -1,58 +1,25 @@
 <script setup lang="ts">
-import { computed } from 'vue';
+const props = defineProps<{
+  status: 'playing' | 'idle' | 'error';
+  codec?: string;
+}>();
 
-const props = defineProps<{ status: 'playing' | 'idle' | 'error' | string; codec?: string }>();
+const config = {
+  playing: { bg: 'bg-emerald-500/10', text: 'text-emerald-400', border: 'border-emerald-500/20', label: 'Playing', dot: 'bg-emerald-400' },
+  idle:    { bg: 'bg-slate-500/10',   text: 'text-slate-400',   border: 'border-slate-500/20',   label: 'Idle',    dot: 'bg-slate-500' },
+  error:   { bg: 'bg-rose-500/10',    text: 'text-rose-400',    border: 'border-rose-500/20',    label: 'Error',   dot: 'bg-rose-400' },
+};
 
-const cfg = computed(() => {
-  const map: Record<string, { dot: string; text: string; bg: string; border: string; pulse: boolean; label: string }> = {
-    playing: {
-      dot:    '#34d399',
-      text:   '#34d399',
-      bg:     'rgba(52, 211, 153, 0.07)',
-      border: 'rgba(52, 211, 153, 0.2)',
-      pulse:  true,
-      label:  'Playing',
-    },
-    idle: {
-      dot:    '#4a5a6e',
-      text:   '#4a5a6e',
-      bg:     'rgba(74, 90, 110, 0.06)',
-      border: 'rgba(74, 90, 110, 0.14)',
-      pulse:  false,
-      label:  'Idle',
-    },
-    error: {
-      dot:    '#f87171',
-      text:   '#f87171',
-      bg:     'rgba(248, 113, 113, 0.07)',
-      border: 'rgba(248, 113, 113, 0.2)',
-      pulse:  false,
-      label:  'Error',
-    },
-  };
-  return map[props.status] ?? map.idle;
-});
+const c = config[props.status];
 </script>
 
 <template>
   <span
-    class="inline-flex items-center gap-1.5 px-2.5 py-1 rounded-full text-xs font-semibold shrink-0"
-    :style="{
-      background: cfg.bg,
-      border: `1px solid ${cfg.border}`,
-      color: cfg.text,
-      fontFamily: 'var(--font-display)',
-      letterSpacing: '0.02em',
-    }"
+    class="inline-flex items-center gap-1.5 px-2.5 py-1 rounded-lg text-[10px] font-bold tracking-wider uppercase border"
+    :class="[c.bg, c.text, c.border]"
   >
-    <span
-      class="w-1.5 h-1.5 rounded-full shrink-0"
-      :class="cfg.pulse ? 'pulse-dot' : ''"
-      :style="{ background: cfg.dot }"
-    ></span>
-    {{ cfg.label }}
-    <span v-if="codec && status === 'playing'" style="opacity: 0.45; font-family: var(--font-mono); font-size: 10px;">
-      {{ codec.toUpperCase() }}
-    </span>
+    <span class="w-1.5 h-1.5 rounded-full" :class="c.dot"></span>
+    {{ c.label }}
+    <span v-if="codec" class="opacity-60">· {{ codec.toUpperCase() }}</span>
   </span>
 </template>
