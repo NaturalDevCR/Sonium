@@ -231,6 +231,7 @@ impl PlaybackTimeline {
             }
 
             let Some(chunk) = self.current.as_mut() else {
+                let is_genuine_underrun = self.buffer.is_empty();
                 let remaining_frames = (out.len() - sample_pos) / channels;
                 let silence_frames = self
                     .buffer
@@ -244,7 +245,7 @@ impl PlaybackTimeline {
                     })
                     .unwrap_or(remaining_frames)
                     .clamp(1, remaining_frames);
-                if fade.phase == FadePhase::Playing {
+                if is_genuine_underrun && fade.phase == FadePhase::Playing {
                     health.underrun_count.fetch_add(1, Ordering::Relaxed);
                 }
                 let silence_samples = silence_frames * channels;
@@ -340,6 +341,7 @@ impl PlaybackTimeline {
             }
 
             let Some(chunk) = self.current.as_mut() else {
+                let is_genuine_underrun = self.buffer.is_empty();
                 let remaining_frames = (out.len() - sample_pos) / channels;
                 let silence_frames = self
                     .buffer
@@ -353,7 +355,7 @@ impl PlaybackTimeline {
                     })
                     .unwrap_or(remaining_frames)
                     .clamp(1, remaining_frames);
-                if fade.phase == FadePhase::Playing {
+                if is_genuine_underrun && fade.phase == FadePhase::Playing {
                     health.underrun_count.fetch_add(1, Ordering::Relaxed);
                 }
                 let silence_samples = silence_frames * channels;
@@ -442,6 +444,7 @@ impl PlaybackTimeline {
             }
 
             let Some(chunk) = self.current.as_mut() else {
+                let is_genuine_underrun = self.buffer.is_empty();
                 let remaining_frames = (out.len() - sample_pos) / channels;
                 let silence_frames = self
                     .buffer
@@ -455,7 +458,7 @@ impl PlaybackTimeline {
                     })
                     .unwrap_or(remaining_frames)
                     .clamp(1, remaining_frames);
-                if fade.phase == FadePhase::Playing {
+                if is_genuine_underrun && fade.phase == FadePhase::Playing {
                     health.underrun_count.fetch_add(1, Ordering::Relaxed);
                 }
                 let silence_samples = silence_frames * channels;
@@ -1314,7 +1317,8 @@ mod tests {
 
         assert_eq!(early, [0, 0, 0, 0, 0]);
         assert_eq!(timeline.buffer.buffer_depth_us(), 5_000);
-        assert_eq!(health.underrun_count.load(Ordering::Relaxed), 1);
+        // Chunk is scheduled for the future — this is a wait, not an underrun.
+        assert_eq!(health.underrun_count.load(Ordering::Relaxed), 0);
 
         let mut due = [0i16; 5];
         let mut fade = FadeState::new(1);
@@ -1322,6 +1326,19 @@ mod tests {
 
         assert_eq!(due, [1, 2, 3, 4, 5]);
         assert!(timeline.current.is_none());
+    }
+
+    #[test]
+    fn callback_timeline_counts_underrun_when_buffer_empty() {
+        let fmt = mono_1khz();
+        let mut timeline = PlaybackTimeline::new(fmt);
+        let health = HealthState::default();
+        let mut fade = FadeState::new(1);
+
+        let mut out = [0i16; 5];
+        timeline.fill_i16(&mut out, 0, &health, &mut fade);
+
+        assert_eq!(health.underrun_count.load(Ordering::Relaxed), 1);
     }
 
     #[test]

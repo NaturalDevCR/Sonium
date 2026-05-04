@@ -474,7 +474,7 @@ async fn connect_and_run(
                                 let server_lat_us = time_msg.latency.to_micros();
                                 time_provider.update(sent_us, recv_us, server_lat_us);
                                 if let Some(offset) = playback_offset.as_ref() {
-                                    offset.store(time_provider.offset_us(), std::sync::atomic::Ordering::Relaxed);
+                                    offset.store(time_provider.total_offset_us(), std::sync::atomic::Ordering::Relaxed);
                                 }
                                 let offset_ms = time_provider.offset_us() / 1000;
                                 let rtt_ms = rtt_us / 1000;
@@ -495,17 +495,30 @@ async fn connect_and_run(
 
                     MessageType::GroupSync => {
                         if let Ok(Message::GroupSync(gs)) = Message::from_payload(&hdr, &payload) {
+                            // Ignore group sync until NTP offset has converged a bit.
+                            if time_provider.sample_count() < 10 {
+                                debug!("GroupSync ignored: NTP sync not yet stable");
+                                continue;
+                            }
                             let local_now_us = now_us();
                             let local_server_time = time_provider.to_server_time(local_now_us);
                             let diff_us = local_server_time - gs.server_now_us;
                             let diff_ms = diff_us / 1000;
-                            if diff_ms.abs() > 50 {
-                                warn!(diff_ms, "GroupSync drift > 50ms — clock sync diverging");
+                            // Ignore single network spikes (> 100 ms).
+                            if diff_ms.abs() > 100 {
+                                warn!(diff_ms, "GroupSync spike ignored (network jitter?)");
                             } else {
-                                debug!(diff_ms, "GroupSync ok");
+                                if diff_ms.abs() > 10 {
+                                    warn!(diff_ms, "GroupSync drift > 10ms — nudging");
+                                } else {
+                                    debug!(diff_ms, "GroupSync ok");
+                                }
+                                time_provider.nudge_group_offset(diff_us);
                             }
-                            // Nudge the group offset to keep all clients aligned.
-                            time_provider.nudge_group_offset(diff_us);
+                            // Propagate the corrected total offset to the audio callback.
+                            if let Some(offset) = playback_offset.as_ref() {
+                                offset.store(time_provider.total_offset_us(), std::sync::atomic::Ordering::Relaxed);
+                            }
                         }
                     }
 

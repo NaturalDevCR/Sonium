@@ -175,6 +175,11 @@ impl TimeProvider {
         self.offset_us.load(Ordering::Relaxed)
     }
 
+    /// Total offset including both NTP and group correction.
+    pub fn total_offset_us(&self) -> i64 {
+        self.offset_us.load(Ordering::Relaxed) + self.group_offset_us.load(Ordering::Relaxed)
+    }
+
     /// Current group offset in microseconds.
     pub fn group_offset_us(&self) -> i64 {
         self.group_offset_us.load(Ordering::Relaxed)
@@ -213,16 +218,16 @@ impl TimeProvider {
     ///
     /// `diff_us` is `local_server_time - expected_server_time`.
     /// A positive diff means the local clock is *ahead* of the group median,
-    /// so we add a positive group_offset to slow down local playout.
+    /// so we subtract from group_offset to slow down local playout.
     ///
-    /// The correction is damped (25 % of the observed error) to avoid
-    /// audible pitch shifts.
+    /// The correction is damped (5 % of the observed error) and clamped
+    /// to ±50 ms to prevent runaway.
     pub fn nudge_group_offset(&self, diff_us: i64) {
-        // Dampen: only correct 25 % of the observed error per nudge.
-        const DAMPING: i64 = 4;
-        let correction = diff_us / DAMPING;
+        const DAMPING: f64 = 20.0;
+        const MAX_GROUP_OFFSET_US: i64 = 50_000;
+        let correction = (diff_us as f64 / DAMPING) as i64;
         let current = self.group_offset_us.load(Ordering::Relaxed);
-        let new = current + correction;
+        let new = (current - correction).clamp(-MAX_GROUP_OFFSET_US, MAX_GROUP_OFFSET_US);
         self.group_offset_us.store(new, Ordering::Relaxed);
     }
 
