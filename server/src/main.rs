@@ -20,6 +20,7 @@ use tokio::time::Duration;
 
 use sonium_common::config::{ServerConfig, StreamSource};
 use sonium_control::{ws::Event, EventBus, PersistenceStore, ServerState, UserStore};
+use sonium_transport::TransportMode;
 
 use broadcaster::{new_registry, register, BroadcasterRegistry};
 
@@ -173,8 +174,20 @@ async fn main() -> anyhow::Result<()> {
     ));
     let registry = new_registry();
 
+    // Auto-assign a UDP port when the transport mode requires it but udp_port was left at 0.
+    let effective_udp_port = if cfg.server.transport.udp_port > 0 {
+        cfg.server.transport.udp_port
+    } else if matches!(
+        cfg.server.transport.mode,
+        TransportMode::RtpUdp | TransportMode::Rist
+    ) {
+        cfg.server.stream_port + 2
+    } else {
+        0
+    };
+
     // Initialise runtime config from the loaded config file.
-    state.set_transport_config(cfg.server.transport.mode, cfg.server.transport.udp_port);
+    state.set_transport_config(cfg.server.transport.mode, effective_udp_port);
     state.set_timezone(cfg.timezone.clone());
 
     // Restore persisted groups before any clients connect.
@@ -264,8 +277,8 @@ async fn main() -> anyhow::Result<()> {
     }
 
     // ── UDP socket for RTP/UDP media delivery (Phase 2) ──────────────────
-    let udp_socket: Option<Arc<UdpSocket>> = if cfg.server.transport.udp_port > 0 {
-        let udp_addr = format!("{}:{}", cfg.server.bind, cfg.server.transport.udp_port);
+    let udp_socket: Option<Arc<UdpSocket>> = if effective_udp_port > 0 {
+        let udp_addr = format!("{}:{}", cfg.server.bind, effective_udp_port);
         match UdpSocket::bind(&udp_addr).await {
             Ok(sock) => {
                 info!("RTP/UDP media socket bound to {udp_addr}");

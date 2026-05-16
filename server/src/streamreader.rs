@@ -420,7 +420,7 @@ async fn run_pipe(
         let mut child = Command::new(&cmd)
             .args(&args)
             .stdout(std::process::Stdio::piped())
-            .stderr(std::process::Stdio::null())
+            .stderr(std::process::Stdio::piped())
             .kill_on_drop(true)
             .spawn()
             .map_err(|e| anyhow::anyhow!("[{stream_id}] spawn `{cmd}`: {e}"))?;
@@ -429,6 +429,18 @@ async fn run_pipe(
             .stdout
             .take()
             .ok_or_else(|| anyhow::anyhow!("[{stream_id}] no stdout from child"))?;
+
+        // Drain stderr in a background task (bounded to 8 KiB) so it never blocks the child.
+        let stderr_task = {
+            let mut se = child.stderr.take();
+            tokio::spawn(async move {
+                let mut buf = Vec::with_capacity(8192);
+                if let Some(ref mut reader) = se {
+                    let _ = AsyncReadExt::take(reader, 8192).read_to_end(&mut buf).await;
+                }
+                buf
+            })
+        };
 
         let result = run_reader(
             stdout,
@@ -445,18 +457,34 @@ async fn run_pipe(
         .await;
 
         match child.try_wait() {
-            Ok(Some(status)) => warn!(stream = stream_id, %status, "External audio source exited"),
+            Ok(Some(status)) if !status.success() => {
+                let stderr_bytes = stderr_task.await.unwrap_or_default();
+                let stderr_str = String::from_utf8_lossy(&stderr_bytes);
+                let tail = stderr_str.trim();
+                if tail.is_empty() {
+                    warn!(stream = stream_id, %status, "External audio source exited");
+                } else {
+                    warn!(stream = stream_id, %status, stderr = %tail, "External audio source exited");
+                }
+            }
+            Ok(Some(_status)) => {
+                let _ = stderr_task.await;
+            }
             Ok(None) => {
                 info!(
                     stream = stream_id,
                     "Stopping external audio source after input ended"
                 );
                 let _ = child.kill().await;
+                let _ = stderr_task.await;
             }
-            Err(e) => warn!(
-                stream = stream_id,
-                "Error checking external audio source: {e}"
-            ),
+            Err(e) => {
+                let _ = stderr_task.await;
+                warn!(
+                    stream = stream_id,
+                    "Error checking external audio source: {e}"
+                );
+            }
         }
 
         if let Err(e) = result {

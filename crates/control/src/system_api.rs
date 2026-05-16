@@ -269,19 +269,12 @@ async fn post_restart() -> Response {
                 tokio::time::sleep(Duration::from_millis(350)).await;
                 tracing::warn!(command = %cmd.label, "Sonium server restart requested via control API");
 
-                match Command::new(&cmd.program).args(&cmd.args).output().await {
-                    Ok(output) if output.status.success() => {
-                        tracing::info!("Restart command accepted by system supervisor");
-                    }
-                    Ok(output) => {
-                        let stderr = String::from_utf8_lossy(&output.stderr);
-                        tracing::error!(
-                            status = ?output.status.code(),
-                            stderr = %stderr.trim(),
-                            "Restart command failed"
-                        );
-                    }
-                    Err(e) => tracing::error!("Failed to run restart command: {e}"),
+                // Use spawn() instead of output() — systemctl will send SIGTERM to this
+                // process, so we won't be alive to read the command's exit status anyway.
+                // The child outlives us and systemd handles the restart.
+                match Command::new(&cmd.program).args(&cmd.args).spawn() {
+                    Ok(_child) => {}
+                    Err(e) => tracing::error!("Failed to spawn restart command: {e}"),
                 }
             });
 
