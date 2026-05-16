@@ -1,6 +1,51 @@
 @import "tailwindcss";
 @import "@mdi/font/css/materialdesignicons.min.css";
 
+/* ── Design tokens ────────────────────────────────────────────────────── */
+:root {
+  /* Text */
+  --text-primary:   #f1f5f9;
+  --text-secondary: #94a3b8;
+  --text-muted:     #475569;
+
+  /* Surfaces */
+  --bg-base:        #030712;
+  --bg-surface:     rgba(15, 23, 42, 0.55);
+  --bg-elevated:    rgba(15, 23, 42, 0.80);
+  --bg-hover:       rgba(255, 255, 255, 0.05);
+
+  /* Borders */
+  --border:         rgba(255, 255, 255, 0.07);
+  --border-dim:     rgba(255, 255, 255, 0.04);
+  --border-mid:     rgba(255, 255, 255, 0.11);
+
+  /* Accent — cyan */
+  --accent:         #22d3ee;
+  --accent-dim:     rgba(34, 211, 238, 0.08);
+  --accent-mid:     rgba(34, 211, 238, 0.45);
+  --accent-border:  rgba(34, 211, 238, 0.22);
+
+  /* Semantic — green */
+  --green:          #34d399;
+  --green-dim:      rgba(16, 185, 129, 0.10);
+  --green-border:   rgba(16, 185, 129, 0.25);
+
+  /* Semantic — red */
+  --red:            #fb7185;
+  --red-dim:        rgba(244, 63, 94, 0.10);
+  --red-border:     rgba(244, 63, 94, 0.25);
+
+  /* Semantic — amber */
+  --amber:          #fbbf24;
+  --amber-dim:      rgba(245, 158, 11, 0.10);
+  --amber-border:   rgba(245, 158, 11, 0.25);
+
+  /* Font aliases (mirror @theme) */
+  --font-sans:    'DM Sans', system-ui, sans-serif;
+  --font-display: 'Syne', system-ui, sans-serif;
+  --font-mono:    'DM Mono', 'JetBrains Mono', monospace;
+}
+
 @theme {
   --font-sans:    'DM Sans', system-ui, sans-serif;
   --font-display: 'Syne', system-ui, sans-serif;
@@ -227,7 +272,196 @@ body {
   .status-dot.error   { background: #f43f5e; box-shadow: 0 0 8px rgba(244,63,94,0.5); }
   .status-dot.offline { background: #475569; }
 
-  /* Volume slider */
+  /* ── Cards ─────────────────────────────────────────────────────────── */
+  .card {
+    background: rgba(15, 23, 42, 0.60);
+    border: 1px solid var(--border-mid);
+    border-radius: 14px;
+  }
+  .card-elevated {
+    background: rgba(15, 23, 42, 0.85);
+    border: 1px solid var(--border-mid);
+    border-radius: 14px;
+    box-shadow: 0 8px 32px rgba(0, 0, 0, 0.35);
+  }
+
+  /* ── Action buttons ─────────────────────────────────────────────────── */
+  .btn-primary {
+    display: inline-flex;
+    align-items: center;
+    gap: 7px;
+    padding: 9px 16px;
+    border-radius: 10px;
+    background: linear-gradient(135deg, #06b6d4, #7c3aed);
+    color: #fff;
+    font-size: 13px;
+    font-weight: 600;
+    cursor: pointer;
+    border: none;
+    transition: opacity 0.2s, transform 0.15s, box-shadow 0.2s;
+    box-shadow: 0 3px 14px rgba(6, 182, 212, 0.30);
+    white-space: nowrap;
+  }
+  .btn-primary:hover:not(:disabled) {
+    opacity: 0.92;
+    transform: translateY(-1px);
+    box-shadow: 0 5px 20px rgba(6, 182, 212, 0.40);
+  }
+  .btn-primary:disabled {
+    opacity: 0.45;
+    cursor: not-allowed;
+    transform: none;
+  }
+
+  .btn-secondary {
+    display: inline-flex;
+    align-items: center;
+    gap: 7px;
+    padding: 9px 16px;
+    border-radius: 10px;
+    background: rgba(255, 255, 255, 0.07);
+    border: 1px solid rgba(255, 255, 255, 0.12);
+    color: var(--text-primary);
+    font-size: 13px;
+    font-weight: 500;
+    cursor: pointer;
+    transition: background 0.2s, border-color 0.2s;
+    white-space: nowrap;
+  }
+  .btn-secondary:hover:not(:disabled) {
+    background: rgba(255, 255, 255, 0.11);
+    border-color: rgba(255, 255, 255, 0.18);
+  }
+  .btn-secondary:disabled { opacity: 0.45; cursor: not-allowed; }
+
+  .btn-ghost {
+    display: inline-flex;
+    align-items: center;
+    gap: 7px;
+    padding: 8px 14px;
+    border-radius: 9px;
+    background: transparent;
+    border: 1px solid var(--border-mid);
+    color: var(--text-secondary);
+    font-size: 12.5px;
+    font-weight: 500;
+    cursor: pointer;
+    transition: background 0.2s, border-color 0.2s, color 0.2s;
+    white-space: nowrap;
+  }
+  .btn-ghost:hover:not(:disabled) {
+    background: var(--bg-hover);
+    border-color: rgba(255, 255, 255, 0.18);
+    color: var(--text-primary);
+  }
+  .btn-ghost:disabled { opacity: 0.45; cursor: not-allowed; }
+
+  .btn-danger {
+    display: inline-flex;
+    align-items: center;
+    gap: 7px;
+    padding: 9px 16px;
+    border-radius: 10px;
+    background: rgba(244, 63, 94, 0.10);
+    border: 1px solid var(--red-border);
+    color: var(--red);
+    font-size: 13px;
+    font-weight: 500;
+    cursor: pointer;
+    transition: background 0.2s, border-color 0.2s;
+    white-space: nowrap;
+  }
+  .btn-danger:hover:not(:disabled) {
+    background: rgba(244, 63, 94, 0.18);
+    border-color: rgba(244, 63, 94, 0.40);
+  }
+  .btn-danger:disabled { opacity: 0.45; cursor: not-allowed; }
+
+  /* ── Icon buttons ───────────────────────────────────────────────────── */
+  .icon-btn {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    width: 32px;
+    height: 32px;
+    border-radius: 8px;
+    background: transparent;
+    border: 1px solid var(--border-mid);
+    color: var(--text-muted);
+    cursor: pointer;
+    transition: background 0.15s, color 0.15s, border-color 0.15s;
+  }
+  .icon-btn:hover { background: var(--bg-hover); color: var(--text-primary); border-color: rgba(255,255,255,0.16); }
+  .icon-btn-sm {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    width: 26px;
+    height: 26px;
+    border-radius: 6px;
+    font-size: 13px;
+    background: transparent;
+    border: 1px solid var(--border-mid);
+    color: var(--text-muted);
+    cursor: pointer;
+    transition: background 0.15s, color 0.15s, border-color 0.15s;
+  }
+  .icon-btn-sm:hover { background: var(--bg-hover); color: var(--text-primary); border-color: rgba(255,255,255,0.16); }
+  .icon-btn-ok:hover  { background: var(--green-dim); border-color: var(--green-border); color: var(--green); }
+  .icon-btn-danger:hover { background: var(--red-dim); border-color: var(--red-border); color: var(--red); }
+
+  /* ── Form fields ────────────────────────────────────────────────────── */
+  .field {
+    width: 100%;
+    background: rgba(2, 6, 23, 0.65);
+    border: 1px solid var(--border-mid);
+    border-radius: 9px;
+    padding: 9px 12px;
+    color: var(--text-primary);
+    font-size: 13px;
+    font-family: var(--font-sans);
+    outline: none;
+    transition: border-color 0.2s, box-shadow 0.2s;
+    appearance: none;
+    -webkit-appearance: none;
+  }
+  .field::placeholder { color: var(--text-muted); }
+  .field:focus {
+    border-color: var(--accent-border);
+    box-shadow: 0 0 0 3px rgba(34, 211, 238, 0.10);
+  }
+  .field:disabled { opacity: 0.50; cursor: not-allowed; }
+  .field-mono { font-family: var(--font-mono); font-size: 12px; }
+
+  /* Native select arrow */
+  select.field {
+    background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='12' height='8' viewBox='0 0 12 8'%3E%3Cpath fill='%2364748b' d='M1 1l5 5 5-5'/%3E%3C/svg%3E");
+    background-repeat: no-repeat;
+    background-position: right 10px center;
+    padding-right: 30px;
+  }
+
+  /* ── Badge / pill ───────────────────────────────────────────────────── */
+  .badge {
+    display: inline-flex;
+    align-items: center;
+    gap: 4px;
+    padding: 3px 8px;
+    border-radius: 99px;
+    font-size: 11px;
+    font-weight: 600;
+    border: 1px solid;
+  }
+
+  /* ── Stat card ──────────────────────────────────────────────────────── */
+  .stat-card {
+    background: rgba(15, 23, 42, 0.60);
+    border: 1px solid var(--border-mid);
+    border-radius: 12px;
+    padding: 16px 18px;
+  }
+
+  /* ── Volume slider */
   .slider-glass {
     -webkit-appearance: none;
     appearance: none;
@@ -252,6 +486,14 @@ body {
     transform: scale(1.25);
   }
 }
+
+/* ── Animation helpers ────────────────────────────────────────────────── */
+.anim-scale-in { animation: scale-in 0.25s cubic-bezier(0.16,1,0.3,1) forwards; }
+
+@keyframes spin-icon {
+  to { transform: rotate(360deg); }
+}
+.spin { animation: spin-icon 0.8s linear infinite; display: inline-block; }
 
 /* ── Safe areas ───────────────────────────────────────────────────────── */
 .safe-top    { padding-top: env(safe-area-inset-top); }

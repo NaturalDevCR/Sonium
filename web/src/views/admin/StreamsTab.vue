@@ -828,12 +828,14 @@ async function restartServer() {
     </Transition>
 
     <!-- Stream list -->
-    <div v-if="auth.isAdmin" class="card p-5 space-y-4">
-      <div>
-        <h2 class="font-semibold" style="font-size:14px;color:var(--text-primary);">Global latency tuning</h2>
-        <p style="font-size:12px;color:var(--text-muted);margin-top:4px;">
-          Stream-level <code>buffer_ms</code> and <code>chunk_ms</code> overrides always take priority over these global defaults.
-        </p>
+    <div v-if="auth.isAdmin" class="streams-panel p-5 space-y-5">
+      <div class="panel-heading">
+        <div>
+          <h2 class="panel-title">Global latency tuning</h2>
+          <p class="panel-sub">
+            Stream-level <code>buffer_ms</code> and <code>chunk_ms</code> overrides always take priority over these global defaults.
+          </p>
+        </div>
         <div class="mt-3 flex items-center gap-2 flex-wrap">
           <button class="btn-ghost" @click="applyStableTcpPreset">
             <span class="mdi mdi-shield-check-outline"></span>
@@ -864,18 +866,18 @@ async function restartServer() {
         </div>
       </div>
 
-      <div class="grid grid-cols-1 lg:grid-cols-3 gap-3">
-        <div>
+      <div class="tuning-grid">
+        <div class="setting-card">
           <label class="param-label block mb-1.5">Network buffer (ms)</label>
           <input v-model.number="globalBufferMs" type="number" min="100" max="10000" step="100" class="field field-mono" />
           <p class="param-desc mt-1">Jitter buffer target sent to clients.</p>
         </div>
-        <div>
+        <div class="setting-card">
           <label class="param-label block mb-1.5">Device prefill (ms)</label>
           <input v-model.number="outputPrefillMs" type="number" min="0" max="1000" step="20" class="field field-mono" />
           <p class="param-desc mt-1">0 = automatic; try 260–300 ms for 800 ms TCP.</p>
         </div>
-        <div>
+        <div class="setting-card">
           <label class="param-label block mb-1.5">Global chunk (ms)</label>
           <select v-model.number="globalChunkMs" class="field field-mono">
             <option :value="10">10</option>
@@ -967,41 +969,55 @@ async function restartServer() {
       </div>
     </div>
 
-    <div class="card">
+    <section class="streams-section">
+      <div class="section-header">
+        <div>
+          <h2 class="panel-title">Configured streams</h2>
+          <p class="panel-sub">{{ store.streams.length }} audio source{{ store.streams.length === 1 ? '' : 's' }} available for routing.</p>
+        </div>
+        <span class="streams-count">{{ store.streams.length }}</span>
+      </div>
+
       <div v-if="store.streams.length === 0"
-           class="px-5 py-12 text-center" style="color:var(--text-muted);">
+           class="empty-streams">
         <span class="mdi mdi-music-off text-4xl block mb-3"></span>
         No streams configured — add one or edit sonium.toml directly.
       </div>
-      <div v-for="(s, i) in store.streams" :key="s.id"
-           class="stream-row" :class="{ 'border-t': i > 0 }">
-        <div class="flex items-center gap-3 min-w-0">
-          <div class="stream-icon">
-            <span class="mdi mdi-music-note text-sm" style="color:var(--accent);"></span>
+      <div v-else class="streams-grid">
+        <article v-for="s in store.streams" :key="s.id" class="stream-card">
+          <div class="stream-card-main">
+            <div class="stream-icon">
+              <span class="mdi mdi-music-note text-sm" style="color:var(--accent);"></span>
+            </div>
+            <div class="min-w-0">
+              <p class="stream-name">
+                {{ s.display_name || s.id }}
+              </p>
+              <p v-if="s.display_name" class="stream-id">
+                {{ s.id }}
+              </p>
+            </div>
           </div>
-          <div class="min-w-0">
-            <p class="font-semibold truncate" style="font-size:13.5px;color:var(--text-primary);">
-              {{ s.display_name || s.id }}
-            </p>
-            <p v-if="s.display_name" class="truncate"
-               style="font-size:11px;color:var(--text-muted);font-family:var(--font-mono);">
-              {{ s.id }}
-            </p>
-            <p class="truncate" style="font-size:11px;color:var(--text-muted);">
+
+          <div class="stream-card-meta">
+            <div>
+              <span class="meta-label">Format</span>
+              <p class="meta-value">
               {{ s.codec.toUpperCase() }} · {{ s.format }}
-            </p>
+              </p>
+            </div>
+            <StreamBadge :status="s.status" :codec="s.codec" />
           </div>
-        </div>
-        <div class="flex items-center gap-4">
-          <StreamBadge :status="s.status" :codec="s.codec" />
-          <button v-if="auth.isAdmin" @click="editStream(s)" 
-                  class="p-2 rounded-lg text-slate-500 hover:text-white hover:bg-white/5 transition-colors"
+
+          <button v-if="auth.isAdmin" @click="editStream(s)"
+                  class="stream-edit-btn"
                   title="Edit stream">
             <span class="mdi mdi-pencil-outline"></span>
+            <span>Edit</span>
           </button>
-        </div>
+        </article>
       </div>
-    </div>
+    </section>
 
     <!-- ── Add stream dialog ─────────────────────────────────────────────── -->
     <Teleport to="body">
@@ -1403,23 +1419,198 @@ async function restartServer() {
   font-size: 12px;
 }
 
+/* ── Panels ── */
+.streams-panel,
+.streams-section {
+  background: rgba(15, 23, 42, 0.88);
+  border: 1px solid rgba(148, 163, 184, 0.20);
+  border-radius: 14px;
+  box-shadow: 0 16px 42px rgba(0, 0, 0, 0.24);
+}
+.streams-section {
+  padding: 18px;
+}
+.panel-heading {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+}
+.section-header {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 16px;
+}
+.section-header {
+  margin-bottom: 14px;
+  padding-bottom: 14px;
+  border-bottom: 1px solid rgba(148, 163, 184, 0.16);
+}
+.panel-title {
+  font-size: 14px;
+  font-weight: 700;
+  color: var(--text-primary);
+}
+.panel-sub {
+  margin-top: 4px;
+  font-size: 12px;
+  line-height: 1.5;
+  color: var(--text-secondary);
+}
+.panel-sub code {
+  color: var(--accent);
+  font-family: var(--font-mono);
+}
+.streams-count {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  min-width: 30px;
+  height: 26px;
+  padding: 0 9px;
+  border-radius: 999px;
+  border: 1px solid var(--accent-border);
+  background: var(--accent-dim);
+  color: var(--accent);
+  font-family: var(--font-mono);
+  font-size: 12px;
+  font-weight: 700;
+}
+.tuning-grid {
+  display: grid;
+  grid-template-columns: 1fr;
+  gap: 12px;
+}
+@media (min-width: 1024px) {
+  .tuning-grid { grid-template-columns: repeat(3, minmax(0, 1fr)); }
+}
+.setting-card {
+  padding: 13px;
+  border: 1px solid rgba(148, 163, 184, 0.16);
+  border-radius: 10px;
+  background: rgba(2, 6, 23, 0.36);
+}
+
 /* ── Stream list ── */
-.stream-row {
+.empty-streams {
+  padding: 48px 20px;
+  text-align: center;
+  color: var(--text-secondary);
+  border: 1px dashed rgba(148, 163, 184, 0.22);
+  border-radius: 12px;
+  background: rgba(2, 6, 23, 0.30);
+}
+.streams-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(260px, 1fr));
+  gap: 12px;
+}
+.stream-card {
+  position: relative;
+  display: flex;
+  flex-direction: column;
+  gap: 16px;
+  min-height: 150px;
+  padding: 16px;
+  border: 1px solid rgba(148, 163, 184, 0.20);
+  border-radius: 12px;
+  background:
+    linear-gradient(180deg, rgba(30, 41, 59, 0.86), rgba(15, 23, 42, 0.92)),
+    #0f172a;
+  box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.035), 0 10px 28px rgba(0, 0, 0, 0.18);
+  transition: transform 0.15s, border-color 0.15s, background 0.15s, box-shadow 0.15s;
+}
+.stream-card:hover {
+  transform: translateY(-1px);
+  border-color: rgba(34, 211, 238, 0.28);
+  box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.05), 0 16px 34px rgba(0, 0, 0, 0.25);
+}
+.stream-card-main {
+  display: flex;
+  align-items: center;
+  justify-content: flex-start;
+  gap: 12px;
+}
+.stream-icon {
+  width: 38px; height: 38px;
+  border-radius: 10px;
+  display: flex; align-items: center; justify-content: center;
+  background: var(--accent-dim);
+  border: 1px solid var(--accent-border);
+  flex-shrink: 0;
+}
+.stream-name {
+  max-width: 100%;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-size: 14px;
+  font-weight: 700;
+  color: var(--text-primary);
+}
+.stream-id {
+  max-width: 100%;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  margin-top: 2px;
+  font-family: var(--font-mono);
+  font-size: 11px;
+  color: var(--text-muted);
+}
+.stream-card-meta {
   display: flex;
   align-items: center;
   justify-content: space-between;
-  padding: 14px 18px;
   gap: 12px;
-  border-color: var(--border);
-  transition: background 0.15s;
+  padding-top: 12px;
+  border-top: 1px solid rgba(148, 163, 184, 0.14);
 }
-.stream-row:hover { background: var(--bg-hover); }
-.stream-icon {
-  width: 32px; height: 32px;
-  border-radius: 8px;
-  display: flex; align-items: center; justify-content: center;
+.meta-label {
+  display: block;
+  margin-bottom: 3px;
+  color: var(--text-muted);
+  font-size: 10px;
+  font-weight: 700;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+}
+.meta-value {
+  max-width: 150px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  color: var(--text-secondary);
+  font-family: var(--font-mono);
+  font-size: 11.5px;
+}
+.stream-edit-btn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 6px;
+  width: 100%;
+  min-height: 36px;
+  border: 1px solid rgba(148, 163, 184, 0.18);
+  border-radius: 9px;
+  background: rgba(2, 6, 23, 0.38);
+  color: var(--text-secondary);
+  font-size: 12px;
+  font-weight: 700;
+  transition: color 0.15s, background 0.15s, border-color 0.15s;
+}
+.stream-edit-btn:hover {
+  border-color: var(--accent-border);
   background: var(--accent-dim);
-  flex-shrink: 0;
+  color: var(--text-primary);
+}
+@media (max-width: 520px) {
+  .streams-section { padding: 14px; }
+  .stream-card { min-height: 0; }
+  .stream-card-meta {
+    align-items: flex-start;
+    flex-direction: column;
+  }
 }
 
 /* ── Dialog overlay ── */
@@ -1570,9 +1761,9 @@ async function restartServer() {
 .preset-note {
   min-height: 74px;
   padding: 10px 11px;
-  border: 1px solid var(--border);
+  border: 1px solid rgba(148, 163, 184, 0.16);
   border-radius: 8px;
-  background: rgba(15, 23, 42, 0.32);
+  background: rgba(2, 6, 23, 0.34);
 }
 .preset-note-title {
   margin-bottom: 4px;
@@ -1655,8 +1846,8 @@ async function restartServer() {
 
 /* ── Idle section ── */
 .idle-section {
-  background: var(--bg-surface);
-  border: 1px solid var(--border);
+  background: rgba(2, 6, 23, 0.36);
+  border: 1px solid rgba(148, 163, 184, 0.16);
   border-radius: 10px;
   padding: 12px 14px;
 }

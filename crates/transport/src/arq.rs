@@ -47,6 +47,62 @@ pub const ARQ_MAGIC_NACK: u8 = 0xC1;
 /// FEC parity packet magic byte (server → client).
 pub const ARQ_MAGIC_FEC: u8 = 0xC2;
 
+/// UDP time-probe magic byte (client → server).
+///
+/// Wire format (11 bytes):
+/// ```text
+/// [0]      0xD0  (magic)
+/// [1..3]   seq   (u16 LE)
+/// [3..11]  t_sent_us (i64 LE)  — client wall-clock at send time
+/// ```
+pub const ARQ_MAGIC_TIME_PROBE: u8 = 0xD0;
+
+/// UDP time-echo magic byte (server → client).
+///
+/// Wire format (19 bytes):
+/// ```text
+/// [0]      0xD1  (magic)
+/// [1..3]   seq              (u16 LE)
+/// [3..11]  t_sent_us        (i64 LE)  — echoed from probe
+/// [11..19] t_server_recv_us (i64 LE)  — server wall-clock at reception
+/// ```
+pub const ARQ_MAGIC_TIME_ECHO: u8 = 0xD1;
+
+/// Size of a time-probe packet in bytes.
+pub const TIME_PROBE_SIZE: usize = 11;
+/// Size of a time-echo packet in bytes.
+pub const TIME_ECHO_SIZE: usize = 19;
+
+/// Encode a UDP time-probe datagram.
+pub fn encode_time_probe(seq: u16, t_sent_us: i64) -> [u8; TIME_PROBE_SIZE] {
+    let mut buf = [0u8; TIME_PROBE_SIZE];
+    buf[0] = ARQ_MAGIC_TIME_PROBE;
+    buf[1..3].copy_from_slice(&seq.to_le_bytes());
+    buf[3..11].copy_from_slice(&t_sent_us.to_le_bytes());
+    buf
+}
+
+/// Encode a UDP time-echo datagram.
+pub fn encode_time_echo(seq: u16, t_sent_us: i64, t_server_recv_us: i64) -> [u8; TIME_ECHO_SIZE] {
+    let mut buf = [0u8; TIME_ECHO_SIZE];
+    buf[0] = ARQ_MAGIC_TIME_ECHO;
+    buf[1..3].copy_from_slice(&seq.to_le_bytes());
+    buf[3..11].copy_from_slice(&t_sent_us.to_le_bytes());
+    buf[11..19].copy_from_slice(&t_server_recv_us.to_le_bytes());
+    buf
+}
+
+/// Decode a UDP time-echo datagram.  Returns `(seq, t_sent_us, t_server_recv_us)`.
+pub fn decode_time_echo(data: &[u8]) -> Option<(u16, i64, i64)> {
+    if data.len() < TIME_ECHO_SIZE || data[0] != ARQ_MAGIC_TIME_ECHO {
+        return None;
+    }
+    let seq = u16::from_le_bytes([data[1], data[2]]);
+    let t_sent_us = i64::from_le_bytes(data[3..11].try_into().ok()?);
+    let t_server_recv_us = i64::from_le_bytes(data[11..19].try_into().ok()?);
+    Some((seq, t_sent_us, t_server_recv_us))
+}
+
 // ── NACK wire format ─────────────────────────────────────────────────────────
 
 /// Fixed header size of a NACK packet (no ranges).
@@ -249,6 +305,8 @@ pub fn detect_packet_type(data: &[u8]) -> Option<ArqPacketType> {
         ARQ_MAGIC_AUDIO => Some(ArqPacketType::Audio),
         ARQ_MAGIC_NACK => Some(ArqPacketType::Nack),
         ARQ_MAGIC_FEC => Some(ArqPacketType::Fec),
+        ARQ_MAGIC_TIME_PROBE => Some(ArqPacketType::TimeProbe),
+        ARQ_MAGIC_TIME_ECHO => Some(ArqPacketType::TimeEcho),
         _ => None,
     }
 }
@@ -262,6 +320,10 @@ pub enum ArqPacketType {
     Nack,
     /// FEC — XOR parity for a group of audio packets.
     Fec,
+    /// UDP time-probe (client → server): used for low-jitter clock sync.
+    TimeProbe,
+    /// UDP time-echo (server → client): server's reply to a TimeProbe.
+    TimeEcho,
 }
 
 // ── Tests ─────────────────────────────────────────────────────────────────────

@@ -161,6 +161,10 @@ impl ArqReceiver {
                 // NACKs are sent by us, not received (unless loopback — ignore).
                 debug!("Ignoring NACK packet (likely loopback)");
             }
+            Some(ArqPacketType::TimeProbe) | Some(ArqPacketType::TimeEcho) => {
+                // Time probes/echoes are handled by the NackRouter on the server
+                // and by the dedicated udp_time_probe_loop on the client — ignore here.
+            }
             None => {
                 debug!("Ignoring unknown UDP packet ({} bytes)", data.len());
             }
