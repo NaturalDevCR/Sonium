@@ -694,8 +694,13 @@ async fn session_loop(
                         }
                     }
                 });
-                let _tcp_ctrl_task =
-                    tokio::spawn(tcp_writer_task(writer, mpsc::channel(1).1, ctrl_rx, peer));
+                // Keep the dummy sender alive inside the task so tcp_writer_task
+                // sees Empty (not Disconnected) and only exits when ctrl_rx closes.
+                let (dummy_tx, dummy_rx) = mpsc::channel::<bytes::Bytes>(1);
+                let _tcp_ctrl_task = tokio::spawn(async move {
+                    let _keep = dummy_tx;
+                    tcp_writer_task(writer, dummy_rx, ctrl_rx, peer).await;
+                });
                 udp_task
             }
             UdpMedia::Arq(mut arq) => {
@@ -733,8 +738,13 @@ async fn session_loop(
                         }
                     }
                 });
-                let _tcp_ctrl_task =
-                    tokio::spawn(tcp_writer_task(writer, mpsc::channel(1).1, ctrl_rx, peer));
+                // Same fix: keep dummy sender alive so the TCP control task only
+                // exits when ctrl_rx closes (session end), not on Disconnected.
+                let (dummy_tx, dummy_rx) = mpsc::channel::<bytes::Bytes>(1);
+                let _tcp_ctrl_task = tokio::spawn(async move {
+                    let _keep = dummy_tx;
+                    tcp_writer_task(writer, dummy_rx, ctrl_rx, peer).await;
+                });
                 udp_task
             }
         }
