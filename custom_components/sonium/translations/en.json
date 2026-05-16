@@ -1,0 +1,56 @@
+{
+  "config": {
+    "step": {
+      "user": {
+        "title": "Connect to Sonium",
+        "description": "Enter the connection details for your Sonium audio server.",
+        "data": {
+          "host": "Host",
+          "port": "Port",
+          "ssl": "Use HTTPS/WSS",
+          "username": "Username",
+          "password": "Password"
+        },
+        "data_description": {
+          "host": "IP address or hostname of your Sonium server.",
+          "port": "Control port (default: 1711).",
+          "ssl": "Enable if your server is behind an HTTPS reverse proxy."
+        }
+      },
+      "reauth_confirm": {
+        "title": "Re-authenticate Sonium",
+        "description": "Your Sonium credentials need to be updated.",
+        "data": {
+          "username": "Username",
+          "password": "Password"
+        }
+      }
+    },
+    "error": {
+      "cannot_connect": "Unable to connect to the Sonium server. Check the host and port.",
+      "invalid_auth": "Invalid username or password.",
+      "unknown": "Unexpected error. Check the Home Assistant logs for details."
+    },
+    "abort": {
+      "already_configured": "This Sonium server is already configured.",
+      "reauth_successful": "Re-authentication was successful."
+    }
+  },
+  "entity": {
+    "select": {
+      "client_group": {
+        "name": "Zone"
+      }
+    },
+    "number": {
+      "client_latency": {
+        "name": "Latency Offset"
+      }
+    },
+    "binary_sensor": {
+      "client_connected": {
+        "name": "Connected"
+      }
+    }
+  }
+}

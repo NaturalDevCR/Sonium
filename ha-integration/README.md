@@ -21,13 +21,13 @@ A Home Assistant integration for [Sonium](https://github.com/NaturalDevCR/Sonium
 ### Via HACS (recommended)
 
 1. In Home Assistant, open **HACS → Integrations → ⋮ → Custom Repositories**
-2. Add this repository URL and select category **Integration**
+2. Add `https://github.com/NaturalDevCR/Sonium` and select category **Integration**
 3. Search for **Sonium** and install
 4. Restart Home Assistant
 
 ### Manual
 
-1. Copy the `custom_components/sonium/` folder to your `<config>/custom_components/` directory
+1. Copy the repository-root `custom_components/sonium/` folder to your `<config>/custom_components/` directory
 2. Restart Home Assistant
 
 ## Configuration

@@ -184,7 +184,7 @@ changes between releases.
 
 ### Roadmap Toward Sonos-Class Reliability
 
-**Recently Completed (through v0.1.89):**
+**Recently Completed (through v0.1.90):**
 - TCP streaming stability work: dedicated writers, audio-first draining, relaxed
   false-positive sync warnings, and UDP auto-bind fixes.
 - GroupSync protocol with server-computed group offsets, smoother client nudges,

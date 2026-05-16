@@ -1,9 +1,9 @@
 # Home Assistant Integration
 
-Sonium includes a custom Home Assistant integration under
-`ha-integration/custom_components/sonium`. It connects to the Sonium control API
-and WebSocket event stream, then exposes rooms, speakers, streams, and health
-signals as Home Assistant entities.
+Sonium includes a HACS-compatible Home Assistant integration under
+`custom_components/sonium`. It connects to the Sonium control API and WebSocket
+event stream, then exposes rooms, speakers, streams, and health signals as Home
+Assistant entities.
 
 ## Current status
 
@@ -28,12 +28,13 @@ still change between releases.
 ### HACS
 
 1. In Home Assistant, open **HACS -> Integrations -> Custom repositories**.
-2. Add the Sonium repository URL and choose category **Integration**.
+2. Add `https://github.com/NaturalDevCR/Sonium` and choose category
+   **Integration**.
 3. Install **Sonium** and restart Home Assistant.
 
 ### Manual
 
-Copy `ha-integration/custom_components/sonium/` into
+Copy `custom_components/sonium/` into
 `<home-assistant-config>/custom_components/sonium/`, then restart Home
 Assistant.
 
@@ -51,4 +52,3 @@ search for **Sonium**, and enter:
 
 Viewer accounts can read state, but write operations such as volume, group
 changes, renames, and group creation require an operator/admin-capable account.
-
