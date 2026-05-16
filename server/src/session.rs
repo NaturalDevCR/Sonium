@@ -672,7 +672,9 @@ async fn session_loop(
     let mut health_tracker = HealthTransitionTracker::default();
 
     // Group sync broadcast: shared timeline for multi-room sync.
-    let mut group_sync_tick = tokio::time::interval(tokio::time::Duration::from_millis(500));
+    // 100 ms interval (was 500 ms) keeps group convergence under 1 s with
+    // the adaptive nudge in TimeProvider::nudge_group_offset.
+    let mut group_sync_tick = tokio::time::interval(tokio::time::Duration::from_millis(100));
     group_sync_tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
 
     // ── Spawn the dedicated writer task ──────────────────────────────
@@ -1036,12 +1038,13 @@ async fn handle_client_msg(
                 sec: now.sec - hdr.sent.sec,
                 usec: now.usec - hdr.sent.usec,
             };
-            // Log c2s latency (client→server transit time in ms).
-            // High values indicate TCP congestion or event-loop stall on client side.
+            // c2s_us = server_now - client_sent, so it includes clock skew between
+            // the two machines.  Only warn at a threshold high enough to indicate a
+            // genuine stall (>2 s), not normal clock-offset noise (~300 ms).
             let c2s_us = (diff.sec as i64) * 1_000_000 + diff.usec as i64;
             let c2s_ms = c2s_us / 1000;
-            if c2s_ms > 300 {
-                warn!(client_id = %ctx.client_id, c2s_ms, "High Time sync c2s latency (network congestion?)");
+            if c2s_ms > 2_000 {
+                warn!(client_id = %ctx.client_id, c2s_ms, "Time sync stall — client may be hung or network severely congested");
             } else {
                 tracing::debug!(client_id = %ctx.client_id, c2s_ms, "Time sync");
             }

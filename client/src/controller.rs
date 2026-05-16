@@ -8,6 +8,7 @@ use tokio::sync::mpsc as tokio_mpsc;
 use tokio::time::timeout;
 use tracing::{debug, info, warn};
 
+use sonium_transport::arq::{decode_time_echo, encode_time_probe};
 use sonium_transport::{ArqReceiver, RtpPacket, RTP_CLOCK_RATE};
 use std::sync::atomic::{AtomicU64, Ordering};
 
@@ -196,6 +197,9 @@ async fn connect_and_run(
     // Channel for WireChunk payload bytes received via UDP RTP path.
     let mut udp_chunk_rx: Option<tokio_mpsc::UnboundedReceiver<UdpMediaEvent>> = None;
     let mut udp_recv_task: Option<tokio::task::JoinHandle<()>> = None;
+    // Channel for UDP time-probe echo results (t_sent_us, t_recv_us, t_server_recv_us).
+    let mut udp_time_rx: Option<tokio_mpsc::UnboundedReceiver<(i64, i64, i64)>> = None;
+    let mut udp_time_task: Option<tokio::task::JoinHandle<()>> = None;
     let mut rtp_packets_received = 0u32;
     let mut rtp_sequence_gaps = 0u32;
     let mut rtp_decode_error_count = 0u32;
@@ -431,6 +435,16 @@ async fn connect_and_run(
                             let arq_retx = arq_retransmit_received.clone();
                             let arq_fec = arq_fec_recovered.clone();
 
+                            // Spawn UDP time-probe task for low-jitter clock sync.
+                            // Uses a separate socket so it doesn't mix with audio traffic.
+                            {
+                                let (time_tx, time_rx) = tokio_mpsc::unbounded_channel();
+                                udp_time_rx = Some(time_rx);
+                                let probe_addr = server_udp_addr;
+                                udp_time_task = Some(tokio::spawn(udp_time_probe_loop(probe_addr, time_tx)));
+                                info!(%server_udp_addr, "UDP time-probe task started");
+                            }
+
                             udp_recv_task = Some(tokio::spawn(async move {
                                 if is_arq {
                                     // ARQ mode: use ArqReceiver for reliable delivery with
@@ -503,7 +517,11 @@ async fn connect_and_run(
                         } else if ss.transport_mode == "tcp" && udp_chunk_rx.is_some() {
                             // Switching from any UDP-based transport back to TCP.
                             udp_chunk_rx = None;
+                            udp_time_rx = None;
                             if let Some(task) = udp_recv_task.take() {
+                                task.abort();
+                            }
+                            if let Some(task) = udp_time_task.take() {
                                 task.abort();
                             }
                             last_rtp_sequence = None;
@@ -603,6 +621,22 @@ async fn connect_and_run(
                     }
 
                     other => debug!("Unhandled message type: {other:?}"),
+                }
+            }
+
+            // UDP time-probe echoes: feed into Kalman filter with UDP noise model.
+            udp_time_result = recv_optional_udp_time(&mut udp_time_rx) => {
+                if let Some((t_sent, t_recv, t_server_recv)) = udp_time_result {
+                    let server_lat_us = t_server_recv - t_sent;
+                    time_provider.update_udp(t_sent, t_recv, server_lat_us);
+                    if let Some(offset) = playback_offset.as_ref() {
+                        offset.store(time_provider.total_offset_us(), std::sync::atomic::Ordering::Relaxed);
+                    }
+                    debug!(
+                        rtt_us = t_recv - t_sent,
+                        offset_us = time_provider.offset_us(),
+                        "UDP time probe echo processed"
+                    );
                 }
             }
 
@@ -730,6 +764,9 @@ async fn connect_and_run(
     if let Some(task) = udp_recv_task {
         task.abort();
     }
+    if let Some(task) = udp_time_task {
+        task.abort();
+    }
     result
 }
 
@@ -838,6 +875,66 @@ async fn recv_optional_udp(
     match rx.as_mut() {
         Some(r) => r.recv().await,
         None => std::future::pending().await,
+    }
+}
+
+async fn recv_optional_udp_time(
+    rx: &mut Option<tokio_mpsc::UnboundedReceiver<(i64, i64, i64)>>,
+) -> Option<(i64, i64, i64)> {
+    match rx.as_mut() {
+        Some(r) => r.recv().await,
+        None => std::future::pending().await,
+    }
+}
+
+/// Sends periodic UDP time probes to the server and forwards echoes back via `result_tx`.
+///
+/// Uses a dedicated UDP socket (separate from the audio path) so probe RTTs
+/// are not contaminated by audio packet scheduling delays.
+/// The server's NackRouter loop handles `0xD0` packets and echoes `0xD1` responses.
+async fn udp_time_probe_loop(
+    server_addr: std::net::SocketAddr,
+    result_tx: tokio_mpsc::UnboundedSender<(i64, i64, i64)>,
+) {
+    let sock = match UdpSocket::bind("0.0.0.0:0").await {
+        Ok(s) => s,
+        Err(e) => {
+            warn!("UDP time-probe: failed to bind socket: {e}");
+            return;
+        }
+    };
+    let mut seq: u16 = 0;
+    let mut probe_tick = tokio::time::interval(tokio::time::Duration::from_millis(200));
+    let mut recv_buf = [0u8; 64];
+
+    loop {
+        tokio::select! {
+            _ = probe_tick.tick() => {
+                let t_sent = now_us();
+                let probe = encode_time_probe(seq, t_sent);
+                if let Err(e) = sock.send_to(&probe, server_addr).await {
+                    warn!("UDP time-probe send error: {e}");
+                }
+                seq = seq.wrapping_add(1);
+            }
+            result = sock.recv_from(&mut recv_buf) => {
+                match result {
+                    Ok((n, _from)) => {
+                        let t_recv = now_us();
+                        if let Some((_seq, t_sent, t_server_recv)) =
+                            decode_time_echo(&recv_buf[..n])
+                        {
+                            if result_tx.send((t_sent, t_recv, t_server_recv)).is_err() {
+                                break;
+                            }
+                        }
+                    }
+                    Err(e) => {
+                        warn!("UDP time-probe recv error: {e}");
+                    }
+                }
+            }
+        }
     }
 }
 

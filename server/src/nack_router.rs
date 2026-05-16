@@ -12,7 +12,11 @@ use tokio::net::UdpSocket;
 use tokio::sync::{mpsc, RwLock};
 use tracing::{debug, warn};
 
-use sonium_transport::arq::{detect_packet_type, ArqPacketType, NackPacket};
+use sonium_sync::time_provider::now_us;
+use sonium_transport::arq::{
+    detect_packet_type, encode_time_echo, ArqPacketType, NackPacket, ARQ_MAGIC_TIME_PROBE,
+    TIME_PROBE_SIZE,
+};
 
 /// Sender half of a per-session NACK channel.
 pub type NackSender = mpsc::UnboundedSender<NackPacket>;
@@ -68,6 +72,23 @@ impl NackRouter {
                 match socket.recv_from(&mut buf).await {
                     Ok((n, peer)) => {
                         let data = &buf[..n];
+
+                        // Time-probe: echo back immediately with server receive timestamp.
+                        // Works for both RTP and ARQ sessions — no SSRC routing needed.
+                        if data.len() >= TIME_PROBE_SIZE && data[0] == ARQ_MAGIC_TIME_PROBE {
+                            let t_server_recv_us = now_us();
+                            let seq = u16::from_le_bytes([data[1], data[2]]);
+                            let t_sent_us =
+                                i64::from_le_bytes(data[3..11].try_into().unwrap_or([0u8; 8]));
+                            let echo = encode_time_echo(seq, t_sent_us, t_server_recv_us);
+                            if let Err(e) = socket.send_to(&echo, peer).await {
+                                debug!(error = %e, %peer, "Failed to send time echo");
+                            } else {
+                                debug!(seq, %peer, "Time echo sent");
+                            }
+                            continue;
+                        }
+
                         match detect_packet_type(data) {
                             Some(ArqPacketType::Nack) => match NackPacket::decode(data) {
                                 Ok(nack) => {
@@ -109,6 +130,9 @@ impl NackRouter {
                             }
                             Some(ArqPacketType::Fec) => {
                                 // Server doesn't expect FEC from clients — ignore.
+                            }
+                            Some(ArqPacketType::TimeProbe) | Some(ArqPacketType::TimeEcho) => {
+                                // Handled above before detect_packet_type — unreachable.
                             }
                             None => {
                                 debug!(bytes = n, "Unknown UDP packet type — ignoring");
