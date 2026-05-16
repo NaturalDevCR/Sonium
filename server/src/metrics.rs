@@ -222,6 +222,36 @@ lazy_static! {
             ),
             &["client_id", "transport"]
         ).unwrap();
+
+    /// Latest reported ARQ NACK packets sent by the client.
+    pub static ref CLIENT_ARQ_NACKS_SENT: IntGaugeVec =
+        register_int_gauge_vec!(
+            Opts::new(
+                "sonium_client_arq_nacks_sent",
+                "Latest reported ARQ NACK packets sent by the client"
+            ),
+            &["client_id", "transport"]
+        ).unwrap();
+
+    /// Latest reported retransmitted audio packets received by the client.
+    pub static ref CLIENT_ARQ_RETRANSMIT_RECEIVED: IntGaugeVec =
+        register_int_gauge_vec!(
+            Opts::new(
+                "sonium_client_arq_retransmit_received",
+                "Latest reported retransmitted audio packets received by the client"
+            ),
+            &["client_id", "transport"]
+        ).unwrap();
+
+    /// Latest reported audio packets recovered via FEC by the client.
+    pub static ref CLIENT_ARQ_FEC_RECOVERED: IntGaugeVec =
+        register_int_gauge_vec!(
+            Opts::new(
+                "sonium_client_arq_fec_recovered",
+                "Latest reported audio packets recovered via FEC by the client"
+            ),
+            &["client_id", "transport"]
+        ).unwrap();
 }
 
 pub fn observe_client_health(
@@ -276,6 +306,15 @@ pub fn observe_client_health(
     CLIENT_RTP_CONCEALED_PACKETS
         .with_label_values(&[client_id, transport])
         .set(report.rtp_concealed_packets as i64);
+    CLIENT_ARQ_NACKS_SENT
+        .with_label_values(&[client_id, transport])
+        .set(report.arq_nacks_sent as i64);
+    CLIENT_ARQ_RETRANSMIT_RECEIVED
+        .with_label_values(&[client_id, transport])
+        .set(report.arq_retransmit_received as i64);
+    CLIENT_ARQ_FEC_RECOVERED
+        .with_label_values(&[client_id, transport])
+        .set(report.arq_fec_recovered as i64);
 
     for candidate in AudioHealthState::ALL {
         CLIENT_HEALTH_STATE

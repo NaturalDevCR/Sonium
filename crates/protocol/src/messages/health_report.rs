@@ -124,6 +124,15 @@ pub struct HealthReport {
     /// Number of frames duplicated to correct clock drift.
     #[serde(default)]
     pub drift_dup_count: u64,
+    /// Number of ARQ NACK packets sent by the client.
+    #[serde(default)]
+    pub arq_nacks_sent: u32,
+    /// Number of retransmitted audio packets received by the client.
+    #[serde(default)]
+    pub arq_retransmit_received: u32,
+    /// Number of audio packets recovered via FEC (no retransmission needed).
+    #[serde(default)]
+    pub arq_fec_recovered: u32,
 }
 
 impl HealthReport {
@@ -153,6 +162,9 @@ impl HealthReport {
             rtp_concealed_packets: 0,
             drift_drop_count: 0,
             drift_dup_count: 0,
+            arq_nacks_sent: 0,
+            arq_retransmit_received: 0,
+            arq_fec_recovered: 0,
         }
     }
 
@@ -202,6 +214,18 @@ impl HealthReport {
         self
     }
 
+    pub fn with_arq_metrics(
+        mut self,
+        nacks_sent: u32,
+        retransmit_received: u32,
+        fec_recovered: u32,
+    ) -> Self {
+        self.arq_nacks_sent = nacks_sent;
+        self.arq_retransmit_received = retransmit_received;
+        self.arq_fec_recovered = fec_recovered;
+        self
+    }
+
     pub fn total_playout_queue_ms(&self) -> u32 {
         self.buffer_depth_ms.saturating_add(self.output_buffer_ms)
     }
@@ -234,11 +258,14 @@ impl HealthReport {
             } else {
                 0
             },
+            arq_nacks_sent: if r.remaining() >= 4 { r.read_u32()? } else { 0 },
+            arq_retransmit_received: if r.remaining() >= 4 { r.read_u32()? } else { 0 },
+            arq_fec_recovered: if r.remaining() >= 4 { r.read_u32()? } else { 0 },
         })
     }
 
     pub fn encode(&self) -> Vec<u8> {
-        let mut w = WireWrite::with_capacity(68);
+        let mut w = WireWrite::with_capacity(80);
         w.write_u32(self.underrun_count);
         w.write_u32(self.overrun_count);
         w.write_u32(self.stale_drop_count);
@@ -256,6 +283,9 @@ impl HealthReport {
         w.write_u32(self.rtp_concealed_packets);
         w.write_u32(self.drift_drop_count as u32);
         w.write_u32(self.drift_dup_count as u32);
+        w.write_u32(self.arq_nacks_sent);
+        w.write_u32(self.arq_retransmit_received);
+        w.write_u32(self.arq_fec_recovered);
         w.finish()
     }
 }

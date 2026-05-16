@@ -15,6 +15,7 @@
 //! |-------|----------------------|-----------------|
 //! | 1     | `tcp`                | Implemented     |
 //! | 2     | `rtp_udp`            | Implemented, pending live validation |
+//! | 3     | `rist`               | Native ARQ/FEC over UDP, experimental |
 //! | 5     | `quic_dgram`         | Stub — Phase 5  |
 //!
 //! # Wire-format note
@@ -24,9 +25,15 @@
 //! sends those bytes unchanged. RTP/UDP strips the Sonium header and places the
 //! raw WireChunk payload inside an RTP packet before delivery.
 
+pub mod arq;
+pub mod arq_receiver;
+pub mod arq_sender;
 pub mod rtp;
 pub mod sender;
 
+pub use arq::{FecPacket, NackPacket, FEC_GROUP_SIZE};
+pub use arq_receiver::{ArqAudioFrame, ArqReceiver};
+pub use arq_sender::ArqSender;
 pub use rtp::{rtp_timestamp, RtpPacket, RTP_CLOCK_RATE, RTP_HEADER_SIZE, SONIUM_RTP_PAYLOAD_TYPE};
 pub use sender::{MediaSender, QuicDgramMediaSender, RtpUdpMediaSender, TcpMediaSender};
 
@@ -36,7 +43,9 @@ use std::fmt;
 /// The protocol used to deliver media frames from server to client.
 ///
 /// `Tcp` is the stable default. `RtpUdp` is implemented for Phase 2 validation.
-/// `QuicDgram` remains config-visible but not implemented yet.
+/// `Rist` is a Sonium-native ARQ/FEC transport inspired by RIST concepts, not a
+/// wire-compatible libRIST implementation. `QuicDgram` remains config-visible
+/// but not implemented yet.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
 #[serde(rename_all = "snake_case")]
 pub enum TransportMode {
@@ -49,6 +58,10 @@ pub enum TransportMode {
     /// No head-of-line blocking; requires explicit jitter-buffer handling.
     /// Implemented for Phase 2 validation.
     RtpUdp,
+    /// Sonium-native ARQ over UDP — reliable datagram delivery with NACK-based
+    /// retransmission and XOR-based FEC.  Combines the low latency of
+    /// UDP with packet-loss recovery.  No external C dependencies.
+    Rist,
     /// QUIC DATAGRAM. Encrypted datagram delivery for WAN/routed networks.
     /// **Not yet implemented — Phase 5.**
     QuicDgram,
@@ -59,6 +72,7 @@ impl fmt::Display for TransportMode {
         match self {
             Self::Tcp => f.write_str("tcp"),
             Self::RtpUdp => f.write_str("rtp_udp"),
+            Self::Rist => f.write_str("rist"),
             Self::QuicDgram => f.write_str("quic_dgram"),
         }
     }
@@ -70,8 +84,8 @@ impl fmt::Display for TransportMode {
 ///
 /// ```toml
 /// [server.transport]
-/// mode     = "tcp"   # "tcp" (default) | "rtp_udp" | "quic_dgram"
-/// udp_port = 1712    # server UDP port for RTP media (0 = disabled)
+/// mode     = "tcp"   # "tcp" (default) | "rtp_udp" | "rist" | "quic_dgram"
+/// udp_port = 1712    # server UDP port for UDP media (0 = disabled)
 /// ```
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(default)]

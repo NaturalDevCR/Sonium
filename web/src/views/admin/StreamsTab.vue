@@ -695,6 +695,21 @@ function applyRtpUdpPreset() {
   tuningInfo.value = 'Preset applied: RTP/UDP lab. Save global tuning and restart the server.';
 }
 
+function applyRistPreset() {
+  transportMode.value = 'rist';
+  transportUdpPort.value = 1712;
+  globalBufferMs.value = 800;
+  outputPrefillMs.value = 200;
+  globalChunkMs.value = 20;
+  autoBufferEnabled.value = true;
+  autoBufferMinMs.value = 800;
+  autoBufferMaxMs.value = 2000;
+  autoBufferStepUpMs.value = 150;
+  autoBufferStepDownMs.value = 40;
+  autoBufferCooldownMs.value = 4000;
+  tuningInfo.value = 'Preset applied: native ARQ/UDP. Reliable UDP with NACK retransmission and FEC. Lower buffer than RTP/UDP thanks to loss recovery.';
+}
+
 function editStream(s: any) {
   isEditMode.value = true;
   editIdOriginal.value = s.id;
@@ -836,6 +851,10 @@ async function restartServer() {
             <span class="mdi mdi-access-point-network"></span>
             RTP/UDP lab
           </button>
+          <button class="btn-ghost" @click="applyRistPreset">
+            <span class="mdi mdi-shield-check"></span>
+            ARQ/UDP native
+          </button>
         </div>
         <div class="mt-3 grid grid-cols-1 lg:grid-cols-4 gap-2">
           <div v-for="preset in latencyPresetCards" :key="preset.name" class="preset-note">
@@ -875,6 +894,7 @@ async function restartServer() {
             <select v-model="transportMode" class="field field-mono">
               <option value="tcp">TCP</option>
               <option value="rtp_udp">RTP/UDP</option>
+              <option value="rist">ARQ/UDP native</option>
               <option value="quic_dgram">QUIC DATAGRAM</option>
             </select>
           </div>

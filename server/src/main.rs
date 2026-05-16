@@ -2,6 +2,7 @@ mod broadcaster;
 mod control_server;
 mod encoder;
 mod metrics;
+mod nack_router;
 mod session;
 mod streamreader;
 
@@ -279,6 +280,15 @@ async fn main() -> anyhow::Result<()> {
         None
     };
 
+    // ── NACK router for ARQ transport (Phase 3) ────────────────────────
+    let nack_router = nack_router::NackRouter::new();
+    if let Some(ref sock) = udp_socket {
+        let router_clone = nack_router.clone();
+        let sock_clone = sock.clone();
+        let _nack_router_task = router_clone.spawn_recv_loop(sock_clone);
+        info!("NACK router started for ARQ transport");
+    }
+
     // ── TCP listener for audio clients ────────────────────────────────────
     let addr = format!("{}:{}", cfg.server.bind, cfg.server.stream_port);
     let listener = TcpListener::bind(&addr)
@@ -302,9 +312,10 @@ async fn main() -> anyhow::Result<()> {
                 let state    = state.clone();
                 let cancel   = shutdown.clone();
                 let udp_sock = udp_socket.clone();
+                let nack_rtr = nack_router.clone();
                 tokio::spawn(async move {
                     tokio::select! {
-                        result = session::handle(stream, peer, registry, session_cfg, state, udp_sock) => {
+                        result = session::handle(stream, peer, registry, session_cfg, state, udp_sock, nack_rtr) => {
                             if let Err(e) = result {
                                 warn!(%peer, "Session error: {e}");
                             }

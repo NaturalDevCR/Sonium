@@ -8,7 +8,8 @@ use tokio::sync::mpsc as tokio_mpsc;
 use tokio::time::timeout;
 use tracing::{debug, info, warn};
 
-use sonium_transport::{RtpPacket, RTP_CLOCK_RATE};
+use sonium_transport::{ArqReceiver, RtpPacket, RTP_CLOCK_RATE};
+use std::sync::atomic::{AtomicU64, Ordering};
 
 use sonium_common::config::ClientConfig;
 use sonium_protocol::{
@@ -140,6 +141,7 @@ async fn connect_and_run(
     let stream = TcpStream::connect(addr).await?;
     stream.set_nodelay(true)?;
     configure_tcp_stream(&stream);
+    let server_ip = stream.peer_addr()?.ip();
     *backoff = Duration::from_millis(500);
     let (reader, mut writer) = stream.into_split();
     let _ = status_tx
@@ -200,6 +202,11 @@ async fn connect_and_run(
     let mut rtp_concealed_packets = 0u32;
     let mut last_rtp_sequence: Option<u16> = None;
     let mut last_rtp_timestamp: Option<u32> = None;
+
+    // ARQ metrics (shared with the ARQ receiver task via atomics).
+    let arq_nacks_sent = Arc::new(AtomicU64::new(0));
+    let arq_retransmit_received = Arc::new(AtomicU64::new(0));
+    let arq_fec_recovered = Arc::new(AtomicU64::new(0));
 
     // Start periodic tasks
     let (incoming_tx, mut incoming_rx) = mpsc::unbounded_channel();
@@ -307,6 +314,11 @@ async fn connect_and_run(
                         rtp_decode_error_count,
                         rtp_concealed_packets,
                     )
+                    .with_arq_metrics(
+                        arq_nacks_sent.load(Ordering::Relaxed) as u32,
+                        arq_retransmit_received.load(Ordering::Relaxed) as u32,
+                        arq_fec_recovered.load(Ordering::Relaxed) as u32,
+                    )
                     .with_drift_metrics(drift_drops, drift_dups)
                 } else {
                     // Send idle report to keep status "Connected"
@@ -405,45 +417,91 @@ async fn connect_and_run(
                         }
                         debug!(volume = ss.volume, muted = ss.muted, buffer_ms = ss.buffer_ms, latency_ms = ss.latency, "ServerSettings applied");
 
-                        if ss.transport_mode == "rtp_udp" && udp_chunk_rx.is_none() {
+                        if (ss.transport_mode == "rtp_udp" || ss.transport_mode == "rist") && udp_chunk_rx.is_none() {
                             let (udp_tx, udp_rx) = tokio_mpsc::unbounded_channel::<UdpMediaEvent>();
                             udp_chunk_rx = Some(udp_rx);
                             let sock = udp_socket.clone();
+                            let is_arq = ss.transport_mode == "rist";
+                            // Server UDP address: same IP as TCP peer, port from ServerSettings.
+                            let server_udp_addr = std::net::SocketAddr::new(
+                                server_ip,
+                                ss.server_udp_port,
+                            );
+                            let arq_nacks = arq_nacks_sent.clone();
+                            let arq_retx = arq_retransmit_received.clone();
+                            let arq_fec = arq_fec_recovered.clone();
+
                             udp_recv_task = Some(tokio::spawn(async move {
-                                let mut buf = vec![0u8; 65_535];
-                                loop {
-                                    match sock.recv(&mut buf).await {
-                                        Ok(n) => {
-                                            match RtpPacket::decode(&buf[..n]) {
-                                                Ok(pkt) => {
-                                                    if udp_tx
-                                                        .send(UdpMediaEvent::Packet {
-                                                            sequence: pkt.sequence,
-                                                            timestamp: pkt.timestamp,
-                                                            payload: pkt.payload,
-                                                        })
-                                                        .is_err()
-                                                    {
-                                                        break;
-                                                    }
+                                if is_arq {
+                                    // ARQ mode: use ArqReceiver for reliable delivery with
+                                    // NACK-based retransmission and FEC recovery.
+                                    let mut arq = ArqReceiver::new(sock.clone(), server_udp_addr, 0);
+                                    loop {
+                                        match arq.recv_audio().await {
+                                            Ok(Some(frame)) => {
+                                                // Report ARQ metrics periodically.
+                                                arq_nacks.store(arq.nacks_sent(), Ordering::Relaxed);
+                                                arq_retx.store(arq.retransmit_received(), Ordering::Relaxed);
+                                                arq_fec.store(arq.fec_recovered(), Ordering::Relaxed);
+
+                                                if udp_tx
+                                                    .send(UdpMediaEvent::Packet {
+                                                        sequence: frame.sequence,
+                                                        timestamp: frame.timestamp,
+                                                        payload: frame.payload,
+                                                    })
+                                                    .is_err()
+                                                {
+                                                    break;
                                                 }
-                                                Err(e) => {
-                                                    debug!("RTP decode error: {e}");
-                                                    if udp_tx.send(UdpMediaEvent::DecodeError).is_err() {
-                                                        break;
-                                                    }
+                                            }
+                                            Ok(None) => break,
+                                            Err(e) => {
+                                                debug!("ARQ receiver error: {e}");
+                                                if udp_tx.send(UdpMediaEvent::DecodeError).is_err() {
+                                                    break;
                                                 }
                                             }
                                         }
-                                        Err(e) => {
-                                            warn!("UDP receiver error: {e}");
-                                            break;
+                                    }
+                                } else {
+                                    // Plain RTP/UDP mode: no reliability layer.
+                                    let mut buf = vec![0u8; 65_535];
+                                    loop {
+                                        match sock.recv(&mut buf).await {
+                                            Ok(n) => {
+                                                match RtpPacket::decode(&buf[..n]) {
+                                                    Ok(pkt) => {
+                                                        if udp_tx
+                                                            .send(UdpMediaEvent::Packet {
+                                                                sequence: pkt.sequence,
+                                                                timestamp: pkt.timestamp,
+                                                                payload: pkt.payload,
+                                                            })
+                                                            .is_err()
+                                                        {
+                                                            break;
+                                                        }
+                                                    }
+                                                    Err(e) => {
+                                                        debug!("RTP decode error: {e}");
+                                                        if udp_tx.send(UdpMediaEvent::DecodeError).is_err() {
+                                                            break;
+                                                        }
+                                                    }
+                                                }
+                                            }
+                                            Err(e) => {
+                                                warn!("UDP receiver error: {e}");
+                                                break;
+                                            }
                                         }
                                     }
                                 }
                             }));
-                            info!(transport = "rtp_udp", "UDP media receiver started");
-                        } else if ss.transport_mode != "rtp_udp" && udp_chunk_rx.is_some() {
+                            info!(transport = %ss.transport_mode, "UDP media receiver started");
+                        } else if ss.transport_mode == "tcp" && udp_chunk_rx.is_some() {
+                            // Switching from any UDP-based transport back to TCP.
                             udp_chunk_rx = None;
                             if let Some(task) = udp_recv_task.take() {
                                 task.abort();

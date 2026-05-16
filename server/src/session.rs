@@ -41,7 +41,7 @@ use sonium_protocol::{
     },
     MessageHeader, MessageType, Timestamp,
 };
-use sonium_transport::{sender::MediaSender, RtpUdpMediaSender, TransportMode};
+use sonium_transport::{sender::MediaSender, ArqSender, RtpUdpMediaSender, TransportMode};
 
 use crate::broadcaster::{lookup, AudioFrame, BroadcasterRegistry};
 use crate::metrics;
@@ -430,6 +430,7 @@ pub async fn handle(
     cfg: ServerConfig,
     state: Arc<ServerState>,
     udp_socket: Option<Arc<UdpSocket>>,
+    nack_router: crate::nack_router::NackRouter,
 ) -> anyhow::Result<()> {
     // ── TCP tuning ────────────────────────────────────────────────────────
     // Ensure TCP_NODELAY is set (main.rs sets it too, but belt-and-braces).
@@ -485,6 +486,7 @@ pub async fn handle(
             client_id: client_id.clone(),
             udp_socket,
             hello_udp_port,
+            nack_router,
         },
     )
     .await;
@@ -500,6 +502,7 @@ struct SessionLoopContext {
     client_id: String,
     udp_socket: Option<Arc<UdpSocket>>,
     hello_udp_port: u16,
+    nack_router: crate::nack_router::NackRouter,
 }
 
 async fn session_loop(
@@ -515,6 +518,7 @@ async fn session_loop(
         client_id,
         udp_socket,
         hello_udp_port,
+        nack_router,
     } = ctx;
     let client_id = client_id.as_str();
 
@@ -566,8 +570,15 @@ async fn session_loop(
     let transport_mode = state.transport_mode();
     let server_udp_port = state.server_udp_port();
 
-    // Build the per-session RTP/UDP sender if all prerequisites are met.
-    let mut rtp_sender: Option<RtpUdpMediaSender> = None;
+    // Build the per-session RTP/UDP or ARQ sender if all prerequisites are met.
+    enum UdpMedia {
+        Rtp(RtpUdpMediaSender),
+        Arq(ArqSender),
+    }
+    let mut udp_media: Option<UdpMedia> = None;
+    let mut nack_rx: Option<crate::nack_router::NackReceiver> = None;
+    let mut arq_ssrc: Option<u32> = None;
+
     if transport_mode == TransportMode::RtpUdp {
         match udp_socket.as_ref() {
             None => {
@@ -582,10 +593,42 @@ async fn session_loop(
                         peer.hash(&mut h);
                         h.finish() as u32
                     };
-                    rtp_sender = Some(RtpUdpMediaSender::new(sock.clone(), client_udp_addr, ssrc));
+                    udp_media = Some(UdpMedia::Rtp(RtpUdpMediaSender::new(
+                        sock.clone(),
+                        client_udp_addr,
+                        ssrc,
+                    )));
                     info!(%peer, %client_udp_addr, "RTP/UDP media path active");
                 } else {
                     warn!(%peer, "rtp_udp requested but client sent udp_port=0 — falling back to tcp");
+                }
+            }
+        }
+    } else if transport_mode == TransportMode::Rist {
+        match udp_socket.as_ref() {
+            None => {
+                warn!(%peer, "rist requested but no UDP socket bound — falling back to tcp");
+            }
+            Some(sock) => {
+                if hello_udp_port > 0 {
+                    let client_udp_addr = SocketAddr::new(peer.ip(), hello_udp_port);
+                    let ssrc = {
+                        use std::hash::{Hash, Hasher};
+                        let mut h = std::collections::hash_map::DefaultHasher::new();
+                        peer.hash(&mut h);
+                        h.finish() as u32
+                    };
+                    // Register with the NACK router to receive client NACKs.
+                    nack_rx = Some(nack_router.register(ssrc, client_udp_addr).await);
+                    arq_ssrc = Some(ssrc);
+                    udp_media = Some(UdpMedia::Arq(ArqSender::new(
+                        sock.clone(),
+                        client_udp_addr,
+                        ssrc,
+                    )));
+                    info!(%peer, %client_udp_addr, "ARQ (Rist) media path active");
+                } else {
+                    warn!(%peer, "rist requested but client sent udp_port=0 — falling back to tcp");
                 }
             }
         }
@@ -593,10 +636,10 @@ async fn session_loop(
         warn!(%peer, %transport_mode, "Transport not yet implemented; falling back to tcp");
     }
 
-    let effective_mode = if rtp_sender.is_some() {
-        TransportMode::RtpUdp
-    } else {
-        TransportMode::Tcp
+    let effective_mode = match &udp_media {
+        Some(UdpMedia::Rtp(_)) => TransportMode::RtpUdp,
+        Some(UdpMedia::Arq(_)) => TransportMode::Rist,
+        None => TransportMode::Tcp,
     };
 
     // Queue initial ServerSettings via control channel.
@@ -633,30 +676,68 @@ async fn session_loop(
     group_sync_tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
 
     // ── Spawn the dedicated writer task ──────────────────────────────
-    let audio_write_task = if rtp_sender.is_some() {
-        // For RTP/UDP: audio goes through the RTP sender, control through TCP writer.
-        let mut rtp = rtp_sender.take().unwrap();
+    let audio_write_task = if let Some(media) = udp_media {
+        // For UDP transports (RTP or ARQ): audio goes through the UDP sender,
+        // control through TCP writer.
         let peer_for_task = peer;
-        let rtp_audio_rx = audio_write_rx;
-        // Spawn RTP audio task.
-        let rtp_task = tokio::spawn(async move {
-            let mut rx = rtp_audio_rx;
-            while let Some(wire_bytes) = rx.recv().await {
-                if let Err(e) = rtp.send_wire_bytes(&wire_bytes).await {
-                    warn!(%peer_for_task, error = %e, "RTP audio frame write failed");
-                    break;
-                }
+        let udp_audio_rx = audio_write_rx;
+
+        match media {
+            UdpMedia::Rtp(mut rtp) => {
+                // RTP: simple send loop, no NACK handling.
+                let udp_task = tokio::spawn(async move {
+                    let mut rx = udp_audio_rx;
+                    while let Some(wire_bytes) = rx.recv().await {
+                        if let Err(e) = rtp.send_wire_bytes(&wire_bytes).await {
+                            warn!(%peer_for_task, error = %e, "RTP audio frame write failed");
+                            break;
+                        }
+                    }
+                });
+                let _tcp_ctrl_task =
+                    tokio::spawn(tcp_writer_task(writer, mpsc::channel(1).1, ctrl_rx, peer));
+                udp_task
             }
-        });
-        // Also spawn a TCP writer for control messages.
-        let _tcp_ctrl_task = tokio::spawn(tcp_writer_task(
-            writer,
-            // Empty audio channel — RTP handles audio.
-            mpsc::channel(1).1,
-            ctrl_rx,
-            peer,
-        ));
-        rtp_task
+            UdpMedia::Arq(mut arq) => {
+                // ARQ: audio send loop + NACK handling from the NackRouter.
+                let mut arq_nack_rx = nack_rx.take().expect("ARQ mode requires nack_rx");
+                let udp_task = tokio::spawn(async move {
+                    let mut rx = udp_audio_rx;
+                    loop {
+                        tokio::select! {
+                            biased;
+                            frame = rx.recv() => {
+                                match frame {
+                                    Some(wire_bytes) => {
+                                        if let Err(e) = arq.send_audio(&wire_bytes).await {
+                                            warn!(%peer_for_task, error = %e, "ARQ audio frame write failed");
+                                            break;
+                                        }
+                                    }
+                                    None => break,
+                                }
+                            }
+                            nack = arq_nack_rx.recv() => {
+                                match nack {
+                                    Some(nack) => {
+                                        if let Err(e) = arq.handle_nack(&nack).await {
+                                            warn!(%peer_for_task, error = %e, "ARQ NACK handling failed");
+                                        }
+                                    }
+                                    None => {
+                                        // NACK channel closed — session is shutting down.
+                                        break;
+                                    }
+                                }
+                            }
+                        }
+                    }
+                });
+                let _tcp_ctrl_task =
+                    tokio::spawn(tcp_writer_task(writer, mpsc::channel(1).1, ctrl_rx, peer));
+                udp_task
+            }
+        }
     } else {
         // For TCP: both audio AND control go through the unified writer task.
         tokio::spawn(tcp_writer_task(writer, audio_write_rx, ctrl_rx, peer))
@@ -842,6 +923,10 @@ async fn session_loop(
 
     read_task.abort();
     audio_write_task.abort();
+    // Unregister from the NACK router if we were in ARQ mode.
+    if let Some(ssrc) = arq_ssrc {
+        nack_router.unregister(ssrc).await;
+    }
     result
 }
 

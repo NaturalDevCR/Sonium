@@ -378,12 +378,13 @@ async fn patch_transport(
     let mode = match body.mode.as_str() {
         "tcp" => TransportMode::Tcp,
         "rtp_udp" => TransportMode::RtpUdp,
+        "rist" => TransportMode::Rist,
         "quic_dgram" => TransportMode::QuicDgram,
         _ => {
             return (
                 StatusCode::BAD_REQUEST,
                 format!(
-                    "unknown transport mode {:?}; valid: tcp, rtp_udp, quic_dgram",
+                    "unknown transport mode {:?}; valid: tcp, rtp_udp, rist, quic_dgram",
                     body.mode
                 ),
             )

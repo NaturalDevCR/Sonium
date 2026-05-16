@@ -166,7 +166,7 @@ export interface RestartResponse {
   message: string;
 }
 
-export type TransportMode = 'tcp' | 'rtp_udp' | 'quic_dgram';
+export type TransportMode = 'tcp' | 'rtp_udp' | 'rist' | 'quic_dgram';
 
 export interface TransportResponse {
   mode: TransportMode;
