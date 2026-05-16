@@ -30,22 +30,30 @@ music source -> sonium-server -> LAN -> sonium-client -> speaker
 ## What Works Today
 
 - **Built-in web UI** with control view, admin dashboard, and **real-time sync
-  monitor**.
+  monitor**, refreshed responsive styling, and role-aware routes.
 - **Users, roles, JWT auth**, first-run/admin setup, and role-aware UI.
 - **Groups, per-client volume/mute/latency, EQ**, and live stream switching.
 - **Multiple configured streams**, including FIFO/files, TCP, `pipe://` external
-  processes, ffmpeg-style radio sources, and meta streams.
+  processes, ffmpeg-style radio sources, virtual AirPlay/Spotify templates in
+  the UI, and meta streams.
 - **External stream recovery**: `pipe://` sources restart with backoff if their
-  stdout closes.
+  stdout closes, and ffmpeg stderr is captured for diagnostics.
 - **System/admin tooling**: dependency checks, raw TOML editing, log viewer with
   time filters, and restart requests when systemd permissions are installed.
-- **Multi-room sync foundation**: GroupSync protocol, timezone config, and
-  chrony integration guidance.
+- **Multi-room sync foundation**: GroupSync, server-computed group offsets,
+  client drift nudging, source-quality reporting, timezone config, and chrony
+  integration guidance.
+- **Pluggable media transports**: stable TCP today, implemented-but-validating
+  `rtp_udp`, experimental Sonium-native ARQ/FEC over UDP via `rist`, and a
+  config-visible `quic_dgram` placeholder for a later encrypted datagram path.
 - **Same-machine optimization**: `--on-server` flag skips network sync when
   client and server share a machine.
 - **Sonium Desktop Agent** for macOS/Windows to configure client instances.
 - **Client audio output** through CPAL with dedicated audio thread, underrun
   crossfade, device hotplug recovery, output prefill, and `chunk_ms` control.
+- **Observability** through HealthReport sync metrics, Prometheus `/metrics`,
+  Sync Monitor UI, and Home Assistant entities for groups, clients, streams, and
+  client health.
 
 ## Install
 
@@ -143,6 +151,8 @@ Full docs: [naturaldevcr.github.io/Sonium](https://naturaldevcr.github.io/Sonium
 - [Installation](https://naturaldevcr.github.io/Sonium/getting-started/installation)
 - [Configuration](https://naturaldevcr.github.io/Sonium/getting-started/configuration)
 - [Architecture](https://naturaldevcr.github.io/Sonium/architecture/overview)
+- [Real-Time Transport Plan](https://naturaldevcr.github.io/Sonium/architecture/transport-migration-plan)
+- [Roadmap](https://naturaldevcr.github.io/Sonium/contributing/roadmap)
 
 ## Current Status
 
@@ -153,42 +163,54 @@ changes between releases.
 
 ### Known Challenges
 
-- **Low-latency reliability:** TCP streaming is now stable at 200 ms buffer on
-  most LANs, but Wi-Fi and mixed networks may need 400–800 ms. Auto-buffer
-  tuning is available but still experimental.
-- **Clock sync precision:** built-in protocol achieves ~10–50 ms. For < 1 ms
-  accuracy, chrony/NTP is required. PTP hardware support is planned.
-- **Source supervision:** `pipe://` sources recover automatically, but ffmpeg
-  stderr diagnostics are not yet surfaced in the UI.
+- **Transport validation:** TCP remains the safest default. `rtp_udp` and `rist`
+  are implemented for the real-time-first migration, but still need wider live
+  hardware validation before becoming default recommendations. `quic_dgram` is
+  intentionally not implemented yet.
+- **Low-latency reliability:** TCP is much stronger than earlier releases, but
+  Wi-Fi and mixed networks may still need conservative buffers. Auto-buffer
+  tuning exists and is still being validated.
+- **Clock sync precision:** GroupSync and sync telemetry are in place, but the
+  project still needs measured multi-device validation before claiming
+  Sonos-class reliability. Chrony/NTP is recommended for tighter clocks; PTP and
+  hardware timestamping remain future work.
+- **Source supervision:** `pipe://` recovery and ffmpeg stderr capture exist,
+  but operator-facing source health and guided remediation are still maturing.
 - **Upgrade/installer edges:** Linux systemd installs work best through the
-  installer; hand-written services may miss the sudoers restart permission.
-- **Observability:** health reports, sync status, and logs are visible in the UI,
-  but automated troubleshooting workflows are not yet implemented.
+  installer; hand-written services may miss restart permissions or migration
+  steps.
 - **Compatibility:** Snapcast discovery/migration pieces exist, but full
-  drop-in compatibility is not guaranteed.
+  drop-in compatibility with every Snapcast client/version is not guaranteed.
 
-### Roadmap
+### Roadmap Toward Sonos-Class Reliability
 
-**Recently Completed (v0.1.78):**
-- ✅ TCP streaming stability: dedicated writer task, audio-first drain loop
-- ✅ Remove faulty RTT filter, eliminate State::Buffering gate
-- ✅ GroupSync protocol for multi-room shared timeline
-- ✅ Timezone config support
-- ✅ `--on-server` flag for same-machine optimization
-- ✅ Web UI redesign: Dashboard, Sync Monitor, Expert mode toggle
+**Recently Completed (through v0.1.89):**
+- TCP streaming stability work: dedicated writers, audio-first draining, relaxed
+  false-positive sync warnings, and UDP auto-bind fixes.
+- GroupSync protocol with server-computed group offsets, smoother client nudges,
+  source-quality field, and health-report sync metrics in the UI.
+- Real-time transport foundation: `sonium-transport`, RTP/UDP media sender,
+  experimental ARQ/FEC/NACK path exposed as `rist`, and transport API/UI hooks.
+- Observability phase A: extended HealthReport, playout percentiles, callback
+  timing, drift/drop/dup counters, Prometheus metrics, and Sync Monitor updates.
+- Web/admin redesign, first-run auth flow hardening, stream templates for
+  AirPlay and Spotify Connect helpers, and Home Assistant integration.
+- Release packaging polish for Linux plus macOS/Windows Desktop Agent builds.
 
-**In Progress:**
-- Smart GroupSync: compute median group offset server-side
-- Source quality reporting in GroupSync (chrony integration)
-- Web UI setup wizard for first-time users
-- Auto-buffer tuning validation on real hardware
+**Next focus:**
+- Validate `rtp_udp` and `rist` on real LAN/Wi-Fi hardware, then document safe
+  profiles for default, low-latency, and recovery-heavy deployments.
+- Build operator-facing source diagnostics around ffmpeg stderr, stream state,
+  restart history, and likely next actions.
+- Turn health telemetry into automatic buffer recommendations and safer
+  auto-buffer behavior.
+- Harden config reload/restart flows and upgrade checks.
 
-**Planned:**
-- Improve diagnostics: surface ffmpeg stderr, automated troubleshooting
-- Harden restart/config flows: partial reloads, permission checks
-- PTP/hardware timestamp support for sub-microsecond sync
-- Relay/cross-subnet modes, TLS, richer source integrations
-- Continue packaging polish for Linux, macOS, and Windows Desktop Agent
+**Longer-term:**
+- QUIC DATAGRAM transport for encrypted/routed deployments.
+- PTP/hardware timestamp support through the `TimeSource` abstraction.
+- Relay/cross-subnet operation, TLS deployment profiles, richer source
+  integrations, calibration/DSP tools, and safer auto-update flows.
 
 ## License
 

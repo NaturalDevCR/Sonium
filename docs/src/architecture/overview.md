@@ -7,16 +7,16 @@ a single responsibility and can be tested in isolation.
 ┌─────────────────────────────────────────────────────────────┐
 │                      sonium-server                          │
 │                                                             │
-│  stdin/FIFO → encoder → broadcaster → session × N clients  │
+│  source readers → encoder → broadcaster → session × N      │
 │                              │                              │
-│                       control API (Fase 7)                  │
+│                       control API + embedded UI             │
 └─────────────────────────────────────────────────────────────┘
-           │ TCP :1710       │ HTTP :1711
+           │ TCP :1710       │ UDP media       │ HTTP :1711
            ▼                 ▼
 ┌─────────────────┐   ┌──────────────────┐
 │  sonium-client  │   │  browser / app   │
 │                 │   └──────────────────┘
-│  TCP → decoder  │
+│  transport → decoder
 │      → sync     │
 │      → speaker  │
 └─────────────────┘
@@ -25,6 +25,7 @@ Shared library crates (no I/O):
   sonium-protocol  —  wire serialisation / deserialisation
   sonium-codec     —  Encoder / Decoder traits + Opus + PCM
   sonium-sync      —  clock offset estimation + jitter buffer
+  sonium-transport —  TCP/RTP/ARQ sender abstractions
   sonium-common    —  SampleFormat, SoniumError, Config
 ```
 
@@ -33,7 +34,7 @@ Shared library crates (no I/O):
 ### Server side
 
 ```
-stdin / named pipe
+stdin / FIFO / file / TCP / pipe:// / meta stream
       │
       ▼  raw interleaved i16 LE PCM  (configurable: 48kHz / 16-bit / stereo)
   StreamReader
@@ -47,18 +48,18 @@ stdin / named pipe
       │ tokio broadcast channel          │
       ▼                                  ▼
   Session[0]               ...      Session[N]
-  (per-client TCP task)              (per-client TCP task)
+  control TCP + MediaSender          control TCP + MediaSender
 ```
 
 ### Client side
 
 ```
-TCP socket
+TCP control socket + optional UDP media socket
       │
       ▼  wire bytes
   MessageReader  ─────────────────────────────────┐
       │                                            │
-  CodecHeader              WireChunk           Time echo
+  CodecHeader              WireChunk           Time / GroupSync
       │                        │                   │
       ▼                        ▼                   ▼
   Decoder               PcmChunk           TimeProvider
@@ -75,11 +76,15 @@ TCP socket
 
 ## Design principles
 
-1. **No config required** — all defaults are production-ready for a home network.
+1. **No config required** — the server can start with defaults for local
+   testing, while production readiness is still a project goal.
 2. **One task per client** — Tokio `select!` loop, no thread-per-client.
 3. **Encode once, fan out** — the broadcaster serialises each frame once and clones
    a reference-counted `Bytes` handle to every session.
 4. **Clock sync isolated** — `sonium-sync` has no I/O; it is pure computation,
    making it trivially unit-testable.
-5. **Migration-friendly** — optional Snapcast compatibility mode lets existing
+5. **Transport migration-friendly** — TCP stays as the stable compatibility path
+   while RTP/UDP, ARQ/FEC, and future QUIC DATAGRAM evolve behind the
+   `MediaSender` abstraction.
+6. **Migration-friendly** — optional Snapcast compatibility mode lets existing
    Snapcast clients connect during migration (see configuration docs).

@@ -22,9 +22,11 @@ features:
   - title: Server and client binaries
     details: The server ingests PCM audio and hosts the web UI. Clients discover or connect to the server and play synchronized audio.
   - title: Works on your LAN
-    details: mDNS discovery, reconnects, per-client latency, volume, EQ, and groups are built into the control plane.
+    details: mDNS discovery, reconnects, per-client latency, volume, EQ, groups, and Home Assistant automation are built into the control plane.
+  - title: Real-time transport roadmap
+    details: TCP is the safe default while RTP/UDP, ARQ/FEC, and future QUIC DATAGRAM support move Sonium toward Sonos-class reliability.
   - title: Built for operators
-    details: Docker, systemd, GitHub releases, Prometheus metrics, config editing, log filters, and supervised restart requests are first-class workflows.
+    details: Docker, systemd, GitHub releases, Prometheus metrics, sync monitoring, config editing, log filters, and supervised restart requests are first-class workflows.
 ---
 
 ::: danger Not production-ready

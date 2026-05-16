@@ -1,6 +1,6 @@
 # Sonium Home Assistant Integration
 
-A Home Assistant integration for [Sonium](https://github.com/your-org/sonium), a Snapcast-compatible multiroom audio server. Exposes groups, zones, and clients as Home Assistant entities with real-time updates via WebSocket.
+A Home Assistant integration for [Sonium](https://github.com/NaturalDevCR/Sonium), an open-source multiroom audio server with a Snapcast migration path. Exposes groups, zones, clients, streams, and health telemetry as Home Assistant entities with real-time updates via WebSocket.
 
 ## Features
 

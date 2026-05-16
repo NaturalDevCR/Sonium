@@ -38,6 +38,8 @@ export default defineConfig({
           { text: 'Workspace Layout', link: '/architecture/workspace' },
           { text: 'Clock Sync', link: '/architecture/sync' },
           { text: 'Audio Pipeline', link: '/architecture/pipeline' },
+          { text: 'Transport Migration', link: '/architecture/transport-migration-plan' },
+          { text: 'TCP Baseline Profiles', link: '/architecture/tcp-baseline-profiles' },
           { text: 'Web UI', link: '/architecture/web-ui' },
         ],
       },
@@ -47,6 +49,12 @@ export default defineConfig({
           { text: 'Config Reference', link: '/reference/config' },
           { text: 'REST API', link: '/reference/api' },
           { text: 'Binary Protocol', link: '/reference/protocol' },
+        ],
+      },
+      {
+        text: 'Integrations',
+        items: [
+          { text: 'Home Assistant', link: '/integrations/home-assistant' },
         ],
       },
       {

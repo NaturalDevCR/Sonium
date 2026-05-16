@@ -1,8 +1,10 @@
 # Binary Protocol Reference
 
-Sonium uses a **compact binary protocol** over TCP for audio streaming and
-clock synchronization.  This page is a complete specification suitable for
-implementing a third-party client or server.
+Sonium uses a **compact binary protocol** for session setup, settings, clock
+synchronization, health reports, and TCP media streaming.  TCP is the stable
+default. Newer real-time media transports keep the reliable TCP control plane
+and move audio frames onto a separate media plane (`rtp_udp` and experimental
+`rist` today; `quic_dgram` later).
 
 ## Connection lifecycle
 
@@ -18,8 +20,15 @@ Client                                 Server
   │── Time request ───────────────────►│  (every ~1 second)
   │◄── Time response ──────────────────│
   │                                    │
+  │◄── GroupSync ──────────────────────│  (periodic multi-room timeline)
+  │── HealthReport ───────────────────►│  (periodic observability)
+  │                                    │
   │── ClientInfo (volume change) ──────►│  (on user action)
 ```
+
+When `ServerSettings.transport_mode` is `rtp_udp` or `rist`, `WireChunk`
+payloads may be delivered over UDP media packets while control, settings, time
+sync, health reports, and fallback decisions stay on the TCP session.
 
 ## Message framing
 
@@ -52,8 +61,11 @@ Offset  Bytes  Type    Field
 | 5 | `Hello` | C→S | JSON string (len-prefixed) |
 | 7 | `ClientInfo` | C→S | JSON string (len-prefixed) |
 | 8 | `Error` | S→C | code (u32) + message (len-prefixed string) + detail (len-prefixed string) |
+| 9 | `HealthReport` | C→S | fixed little-endian telemetry payload |
+| 10 | `GroupSync` | S→C | server/group timing target |
 
-> Type 6 is not used.  Parsers must treat it as an error.
+> Type 6 is not used. Type 0 is the internal base discriminant and is not a
+> valid application message.
 
 ## Payload formats
 
@@ -119,12 +131,23 @@ JSON object:
 
 ```json
 {
-  "bufferMs": 1000,
+  "buffer_ms": 1000,
+  "output_prefill_ms": 0,
   "latency":  0,
   "volume":   100,
-  "muted":    false
+  "muted":    false,
+  "eq_bands": [],
+  "eq_enabled": false,
+  "observability_enabled": true,
+  "transport_mode": "tcp",
+  "server_udp_port": 0
 }
 ```
+
+`transport_mode` is an empty string or `"tcp"` for the legacy TCP media path.
+Recognized config values are `"tcp"`, `"rtp_udp"`, `"rist"`, and
+`"quic_dgram"`. `quic_dgram` is reserved for a future QUIC DATAGRAM
+implementation.
 
 ### `Time` (type 4)
 
@@ -154,6 +177,43 @@ u32  detail_length
 u8[] detail[detail_length]
 ```
 
+### `HealthReport` (type 9)
+
+Fixed little-endian telemetry payload sent by the client when observability is
+enabled. The payload is append-only for backward compatibility; older clients
+may omit later fields, which decode to zero on the server.
+
+Core fields include underruns, overruns, stale drops, buffer depth, jitter,
+latency, output buffer depth, queued jitter-buffer chunks, callback starvation,
+audio callback xruns, RTP packet/gap/decode/concealment counters, drift
+drop/dup counters, ARQ NACK/retransmit/FEC counters, clock/group/total offset,
+output latency, playout error p50/p95/p99, callback duration p99, group sync
+error, commanded/applied resample ppm, and combined ARQ/FEC recovery rate.
+
+### `GroupSync` (type 10)
+
+```text
+i64  server_now_us      server timestamp in microseconds
+i64  group_offset_us    shared group offset target
+i32  rate_ppm           playback-rate correction in parts per million
+f32  source_quality     0.0-1.0 confidence in the sync source
+```
+
+For compatibility, a 20-byte payload without `source_quality` is accepted and
+decodes with `source_quality = 0.0`.
+
+## Media transport modes
+
+| Mode | Status | Notes |
+|------|--------|-------|
+| `tcp` | Stable default | Control and media share the ordered TCP connection. |
+| `rtp_udp` | Implemented, validating | UDP media plane using RTP-style packets; avoids TCP head-of-line blocking. |
+| `rist` | Experimental | Sonium-native ARQ/FEC/NACK over UDP inspired by RIST concepts; not libRIST wire-compatible. |
+| `quic_dgram` | Reserved | Planned encrypted datagram transport for routed/WAN deployments. |
+
+For UDP media modes, the server advertises `server_udp_port` in
+`ServerSettings`. TCP remains the control and fallback path.
+
 ## Validation rules
 
 Implementations **must** reject messages that violate these constraints:
@@ -161,7 +221,7 @@ Implementations **must** reject messages that violate these constraints:
 | Rule | Value |
 |------|-------|
 | Maximum payload size | 1 000 000 bytes |
-| Maximum message type | 8 |
+| Maximum message type | 10 |
 | Codec name length | ≤ 64 bytes |
 | JSON fields | UTF-8 encoded |
 

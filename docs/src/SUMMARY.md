@@ -32,6 +32,12 @@
 
 ---
 
+# Integrations
+
+- [Home Assistant](./integrations/home-assistant.md)
+
+---
+
 # Contributing
 
 - [Development Setup](./contributing/dev-setup.md)

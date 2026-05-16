@@ -19,13 +19,14 @@ Sonium is built from scratch for correctness, performance, and ease of use:
 |---|---|---|
 | Config to start | Required config files | **Zero** — works out of the box |
 | Auto-discovery | No | **mDNS built-in** |
-| Web interface | Third-party only | **Bundled** with drag-and-drop |
+| Web interface | Third-party only | **Bundled** control/admin/sync UI |
 | Reconnection | Manual restart | **Automatic** with backoff |
 | Installation | Build from source | **Release packages + Linux installer + Desktop Agent** |
 | Language | C / C++ | **Rust** — memory-safe, cross-platform |
-| Clock precision | Software only (~1 ms) | **PTP-ready** — pluggable `TimeSource` for nanosecond sync |
+| Clock precision | Software only (~1 ms) | **GroupSync + PTP-ready** pluggable `TimeSource` |
 | Codecs | Limited | **Opus + FLAC + PCM** out of the box |
 | Multi-stream | One global stream | **Per-group streams** with live switching |
+| Home automation | External glue | **Home Assistant integration** in-tree |
 
 ## Key features
 
@@ -33,10 +34,15 @@ Sonium is built from scratch for correctness, performance, and ease of use:
 - **Multi-codec** — Opus for bandwidth efficiency, FLAC for lossless quality, PCM for zero-latency.
 - **Multiple source types** — FIFO/file, TCP, external `pipe://` processes, ffmpeg radio templates, and meta streams.
 - **Recovering radio/process streams** — external sources restart with backoff if their stdout closes.
+- **Real-time transport migration** — TCP default, `rtp_udp` validation path,
+  experimental `rist` ARQ/FEC, and future `quic_dgram` planning.
+- **Sync observability** — GroupSync, server-computed group offsets, playout
+  percentiles, drift counters, Prometheus metrics, and a Sync Monitor UI.
 - **Tokio async** — handles hundreds of clients on a Raspberry Pi without threads-per-client overhead.
 - **Pluggable clock sync** — NTP-like software sync today, PTPv2 hardware timestamping tomorrow.
 - **Admin UI** — users, roles, groups, streams, config editing, dependency checks, logs, and supervised restart requests.
 - **Desktop Agent** — tray app for macOS and Windows client instances.
+- **Home Assistant** — custom integration for zones, speakers, streams, health sensors, and latency controls.
 - **Snapcast migration path** — optional compatibility mode lets existing Snapcast clients connect
   to a Sonium server during migration (see [configuration](./getting-started/configuration.md)).
 

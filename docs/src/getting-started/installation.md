@@ -153,6 +153,7 @@ The server exposes:
 | --- | --- |
 | `1710/tcp` | Sonium audio stream protocol |
 | `1711/tcp` | Web UI, REST API, WebSocket events |
+| `1712/udp` or auto-bound UDP | Optional `rtp_udp` / `rist` media transport when enabled |
 
 ## Build from Source
 

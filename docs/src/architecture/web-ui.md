@@ -31,7 +31,9 @@ web/
     components/
       StreamBadge.vue     Colored status pill
     views/
-      ControlView.vue     Main control surface
+      HomeView.vue        Main control surface
+      MatrixView.vue      Group/client matrix
+      SyncMonitorView.vue Sync health and group timing
       AdminView.vue       Admin shell
       admin/              Dashboard, streams, groups, clients, health, system, config, users
 ```
@@ -82,8 +84,8 @@ npm run build      # outputs to web/dist/
 ```
 
 The Rust control server embeds the `web/dist/` directory at compile time using
-`rust-embed` (planned Fase 7).  Any request that does not match `/api/*` is
-served as the SPA `index.html` (catch-all SPA routing).
+`rust-embed`. Any request that does not match `/api/*` is served as the SPA
+`index.html` (catch-all SPA routing).
 
 ## Features
 
@@ -91,13 +93,20 @@ served as the SPA `index.html` (catch-all SPA routing).
   group master volume, and role-aware controls.
 - **Admin dashboard** — live count of connected clients, groups, streams, and uptime.
 - **Streams tab** — source templates, URI builder, meta-stream chains, buffer and
-  `chunk_ms` controls, plus a restart prompt after saving config changes.
-- **Health tab** — client health/observability and filterable server logs.
+  `chunk_ms` controls, virtual AirPlay/Spotify helpers, plus a restart prompt
+  after saving config changes.
+- **Groups and clients tabs** — create/rename/delete groups, assign streams, move
+  clients between zones, and tune per-client settings.
+- **Health tab** — client health/observability, transport state, sync metrics,
+  and filterable server logs.
+- **Sync monitor** — GroupSync offset, group skew, playout error percentiles,
+  and drift/resample visibility for the current fleet.
 - **System tab** — OS/audio stack info, dependency checks, package actions,
   time-window log viewer, and supervised restart request.
 - **Config tab** — raw TOML editor with validation and restart button.
 - **Users tab** — create/edit/delete users and roles.
-- **Dark theme** — CSS custom properties, no external CSS framework
+- **Dark responsive theme** — CSS custom properties, responsive admin routes, and
+  embedded assets served by the Rust binary.
 
 Admins land on `/admin` after login. Non-admin users land on the control view
 unless they were following a specific redirect.

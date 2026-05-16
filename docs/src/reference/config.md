@@ -3,6 +3,11 @@
 ## `sonium.toml` — complete reference
 
 ```toml
+# Optional IANA timezone used for structured logs and UI timestamps.
+# If unset, Sonium uses the host's local timezone.
+timezone = "America/Costa_Rica"
+
+
 # ── Server network ─────────────────────────────────────────────────────────
 [server]
 
@@ -23,6 +28,47 @@ mdns = true
 # can discover this server.  For full Snapcast compatibility you must also set
 # stream_port = 1704 and control_port = 1780.
 snapcast_compat = false
+
+# ── Audio timing ───────────────────────────────────────────────────────────
+[server.audio]
+
+# Global jitter buffer suggested to clients unless a stream overrides it.
+buffer_ms = 200
+
+# Encoded audio chunk duration. Smaller chunks reduce latency but increase
+# packet/task overhead.
+chunk_ms = 10
+
+# Output-device prefill in milliseconds. 0 lets the client derive it from
+# buffer_ms.
+output_prefill_ms = 0
+
+
+# ── Automatic buffer tuning ────────────────────────────────────────────────
+[server.auto_buffer]
+
+# Experimental. When enabled, the server watches client health reports and
+# nudges buffers up/down within these limits.
+enabled = false
+min_ms = 20
+max_ms = 3000
+step_up_ms = 120
+step_down_ms = 40
+cooldown_ms = 8000
+
+
+# ── Media transport ────────────────────────────────────────────────────────
+[server.transport]
+
+# "tcp"        — stable default; media and control share the TCP session
+# "rtp_udp"    — implemented UDP media plane; pending wider live validation
+# "rist"       — experimental Sonium-native ARQ/FEC over UDP, not libRIST wire-compatible
+# "quic_dgram" — config-visible placeholder; not implemented yet
+mode = "tcp"
+
+# UDP media port for rtp_udp/rist. 0 lets the server auto-bind when a UDP mode
+# requires it, or disables UDP when TCP is selected.
+udp_port = 0
 
 
 # ── Audio streams ──────────────────────────────────────────────────────────
@@ -52,10 +98,17 @@ source = "-"
 #   "flac"  — lossless compression
 codec = "opus"
 
-# Jitter buffer size in milliseconds.
-# Higher = more tolerance for network jitter, more end-to-end latency.
-# Lower  = tighter sync, may cause dropouts on congested networks.
-buffer_ms = 1000
+# Optional per-stream jitter buffer override. If omitted, [server.audio].buffer_ms is used.
+buffer_ms = 400
+
+# Optional per-stream encoded chunk duration override.
+chunk_ms = 10
+
+# Mark the stream idle after no input arrives for this many milliseconds.
+idle_timeout_ms = 5000
+
+# Emit silence while idle so connected clients do not immediately underrun.
+silence_on_idle = true
 
 # Sample format for this stream's input.
 [streams.sample_format]
@@ -97,7 +150,7 @@ level = "info"
 
 ## Environment variable overrides
 
-Every config key maps to an environment variable with the prefix `SONIUM_`:
+Common CLI-backed settings can be overridden with environment variables:
 
 | Config key | Environment variable |
 |---|---|
@@ -115,4 +168,5 @@ Client:
 | `latency_ms` | `SONIUM_LATENCY` |
 | `log.level` | `SONIUM_LOG` |
 
-Environment variables take precedence over `sonium.toml`.
+Environment variables take precedence over `sonium.toml` for the keys listed
+above.
