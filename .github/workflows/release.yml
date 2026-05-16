@@ -183,14 +183,24 @@ jobs:
         working-directory: client-gui
 
       - name: Build Tauri Desktop Agent
-        uses: tauri-apps/tauri-action@v0
+        run: npm run tauri build -- --target ${{ matrix.target }} --bundles app
+        working-directory: client-gui
+
+      - name: Package macOS app
+        if: runner.os == 'macOS'
+        run: |
+          set -euxo pipefail
+          app_path="target/${{ matrix.target }}/release/bundle/macos/Sonium.app"
+          output="target/${{ matrix.target }}/release/bundle/macos/Sonium_${{ github.event_name == 'workflow_dispatch' && inputs.tag || github.ref_name }}_aarch64.app.tar.gz"
+          tar -czf "$output" -C "$(dirname "$app_path")" "$(basename "$app_path")"
+
+      - name: Upload Desktop Agent to release
+        uses: softprops/action-gh-release@v2
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         with:
-          projectPath: client-gui
-          args: --target ${{ matrix.target }}
-          tagName: ${{ github.event_name == 'workflow_dispatch' && inputs.tag || github.ref_name }}
-          releaseId: ${{ needs.publish.outputs.release_id }}
+          tag_name: ${{ github.event_name == 'workflow_dispatch' && inputs.tag || github.ref_name }}
+          files: target/${{ matrix.target }}/release/bundle/macos/*.app.tar.gz
 
   publish:
     name: Publish GitHub Release
