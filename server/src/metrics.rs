@@ -252,6 +252,114 @@ lazy_static! {
             ),
             &["client_id", "transport"]
         ).unwrap();
+
+    /// Latest reported clock offset between client and server, microseconds.
+    pub static ref CLIENT_CLOCK_OFFSET_US: IntGaugeVec =
+        register_int_gauge_vec!(
+            Opts::new(
+                "sonium_client_clock_offset_us",
+                "Latest reported client clock offset to server (Kalman estimate), microseconds"
+            ),
+            &["client_id", "transport"]
+        ).unwrap();
+
+    /// Latest reported group offset applied, microseconds (signed).
+    pub static ref CLIENT_GROUP_OFFSET_US: IntGaugeVec =
+        register_int_gauge_vec!(
+            Opts::new(
+                "sonium_client_group_offset_us",
+                "Latest reported group offset applied at the client, microseconds (signed)"
+            ),
+            &["client_id", "transport"]
+        ).unwrap();
+
+    /// Sync error vs the group target, microseconds (signed).
+    pub static ref CLIENT_SYNC_ERROR_US: IntGaugeVec =
+        register_int_gauge_vec!(
+            Opts::new(
+                "sonium_client_sync_error_us",
+                "Latest reported sync error to the group target, microseconds (signed)"
+            ),
+            &["client_id", "transport"]
+        ).unwrap();
+
+    /// Maximum absolute sync error across clients of a group, microseconds.
+    pub static ref GROUP_SKEW_MAX_US: IntGaugeVec =
+        register_int_gauge_vec!(
+            Opts::new(
+                "sonium_group_skew_max_us",
+                "Maximum absolute sync error across all clients in a group, microseconds"
+            ),
+            &["group"]
+        ).unwrap();
+
+    /// Playout-error percentiles per client (p50/p95/p99), microseconds.
+    pub static ref CLIENT_PLAYOUT_ERROR_P50_US: IntGaugeVec =
+        register_int_gauge_vec!(
+            Opts::new(
+                "sonium_client_playout_error_p50_us",
+                "P50 of |playout error| over rolling window, microseconds"
+            ),
+            &["client_id", "transport"]
+        ).unwrap();
+
+    pub static ref CLIENT_PLAYOUT_ERROR_P95_US: IntGaugeVec =
+        register_int_gauge_vec!(
+            Opts::new(
+                "sonium_client_playout_error_p95_us",
+                "P95 of |playout error| over rolling window, microseconds"
+            ),
+            &["client_id", "transport"]
+        ).unwrap();
+
+    pub static ref CLIENT_PLAYOUT_ERROR_P99_US: IntGaugeVec =
+        register_int_gauge_vec!(
+            Opts::new(
+                "sonium_client_playout_error_p99_us",
+                "P99 of |playout error| over rolling window, microseconds"
+            ),
+            &["client_id", "transport"]
+        ).unwrap();
+
+    /// P99 of audio-callback duration, microseconds.
+    pub static ref CLIENT_CALLBACK_DURATION_P99_US: IntGaugeVec =
+        register_int_gauge_vec!(
+            Opts::new(
+                "sonium_client_callback_duration_p99_us",
+                "P99 of cpal callback duration over rolling window, microseconds"
+            ),
+            &["client_id", "transport"]
+        ).unwrap();
+
+    /// Latest output device latency reported by the client audio backend, microseconds.
+    pub static ref CLIENT_OUTPUT_LATENCY_US: IntGaugeVec =
+        register_int_gauge_vec!(
+            Opts::new(
+                "sonium_client_output_latency_us",
+                "Latest output device latency reported by the client audio backend, microseconds"
+            ),
+            &["client_id", "transport"]
+        ).unwrap();
+
+    /// Combined ARQ+FEC packet recovery ratio in basis points (0–10000).
+    pub static ref CLIENT_ARQ_FEC_RECOVERY_PCT_BP: IntGaugeVec =
+        register_int_gauge_vec!(
+            Opts::new(
+                "sonium_client_arq_fec_recovery_pct_bp",
+                "Combined ARQ+FEC packet recovery as a fraction of total loss (basis points, 0=0%, 10000=100%)"
+            ),
+            &["client_id", "transport"]
+        ).unwrap();
+
+    /// Active transport mode per client (1 for current label, 0 for others).
+    pub static ref CLIENT_TRANSPORT_ACTIVE: IntGaugeVec =
+        register_int_gauge_vec!(
+            Opts::new(
+                "sonium_client_transport_active",
+                "Active transport mode per client (1=current, 0=inactive)"
+            ),
+            &["client_id", "transport"]
+        ).unwrap();
 }
 
 pub fn observe_client_health(
@@ -315,12 +423,61 @@ pub fn observe_client_health(
     CLIENT_ARQ_FEC_RECOVERED
         .with_label_values(&[client_id, transport])
         .set(report.arq_fec_recovered as i64);
+    CLIENT_CLOCK_OFFSET_US
+        .with_label_values(&[client_id, transport])
+        .set(report.clock_offset_us);
+    CLIENT_GROUP_OFFSET_US
+        .with_label_values(&[client_id, transport])
+        .set(report.group_offset_us);
+    CLIENT_SYNC_ERROR_US
+        .with_label_values(&[client_id, transport])
+        .set(report.sync_error_to_group_us);
+    CLIENT_PLAYOUT_ERROR_P50_US
+        .with_label_values(&[client_id, transport])
+        .set(report.playout_error_us_p50 as i64);
+    CLIENT_PLAYOUT_ERROR_P95_US
+        .with_label_values(&[client_id, transport])
+        .set(report.playout_error_us_p95 as i64);
+    CLIENT_PLAYOUT_ERROR_P99_US
+        .with_label_values(&[client_id, transport])
+        .set(report.playout_error_us_p99 as i64);
+    CLIENT_CALLBACK_DURATION_P99_US
+        .with_label_values(&[client_id, transport])
+        .set(report.callback_xrun_us_p99 as i64);
+    CLIENT_OUTPUT_LATENCY_US
+        .with_label_values(&[client_id, transport])
+        .set(report.output_latency_us as i64);
+    CLIENT_ARQ_FEC_RECOVERY_PCT_BP
+        .with_label_values(&[client_id, transport])
+        .set(report.arq_fec_combined_recovery_pct as i64);
 
     for candidate in AudioHealthState::ALL {
         CLIENT_HEALTH_STATE
             .with_label_values(&[client_id, transport, candidate.as_str()])
             .set(if candidate == state { 1 } else { 0 });
     }
+}
+
+/// Mark `transport` as the active mode for `client_id`. Sets the active gauge to 1
+/// for this transport and clears it for any others previously seen.
+pub fn observe_active_transport(client_id: &str, active_transport: &str) {
+    for kind in ["tcp", "rtp_udp", "rist", "arq_udp", "quic_dgram"] {
+        let val = if kind == active_transport { 1 } else { 0 };
+        CLIENT_TRANSPORT_ACTIVE
+            .with_label_values(&[client_id, kind])
+            .set(val);
+    }
+}
+
+/// Update the per-group max absolute sync error in microseconds.
+///
+/// Wired into the adaptive engine in Phase E; for Phase A the gauge is
+/// registered but populated only when the engine is enabled.
+#[allow(dead_code)]
+pub fn observe_group_skew_max(group: &str, max_abs_us: i64) {
+    GROUP_SKEW_MAX_US
+        .with_label_values(&[group])
+        .set(max_abs_us);
 }
 
 /// Render all registered metrics as Prometheus text format.

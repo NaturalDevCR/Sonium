@@ -10,9 +10,11 @@
 //! - [`PcmChunk`] — a decoded audio chunk with its playout timestamp.
 
 pub mod buffer;
+pub mod playout_histogram;
 pub mod time_provider;
 pub mod time_source;
 
 pub use buffer::{DriftCorrector, PcmChunk, SyncBuffer};
+pub use playout_histogram::PlayoutErrorTracker;
 pub use time_provider::TimeProvider;
 pub use time_source::{NtpTimeSource, TimeSource};

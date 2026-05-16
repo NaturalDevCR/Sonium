@@ -59,6 +59,35 @@ export interface HealthReport {
   rtp_sequence_gaps?: number;
   rtp_decode_error_count?: number;
   rtp_concealed_packets?: number;
+  drift_drop_count?: number;
+  drift_dup_count?: number;
+  arq_nacks_sent?: number;
+  arq_retransmit_received?: number;
+  arq_fec_recovered?: number;
+  // Phase A sync/observability fields (all optional for wire-compat).
+  clock_offset_us?: number;
+  group_offset_us?: number;
+  total_offset_us?: number;
+  output_latency_us?: number;
+  playout_error_us_p50?: number;
+  playout_error_us_p95?: number;
+  playout_error_us_p99?: number;
+  callback_xrun_us_p99?: number;
+  sync_error_to_group_us?: number;
+  resample_ratio_ppm_commanded?: number;
+  resample_ratio_ppm_applied?: number;
+  arq_fec_combined_recovery_pct?: number;
+}
+
+export type SyncState = 'sync_ok' | 'sync_degraded' | 'sync_unstable';
+
+export function syncStateFromHealth(h?: HealthReport | null): SyncState {
+  if (!h) return 'sync_unstable';
+  const absSkew = Math.abs(h.sync_error_to_group_us ?? 0);
+  const p95 = h.playout_error_us_p95 ?? 0;
+  if (absSkew <= 2_000 && p95 <= 2_000) return 'sync_ok';
+  if (absSkew <= 10_000 && p95 <= 5_000) return 'sync_degraded';
+  return 'sync_unstable';
 }
 
 export interface Client {

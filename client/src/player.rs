@@ -39,6 +39,9 @@ struct HealthState {
     audio_callback_xrun_count: AtomicU32,
     drift_drop_count: AtomicU64,
     drift_dup_count: AtomicU64,
+    /// Tracks the duration (Instant pre/post) of each audio callback in µs.
+    /// Used to produce `callback_xrun_us_p99` in HealthReport.
+    callback_duration_tracker: Mutex<sonium_sync::PlayoutErrorTracker>,
 }
 
 #[derive(Debug, Clone, Copy, Default)]
@@ -49,6 +52,10 @@ pub struct PlayerHealth {
     pub audio_callback_xrun_count: u32,
     pub drift_drop_count: u64,
     pub drift_dup_count: u64,
+    /// P99 of audio callback duration over the rolling window, microseconds.
+    pub callback_duration_p99_us: u32,
+    /// Latest output device latency reported by the audio backend, microseconds.
+    pub output_latency_us: u32,
 }
 
 pub struct Player {
@@ -118,6 +125,14 @@ impl PlaybackHandle {
 
     pub fn jitter_us(&self) -> i64 {
         self.inner.lock().unwrap().buffer.jitter_us()
+    }
+
+    pub fn playout_error_percentiles_us(&self) -> (u32, u32, u32) {
+        self.inner
+            .lock()
+            .unwrap()
+            .buffer
+            .playout_error_percentiles_us()
     }
 
     pub fn clear(&self) {
@@ -724,6 +739,13 @@ impl Player {
 
     /// Return and reset health metrics.
     pub fn take_health(&self) -> PlayerHealth {
+        let (_p50, _p95, p99) = self
+            .health
+            .callback_duration_tracker
+            .lock()
+            .map(|t| t.percentiles())
+            .unwrap_or((0, 0, 0));
+        let output_latency_us = self.latest_output_latency_us.load(Ordering::Relaxed);
         PlayerHealth {
             underrun_count: self.health.underrun_count.swap(0, Ordering::Relaxed),
             overrun_count: self.health.overrun_count.swap(0, Ordering::Relaxed),
@@ -737,6 +759,8 @@ impl Player {
                 .swap(0, Ordering::Relaxed),
             drift_drop_count: self.health.drift_drop_count.swap(0, Ordering::Relaxed),
             drift_dup_count: self.health.drift_dup_count.swap(0, Ordering::Relaxed),
+            callback_duration_p99_us: p99,
+            output_latency_us: output_latency_us.max(0).min(u32::MAX as i64) as u32,
         }
     }
 }
@@ -920,7 +944,11 @@ fn build_stream_for_format(
             device.build_output_stream(
                 config,
                 move |data: &mut [i16], info: &cpal::OutputCallbackInfo| {
-                    timing.observe(data.len(), &data_health);
+                    let started = timing.observe(data.len(), &data_health);
+                    let _dur_guard = CallbackDurationGuard::new(&data_health, started);
+                    if let Some(latency_us) = output_latency_us(info) {
+                        latest_output_latency_us.store(latency_us, Ordering::Relaxed);
+                    }
                     if let Some(playback) = playback.as_ref() {
                         let (drops, dups) = playback.take_drift_metrics();
                         data_health
@@ -931,9 +959,6 @@ fn build_stream_for_format(
                             .fetch_add(dups, Ordering::Relaxed);
                         playback.fill_i16(data, info, &data_health, &mut fade);
                         return;
-                    }
-                    if let Some(latency_us) = output_latency_us(info) {
-                        latest_output_latency_us.store(latency_us, Ordering::Relaxed);
                     }
                     let mut ring = ring.lock().unwrap();
                     for sample in data.iter_mut() {
@@ -968,7 +993,11 @@ fn build_stream_for_format(
             device.build_output_stream(
                 config,
                 move |data: &mut [u16], info: &cpal::OutputCallbackInfo| {
-                    timing.observe(data.len(), &data_health);
+                    let started = timing.observe(data.len(), &data_health);
+                    let _dur_guard = CallbackDurationGuard::new(&data_health, started);
+                    if let Some(latency_us) = output_latency_us(info) {
+                        latest_output_latency_us.store(latency_us, Ordering::Relaxed);
+                    }
                     if let Some(playback) = playback.as_ref() {
                         let (drops, dups) = playback.take_drift_metrics();
                         data_health
@@ -983,9 +1012,6 @@ fn build_stream_for_format(
                             *dst = (*src as i32 + 32768) as u16;
                         }
                         return;
-                    }
-                    if let Some(latency_us) = output_latency_us(info) {
-                        latest_output_latency_us.store(latency_us, Ordering::Relaxed);
                     }
                     let mut ring = ring.lock().unwrap();
                     for sample in data.iter_mut() {
@@ -1020,7 +1046,11 @@ fn build_stream_for_format(
             device.build_output_stream(
                 config,
                 move |data: &mut [f32], info: &cpal::OutputCallbackInfo| {
-                    timing.observe(data.len(), &data_health);
+                    let started = timing.observe(data.len(), &data_health);
+                    let _dur_guard = CallbackDurationGuard::new(&data_health, started);
+                    if let Some(latency_us) = output_latency_us(info) {
+                        latest_output_latency_us.store(latency_us, Ordering::Relaxed);
+                    }
                     if let Some(playback) = playback.as_ref() {
                         let (drops, dups) = playback.take_drift_metrics();
                         data_health
@@ -1031,9 +1061,6 @@ fn build_stream_for_format(
                             .fetch_add(dups, Ordering::Relaxed);
                         playback.fill_f32(data, info, &data_health, &mut fade);
                         return;
-                    }
-                    if let Some(latency_us) = output_latency_us(info) {
-                        latest_output_latency_us.store(latency_us, Ordering::Relaxed);
                     }
                     let mut ring = ring.lock().unwrap();
                     for sample in data.iter_mut() {
@@ -1093,7 +1120,10 @@ impl CallbackTiming {
         }
     }
 
-    fn observe(&mut self, sample_count: usize, health: &HealthState) {
+    /// Record arrival gap (last callback start → this one) and return the
+    /// `Instant` that should be passed to [`record_duration`] when the callback
+    /// finishes its work.
+    fn observe(&mut self, sample_count: usize, health: &HealthState) -> Instant {
         let now = Instant::now();
         if let Some(last_started) = self.last_started {
             let elapsed = now.saturating_duration_since(last_started);
@@ -1110,12 +1140,36 @@ impl CallbackTiming {
             }
         }
         self.last_started = Some(now);
+        now
     }
 
     fn expected_duration(&self, sample_count: usize) -> Duration {
         let frames = sample_count / self.channels;
         let micros = ((frames as u128) * 1_000_000u128 / u128::from(self.sample_rate)).max(1);
         Duration::from_micros(micros.min(u128::from(u64::MAX)) as u64)
+    }
+}
+
+/// RAII helper: records callback duration on drop regardless of which `return`
+/// path the callback takes. Best-effort: skips recording if the tracker mutex
+/// is contended (real-time-safe).
+struct CallbackDurationGuard<'a> {
+    health: &'a HealthState,
+    started: Instant,
+}
+
+impl<'a> CallbackDurationGuard<'a> {
+    fn new(health: &'a HealthState, started: Instant) -> Self {
+        Self { health, started }
+    }
+}
+
+impl Drop for CallbackDurationGuard<'_> {
+    fn drop(&mut self) {
+        let elapsed_us = self.started.elapsed().as_micros().min(u32::MAX as u128) as i64;
+        if let Ok(mut tracker) = self.health.callback_duration_tracker.try_lock() {
+            tracker.record(elapsed_us);
+        }
     }
 }
 

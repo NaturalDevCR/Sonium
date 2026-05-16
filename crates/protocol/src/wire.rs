@@ -31,6 +31,10 @@ impl<'a> WireRead<'a> {
         self.read_bytes::<4>().map(i32::from_le_bytes)
     }
 
+    pub fn read_i64(&mut self) -> Result<i64> {
+        self.read_bytes::<8>().map(i64::from_le_bytes)
+    }
+
     pub fn read_str(&mut self) -> Result<String> {
         let len = self.read_u32()? as usize;
         let bytes = self.read_slice(len)?;
@@ -85,6 +89,10 @@ impl WireWrite {
     }
 
     pub fn write_i32(&mut self, v: i32) {
+        self.buf.extend_from_slice(&v.to_le_bytes());
+    }
+
+    pub fn write_i64(&mut self, v: i64) {
         self.buf.extend_from_slice(&v.to_le_bytes());
     }
 

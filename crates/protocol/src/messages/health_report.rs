@@ -16,10 +16,16 @@ pub enum AudioHealthState {
     Underrun,
     Fallback,
     Offline,
+    /// Multi-client sync error is within target band (group skew < 2 ms).
+    SyncOk,
+    /// Group skew elevated but recoverable (2-10 ms) — adaptive engine may nudge.
+    SyncDegraded,
+    /// Group skew large or oscillating (> 10 ms) — likely clock-source or transport problem.
+    SyncUnstable,
 }
 
 impl AudioHealthState {
-    pub const ALL: [Self; 7] = [
+    pub const ALL: [Self; 10] = [
         Self::Buffering,
         Self::Stable,
         Self::Degraded,
@@ -27,6 +33,9 @@ impl AudioHealthState {
         Self::Underrun,
         Self::Fallback,
         Self::Offline,
+        Self::SyncOk,
+        Self::SyncDegraded,
+        Self::SyncUnstable,
     ];
 
     pub fn as_str(self) -> &'static str {
@@ -38,6 +47,9 @@ impl AudioHealthState {
             Self::Underrun => "underrun",
             Self::Fallback => "fallback",
             Self::Offline => "offline",
+            Self::SyncOk => "sync_ok",
+            Self::SyncDegraded => "sync_degraded",
+            Self::SyncUnstable => "sync_unstable",
         }
     }
 
@@ -58,6 +70,21 @@ impl AudioHealthState {
             Self::Degraded
         } else {
             Self::Stable
+        }
+    }
+
+    /// Derive a sync-quality state from `sync_error_to_group_us` and playout error percentiles.
+    ///
+    /// Thresholds align with the SONOS-level roadmap: `p95 ≤ 5 ms` is the target band.
+    pub fn sync_from_report(report: &HealthReport) -> Self {
+        let abs_skew_us = report.sync_error_to_group_us.unsigned_abs();
+        let playout_p95_us = report.playout_error_us_p95 as u64;
+        if abs_skew_us <= 2_000 && playout_p95_us <= 2_000 {
+            Self::SyncOk
+        } else if abs_skew_us <= 10_000 && playout_p95_us <= 5_000 {
+            Self::SyncDegraded
+        } else {
+            Self::SyncUnstable
         }
     }
 }
@@ -133,6 +160,42 @@ pub struct HealthReport {
     /// Number of audio packets recovered via FEC (no retransmission needed).
     #[serde(default)]
     pub arq_fec_recovered: u32,
+    /// Client estimate of clock offset to server in microseconds (after Kalman filter).
+    #[serde(default)]
+    pub clock_offset_us: i64,
+    /// Group offset applied to playout in microseconds (server-broadcast target).
+    #[serde(default)]
+    pub group_offset_us: i64,
+    /// Total offset applied (clock + group) in microseconds.
+    #[serde(default)]
+    pub total_offset_us: i64,
+    /// Output device latency reported by the audio backend in microseconds.
+    #[serde(default)]
+    pub output_latency_us: u32,
+    /// P50 of |scheduled_playout - actual_playout| over rolling 60s window, microseconds.
+    #[serde(default)]
+    pub playout_error_us_p50: u32,
+    /// P95 of playout error, microseconds.
+    #[serde(default)]
+    pub playout_error_us_p95: u32,
+    /// P99 of playout error, microseconds.
+    #[serde(default)]
+    pub playout_error_us_p99: u32,
+    /// P99 of audio callback duration (Instant pre/post cpal callback), microseconds.
+    #[serde(default)]
+    pub callback_xrun_us_p99: u32,
+    /// Signed error between this client's playout and the group target, microseconds.
+    #[serde(default)]
+    pub sync_error_to_group_us: i64,
+    /// Resample ratio the server commanded (rate_ppm from group sync), parts-per-million.
+    #[serde(default)]
+    pub resample_ratio_ppm_commanded: i32,
+    /// Resample ratio the client actually applied (may differ if engine is stepwise), ppm.
+    #[serde(default)]
+    pub resample_ratio_ppm_applied: i32,
+    /// Combined ARQ+FEC packet recovery rate as percent of total loss, 0-10000 (basis points).
+    #[serde(default)]
+    pub arq_fec_combined_recovery_pct: u16,
 }
 
 impl HealthReport {
@@ -165,6 +228,18 @@ impl HealthReport {
             arq_nacks_sent: 0,
             arq_retransmit_received: 0,
             arq_fec_recovered: 0,
+            clock_offset_us: 0,
+            group_offset_us: 0,
+            total_offset_us: 0,
+            output_latency_us: 0,
+            playout_error_us_p50: 0,
+            playout_error_us_p95: 0,
+            playout_error_us_p99: 0,
+            callback_xrun_us_p99: 0,
+            sync_error_to_group_us: 0,
+            resample_ratio_ppm_commanded: 0,
+            resample_ratio_ppm_applied: 0,
+            arq_fec_combined_recovery_pct: 0,
         }
     }
 
@@ -226,6 +301,47 @@ impl HealthReport {
         self
     }
 
+    pub fn with_sync_metrics(
+        mut self,
+        clock_offset_us: i64,
+        group_offset_us: i64,
+        total_offset_us: i64,
+        sync_error_to_group_us: i64,
+    ) -> Self {
+        self.clock_offset_us = clock_offset_us;
+        self.group_offset_us = group_offset_us;
+        self.total_offset_us = total_offset_us;
+        self.sync_error_to_group_us = sync_error_to_group_us;
+        self
+    }
+
+    pub fn with_playout_error(
+        mut self,
+        p50_us: u32,
+        p95_us: u32,
+        p99_us: u32,
+        callback_xrun_p99_us: u32,
+        output_latency_us: u32,
+    ) -> Self {
+        self.playout_error_us_p50 = p50_us;
+        self.playout_error_us_p95 = p95_us;
+        self.playout_error_us_p99 = p99_us;
+        self.callback_xrun_us_p99 = callback_xrun_p99_us;
+        self.output_latency_us = output_latency_us;
+        self
+    }
+
+    pub fn with_resample_metrics(mut self, commanded_ppm: i32, applied_ppm: i32) -> Self {
+        self.resample_ratio_ppm_commanded = commanded_ppm;
+        self.resample_ratio_ppm_applied = applied_ppm;
+        self
+    }
+
+    pub fn with_arq_fec_recovery_pct(mut self, basis_points: u16) -> Self {
+        self.arq_fec_combined_recovery_pct = basis_points;
+        self
+    }
+
     pub fn total_playout_queue_ms(&self) -> u32 {
         self.buffer_depth_ms.saturating_add(self.output_buffer_ms)
     }
@@ -261,11 +377,23 @@ impl HealthReport {
             arq_nacks_sent: if r.remaining() >= 4 { r.read_u32()? } else { 0 },
             arq_retransmit_received: if r.remaining() >= 4 { r.read_u32()? } else { 0 },
             arq_fec_recovered: if r.remaining() >= 4 { r.read_u32()? } else { 0 },
+            clock_offset_us: if r.remaining() >= 8 { r.read_i64()? } else { 0 },
+            group_offset_us: if r.remaining() >= 8 { r.read_i64()? } else { 0 },
+            total_offset_us: if r.remaining() >= 8 { r.read_i64()? } else { 0 },
+            output_latency_us: if r.remaining() >= 4 { r.read_u32()? } else { 0 },
+            playout_error_us_p50: if r.remaining() >= 4 { r.read_u32()? } else { 0 },
+            playout_error_us_p95: if r.remaining() >= 4 { r.read_u32()? } else { 0 },
+            playout_error_us_p99: if r.remaining() >= 4 { r.read_u32()? } else { 0 },
+            callback_xrun_us_p99: if r.remaining() >= 4 { r.read_u32()? } else { 0 },
+            sync_error_to_group_us: if r.remaining() >= 8 { r.read_i64()? } else { 0 },
+            resample_ratio_ppm_commanded: if r.remaining() >= 4 { r.read_i32()? } else { 0 },
+            resample_ratio_ppm_applied: if r.remaining() >= 4 { r.read_i32()? } else { 0 },
+            arq_fec_combined_recovery_pct: if r.remaining() >= 2 { r.read_u16()? } else { 0 },
         })
     }
 
     pub fn encode(&self) -> Vec<u8> {
-        let mut w = WireWrite::with_capacity(80);
+        let mut w = WireWrite::with_capacity(154);
         w.write_u32(self.underrun_count);
         w.write_u32(self.overrun_count);
         w.write_u32(self.stale_drop_count);
@@ -286,6 +414,18 @@ impl HealthReport {
         w.write_u32(self.arq_nacks_sent);
         w.write_u32(self.arq_retransmit_received);
         w.write_u32(self.arq_fec_recovered);
+        w.write_i64(self.clock_offset_us);
+        w.write_i64(self.group_offset_us);
+        w.write_i64(self.total_offset_us);
+        w.write_u32(self.output_latency_us);
+        w.write_u32(self.playout_error_us_p50);
+        w.write_u32(self.playout_error_us_p95);
+        w.write_u32(self.playout_error_us_p99);
+        w.write_u32(self.callback_xrun_us_p99);
+        w.write_i64(self.sync_error_to_group_us);
+        w.write_i32(self.resample_ratio_ppm_commanded);
+        w.write_i32(self.resample_ratio_ppm_applied);
+        w.write_u16(self.arq_fec_combined_recovery_pct);
         w.finish()
     }
 }
@@ -354,6 +494,81 @@ mod tests {
         assert_eq!(decoded.rtp_decode_error_count, 1);
         assert_eq!(decoded.rtp_concealed_packets, 2);
         assert_eq!(decoded.total_playout_queue_ms(), 300);
+    }
+
+    #[test]
+    fn sync_metrics_round_trip_on_wire() {
+        let original = report(0, 0, 0, 120, 8)
+            .with_sync_metrics(-1_234, 567, -667, 320)
+            .with_playout_error(900, 1_800, 2_700, 1_500, 4_200)
+            .with_resample_metrics(45, 42)
+            .with_arq_fec_recovery_pct(9_876);
+        let decoded = HealthReport::decode(&original.encode()).unwrap();
+
+        assert_eq!(decoded.clock_offset_us, -1_234);
+        assert_eq!(decoded.group_offset_us, 567);
+        assert_eq!(decoded.total_offset_us, -667);
+        assert_eq!(decoded.sync_error_to_group_us, 320);
+        assert_eq!(decoded.playout_error_us_p50, 900);
+        assert_eq!(decoded.playout_error_us_p95, 1_800);
+        assert_eq!(decoded.playout_error_us_p99, 2_700);
+        assert_eq!(decoded.callback_xrun_us_p99, 1_500);
+        assert_eq!(decoded.output_latency_us, 4_200);
+        assert_eq!(decoded.resample_ratio_ppm_commanded, 45);
+        assert_eq!(decoded.resample_ratio_ppm_applied, 42);
+        assert_eq!(decoded.arq_fec_combined_recovery_pct, 9_876);
+    }
+
+    #[test]
+    fn sync_from_report_classifies_skew() {
+        let healthy = report(0, 0, 0, 120, 8)
+            .with_sync_metrics(0, 0, 0, 1_500)
+            .with_playout_error(500, 1_500, 2_000, 0, 0);
+        assert_eq!(
+            AudioHealthState::sync_from_report(&healthy),
+            AudioHealthState::SyncOk
+        );
+
+        let degraded = report(0, 0, 0, 120, 8)
+            .with_sync_metrics(0, 0, 0, 5_000)
+            .with_playout_error(1_000, 4_000, 5_000, 0, 0);
+        assert_eq!(
+            AudioHealthState::sync_from_report(&degraded),
+            AudioHealthState::SyncDegraded
+        );
+
+        let unstable = report(0, 0, 0, 120, 8)
+            .with_sync_metrics(0, 0, 0, 25_000)
+            .with_playout_error(1_000, 4_000, 5_000, 0, 0);
+        assert_eq!(
+            AudioHealthState::sync_from_report(&unstable),
+            AudioHealthState::SyncUnstable
+        );
+    }
+
+    #[test]
+    fn v1_payload_decodes_when_new_sync_fields_are_missing() {
+        // Build a payload that contains everything up to and including ARQ FEC recovered
+        // (the previous wire end) and verify the new sync fields default to zero.
+        let v1 = report(2, 1, 3, 200, 12)
+            .with_queue_metrics(100, 4, 250)
+            .with_callback_metrics(5, 0)
+            .with_rtp_metrics(900, 2, 0, 1)
+            .with_drift_metrics(7, 3)
+            .with_arq_metrics(11, 9, 4);
+        let mut payload = v1.encode();
+        // Truncate everything past arq_fec_recovered (the previous trailing field).
+        // 20 u32 fields = 80 bytes total in v1 wire.
+        payload.truncate(80);
+        let decoded = HealthReport::decode(&payload).unwrap();
+
+        assert_eq!(decoded.arq_fec_recovered, 4);
+        assert_eq!(decoded.clock_offset_us, 0);
+        assert_eq!(decoded.group_offset_us, 0);
+        assert_eq!(decoded.total_offset_us, 0);
+        assert_eq!(decoded.sync_error_to_group_us, 0);
+        assert_eq!(decoded.playout_error_us_p95, 0);
+        assert_eq!(decoded.arq_fec_combined_recovery_pct, 0);
     }
 
     #[test]

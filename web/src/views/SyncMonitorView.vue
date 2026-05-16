@@ -1,6 +1,7 @@
 <script setup lang="ts">
 import { computed, onMounted, onUnmounted } from 'vue';
 import { useServerStore } from '@/stores/server';
+import { syncStateFromHealth, type SyncState } from '@/lib/api';
 import SyncIndicator from '@/components/SyncIndicator.vue';
 
 const store = useServerStore();
@@ -8,17 +9,63 @@ const store = useServerStore();
 onMounted(() => store.init());
 onUnmounted(() => store.stopLiveUpdates());
 
+type Status = 'good' | 'fair' | 'poor' | 'unknown';
+
+function syncStateToStatus(s: SyncState): Status {
+  if (s === 'sync_ok') return 'good';
+  if (s === 'sync_degraded') return 'fair';
+  return 'poor';
+}
+
+interface PerClient {
+  status: Status;
+  state: SyncState;
+  jitter_ms: number;
+  buffer_ms: number;
+  clock_offset_us: number;
+  group_offset_us: number;
+  total_offset_us: number;
+  sync_error_us: number;
+  playout_p50_us: number;
+  playout_p95_us: number;
+  playout_p99_us: number;
+  callback_p99_us: number;
+  output_latency_us: number;
+  has_data: boolean;
+}
+
 const syncHealth = computed(() => {
-  const h: Record<string, { status: 'good' | 'fair' | 'poor' | 'unknown'; drift: number; buffer: number }> = {};
+  const h: Record<string, PerClient> = {};
   for (const c of store.connectedClients) {
-    const jitter = c.health?.jitter_ms ?? 0;
-    const buffer = c.health?.buffer_depth_ms ?? 0;
-    if (jitter === 0) h[c.id] = { status: 'unknown', drift: 0, buffer };
-    else if (jitter < 10) h[c.id] = { status: 'good', drift: jitter, buffer };
-    else if (jitter < 50) h[c.id] = { status: 'fair', drift: jitter, buffer };
-    else h[c.id] = { status: 'poor', drift: jitter, buffer };
+    const r = c.health ?? null;
+    const state = syncStateFromHealth(r);
+    h[c.id] = {
+      status: r ? syncStateToStatus(state) : 'unknown',
+      state,
+      jitter_ms: r?.jitter_ms ?? 0,
+      buffer_ms: r?.buffer_depth_ms ?? 0,
+      clock_offset_us: r?.clock_offset_us ?? 0,
+      group_offset_us: r?.group_offset_us ?? 0,
+      total_offset_us: r?.total_offset_us ?? 0,
+      sync_error_us: r?.sync_error_to_group_us ?? 0,
+      playout_p50_us: r?.playout_error_us_p50 ?? 0,
+      playout_p95_us: r?.playout_error_us_p95 ?? 0,
+      playout_p99_us: r?.playout_error_us_p99 ?? 0,
+      callback_p99_us: r?.callback_xrun_us_p99 ?? 0,
+      output_latency_us: r?.output_latency_us ?? 0,
+      has_data: !!r,
+    };
   }
   return h;
+});
+
+const groupSkewMaxUs = computed(() => {
+  let max = 0;
+  for (const c of store.connectedClients) {
+    const e = Math.abs(syncHealth.value[c.id]?.sync_error_us ?? 0);
+    if (e > max) max = e;
+  }
+  return max;
 });
 
 const overall = computed(() => {
@@ -32,6 +79,13 @@ const overall = computed(() => {
   if (hs.every(h => h === 'good')) return { status: 'good' as const, issues: 0, total: cc.length };
   return { status: 'unknown' as const, issues: 0, total: cc.length };
 });
+
+function fmtUs(us: number): string {
+  if (!Number.isFinite(us)) return '—';
+  const abs = Math.abs(us);
+  if (abs >= 1000) return (us / 1000).toFixed(2) + ' ms';
+  return us.toFixed(0) + ' µs';
+}
 </script>
 
 <template>
@@ -60,7 +114,7 @@ const overall = computed(() => {
                overall.status === 'poor' ? 'Sync issues detected' : 'Sync status unknown' }}
           </div>
           <div class="text-xs text-slate-500">
-            {{ store.connectedClients.length }} clients · {{ overall.issues }} issues
+            {{ store.connectedClients.length }} clients · {{ overall.issues }} issues · max group skew {{ fmtUs(groupSkewMaxUs) }}
           </div>
         </div>
       </div>
@@ -91,22 +145,53 @@ const overall = computed(() => {
                       'bg-slate-600'"
             ></span>
             <span class="text-sm font-medium text-white">{{ client.hostname }}</span>
+            <span class="text-[10px] text-slate-600 uppercase tracking-wider">{{ syncHealth[client.id]?.state ?? 'unknown' }}</span>
           </div>
           <SyncIndicator :status="syncHealth[client.id]?.status ?? 'unknown'" :issue-count="0" :total-count="1" />
         </div>
 
         <div class="grid grid-cols-3 gap-3 pt-3 border-t border-white/[0.04]">
           <div>
-            <div class="text-[10px] text-slate-600 uppercase tracking-wider mb-1">Drift</div>
-            <div class="text-sm font-mono font-medium text-slate-200">{{ syncHealth[client.id]?.drift.toFixed(1) ?? '—' }} <span class="text-slate-600 text-xs">ms</span></div>
+            <div class="text-[10px] text-slate-600 uppercase tracking-wider mb-1">Jitter</div>
+            <div class="text-sm font-mono font-medium text-slate-200">{{ syncHealth[client.id]?.jitter_ms.toFixed(1) ?? '—' }} <span class="text-slate-600 text-xs">ms</span></div>
           </div>
           <div>
             <div class="text-[10px] text-slate-600 uppercase tracking-wider mb-1">Buffer</div>
-            <div class="text-sm font-mono font-medium text-slate-200">{{ syncHealth[client.id]?.buffer.toFixed(0) ?? '—' }} <span class="text-slate-600 text-xs">ms</span></div>
+            <div class="text-sm font-mono font-medium text-slate-200">{{ syncHealth[client.id]?.buffer_ms.toFixed(0) ?? '—' }} <span class="text-slate-600 text-xs">ms</span></div>
           </div>
           <div>
-            <div class="text-[10px] text-slate-600 uppercase tracking-wider mb-1">Latency</div>
-            <div class="text-sm font-mono font-medium text-slate-200">{{ client.latency_ms }} <span class="text-slate-600 text-xs">ms</span></div>
+            <div class="text-[10px] text-slate-600 uppercase tracking-wider mb-1">Sync error</div>
+            <div class="text-sm font-mono font-medium text-slate-200">{{ fmtUs(syncHealth[client.id]?.sync_error_us ?? 0) }}</div>
+          </div>
+        </div>
+
+        <div class="grid grid-cols-3 gap-3 pt-3 mt-3 border-t border-white/[0.04]">
+          <div>
+            <div class="text-[10px] text-slate-600 uppercase tracking-wider mb-1">Playout p50</div>
+            <div class="text-sm font-mono font-medium text-slate-200">{{ fmtUs(syncHealth[client.id]?.playout_p50_us ?? 0) }}</div>
+          </div>
+          <div>
+            <div class="text-[10px] text-slate-600 uppercase tracking-wider mb-1">Playout p95</div>
+            <div class="text-sm font-mono font-medium text-slate-200">{{ fmtUs(syncHealth[client.id]?.playout_p95_us ?? 0) }}</div>
+          </div>
+          <div>
+            <div class="text-[10px] text-slate-600 uppercase tracking-wider mb-1">Playout p99</div>
+            <div class="text-sm font-mono font-medium text-slate-200">{{ fmtUs(syncHealth[client.id]?.playout_p99_us ?? 0) }}</div>
+          </div>
+        </div>
+
+        <div class="grid grid-cols-3 gap-3 pt-3 mt-3 border-t border-white/[0.04]">
+          <div>
+            <div class="text-[10px] text-slate-600 uppercase tracking-wider mb-1">Clock offset</div>
+            <div class="text-sm font-mono font-medium text-slate-200">{{ fmtUs(syncHealth[client.id]?.clock_offset_us ?? 0) }}</div>
+          </div>
+          <div>
+            <div class="text-[10px] text-slate-600 uppercase tracking-wider mb-1">Callback p99</div>
+            <div class="text-sm font-mono font-medium text-slate-200">{{ fmtUs(syncHealth[client.id]?.callback_p99_us ?? 0) }}</div>
+          </div>
+          <div>
+            <div class="text-[10px] text-slate-600 uppercase tracking-wider mb-1">Output lat</div>
+            <div class="text-sm font-mono font-medium text-slate-200">{{ fmtUs(syncHealth[client.id]?.output_latency_us ?? 0) }}</div>
           </div>
         </div>
       </div>

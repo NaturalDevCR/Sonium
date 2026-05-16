@@ -191,6 +191,8 @@ async fn connect_and_run(
     let mut eq_processor: Option<SmoothedEqProcessor> = None;
     let mut server_buffer_ms: i32 = cfg.latency_ms + 500; // Default buffer depth
     let mut server_latency_ms: i32 = 0;
+    // Last group target broadcast by the server, used to compute sync_error_to_group_us.
+    let mut last_group_target_us: Option<i64> = None;
 
     let mut pending_time: Option<(u16, i64)> = None; // (msg_id, sent_us)
 
@@ -299,13 +301,30 @@ async fn connect_and_run(
                         .unwrap_or(0);
                     let target_playout_latency_ms =
                         (server_buffer_ms + cfg.latency_ms + server_latency_ms).max(0) as u32;
+
+                    // Pull playout-error percentiles from whichever buffer is active.
+                    let (playout_p50, playout_p95, playout_p99) =
+                        if let Some(playback) = playback_handle.as_ref() {
+                            playback.playout_error_percentiles_us()
+                        } else {
+                            buf.playout_error_percentiles_us()
+                        };
+
+                    let clock_offset_us = time_provider.offset_us();
+                    let total_offset_us = time_provider.total_offset_us();
+                    let group_offset_applied_us = total_offset_us - clock_offset_us;
+                    let sync_error_to_group_us = match last_group_target_us {
+                        Some(target) => total_offset_us - target,
+                        None => 0,
+                    };
+
                     sonium_protocol::messages::HealthReport::new(
                         underruns,
                         player_health.overrun_count,
                         stale_drops,
                         buffer_depth_ms,
                         jitter,
-                        (time_provider.offset_us() / 1000) as i32,
+                        (clock_offset_us / 1000) as i32,
                     )
                     .with_queue_metrics(output_buffer_ms, buf_len, target_playout_latency_ms)
                     .with_callback_metrics(
@@ -324,6 +343,19 @@ async fn connect_and_run(
                         arq_fec_recovered.load(Ordering::Relaxed) as u32,
                     )
                     .with_drift_metrics(drift_drops, drift_dups)
+                    .with_sync_metrics(
+                        clock_offset_us,
+                        group_offset_applied_us,
+                        total_offset_us,
+                        sync_error_to_group_us,
+                    )
+                    .with_playout_error(
+                        playout_p50,
+                        playout_p95,
+                        playout_p99,
+                        player_health.callback_duration_p99_us,
+                        player_health.output_latency_us,
+                    )
                 } else {
                     // Send idle report to keep status "Connected"
                     sonium_protocol::messages::HealthReport::new(
@@ -588,6 +620,9 @@ async fn connect_and_run(
 
                     MessageType::GroupSync => {
                         if let Ok(Message::GroupSync(gs)) = Message::from_payload(&hdr, &payload) {
+                            // Remember the latest target so the HealthReport can carry the
+                            // current sync_error_to_group_us regardless of nudge state.
+                            last_group_target_us = Some(gs.group_offset_us);
                             // Ignore group sync until NTP offset has converged a bit.
                             if time_provider.sample_count() < 10 {
                                 debug!("GroupSync ignored: NTP sync not yet stable");

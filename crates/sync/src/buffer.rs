@@ -17,6 +17,7 @@
 //!                         PCM samples ─► speaker
 //! ```
 
+use crate::playout_histogram::PlayoutErrorTracker;
 use sonium_common::SampleFormat;
 use std::collections::VecDeque;
 use tracing::warn;
@@ -118,6 +119,7 @@ pub struct SyncBuffer {
     lead_us: i64,
     drift_drop_count: u64,
     drift_dup_count: u64,
+    playout_error: PlayoutErrorTracker,
 }
 
 impl SyncBuffer {
@@ -139,6 +141,7 @@ impl SyncBuffer {
             lead_us: 40_000,
             drift_drop_count: 0,
             drift_dup_count: 0,
+            playout_error: PlayoutErrorTracker::default(),
         }
     }
 
@@ -184,6 +187,7 @@ impl SyncBuffer {
         let front = self.chunks.front()?;
         if front.playout_us <= now_server_us {
             let chunk = self.chunks.pop_front().unwrap();
+            self.playout_error.record(now_server_us - chunk.playout_us);
             self.buffered_samples = self
                 .buffered_samples
                 .saturating_sub(chunk.remaining_samples());
@@ -265,6 +269,12 @@ impl SyncBuffer {
         self.buffered_samples = 0;
         self.stale_drop_count = 0;
         self.underrun_count = 0;
+        self.playout_error.clear();
+    }
+
+    /// (p50, p95, p99) of |playout error| in microseconds over the rolling window.
+    pub fn playout_error_percentiles_us(&self) -> (u32, u32, u32) {
+        self.playout_error.percentiles()
     }
 
     /// Return and reset the accumulated stale drop counter.
@@ -321,6 +331,8 @@ impl SyncBuffer {
             0
         };
 
+        let (p50, p95, p99) = self.playout_error_percentiles_us();
+
         sonium_protocol::messages::HealthReport::new(
             self.take_underruns(),
             0,
@@ -330,6 +342,7 @@ impl SyncBuffer {
             latency_ms,
         )
         .with_queue_metrics(0, self.len() as u32, (self.target_buffer_us / 1000) as u32)
+        .with_playout_error(p50, p95, p99, 0, 0)
     }
 
     /// Pull audio that is due to be played at `now_server_us + lead_us`.

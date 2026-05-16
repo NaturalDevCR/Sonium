@@ -663,6 +663,7 @@ async fn session_loop(
     }
 
     info!(%peer, stream = %stream_id, transport = %effective_mode, "Session ready");
+    metrics::observe_active_transport(client_id, &effective_mode.to_string());
 
     let mut audio_rx: Option<broadcast::Receiver<AudioFrame>> = bc.as_ref().map(|b| b.subscribe());
     let mut events_rx = state.events().subscribe();
