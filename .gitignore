@@ -1,5 +1,6 @@
 # Rust
 /target/
+/fuzz/target/
 **/*.rs.bk
 
 # Node.js
@@ -16,6 +17,7 @@ pnpm-debug.log*
 /docs/book/
 
 # IDEs
+.claude/
 .vscode/
 .idea/
 *.swp
@@ -23,6 +25,7 @@ pnpm-debug.log*
 
 # Others
 reference/
+run/*.log
 
 # OS specific
 .DS_Store
