@@ -453,14 +453,15 @@ fn spawn_stream(
             .set(1);
         state2.set_stream_status(&stream_cfg.id, sonium_control::state::StreamStatus::Playing);
         tokio::select! {
-            result = streamreader::run(bc, stream_cfg.clone(), state2, reg2) => {
+            result = streamreader::run(bc, stream_cfg.clone(), state2, reg2, task_cancel.clone()) => {
                 if let Err(e) = result {
                     warn!("[{}] Stream reader exited: {e}", stream_cfg.id);
                     metrics::STREAM_STATUS.with_label_values(&[&stream_cfg.id]).set(-1);
+                    state3.set_stream_status(&stream_cfg.id, sonium_control::state::StreamStatus::Error);
                 } else {
                     metrics::STREAM_STATUS.with_label_values(&[&stream_cfg.id]).set(0);
+                    state3.set_stream_status(&stream_cfg.id, sonium_control::state::StreamStatus::Idle);
                 }
-                state3.set_stream_status(&stream_cfg.id, sonium_control::state::StreamStatus::Idle);
             }
             _ = task_cancel.cancelled() => {
                 info!("[{}] Stream reader reloading", stream_cfg.id);

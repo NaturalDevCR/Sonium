@@ -5,6 +5,7 @@ use tokio::io::AsyncReadExt;
 use tokio::net::{TcpListener, TcpStream};
 use tokio::process::Command;
 use tokio::time::Duration;
+use tokio_util::sync::CancellationToken;
 use tracing::{debug, info, warn};
 
 use sonium_codec::make_encoder;
@@ -49,6 +50,7 @@ pub async fn run(
     stream: StreamSource,
     state: Arc<ServerState>,
     registry: Arc<BroadcasterRegistry>,
+    reopen_cancel: CancellationToken,
 ) -> anyhow::Result<()> {
     // Meta streams are a special case — no encoder, just routing.
     if stream.source.starts_with("meta://") {
@@ -89,7 +91,7 @@ pub async fn run(
     let chunk_ms = stream_chunk_ms(&stream);
 
     if stream.source == "-" {
-        run_reader(
+        let _ = run_reader(
             tokio::io::stdin(),
             &mut *encoder,
             bc,
@@ -101,7 +103,8 @@ pub async fn run(
             silence_on_idle,
             chunk_ms,
         )
-        .await
+        .await;
+        Ok(())
     } else if stream.source.starts_with("pipe://") {
         run_pipe(
             &stream.source,
@@ -131,11 +134,8 @@ pub async fn run(
         )
         .await
     } else {
-        let file = tokio::fs::File::open(&stream.source)
-            .await
-            .map_err(|e| anyhow::anyhow!("[{}] open {}: {e}", stream.id, stream.source))?;
-        run_reader(
-            file,
+        run_reopening_reader(
+            &stream.source,
             &mut *encoder,
             bc,
             &mut pcm_buf,
@@ -145,6 +145,7 @@ pub async fn run(
             idle_timeout,
             silence_on_idle,
             chunk_ms,
+            reopen_cancel,
         )
         .await
     }
@@ -349,7 +350,7 @@ async fn run_tcp(
             let socket = TcpStream::connect(&tcp.addr)
                 .await
                 .map_err(|e| anyhow::anyhow!("[{stream_id}] connect {}: {e}", tcp.addr))?;
-            run_reader(
+            let _ = run_reader(
                 socket,
                 encoder,
                 bc,
@@ -361,7 +362,8 @@ async fn run_tcp(
                 silence_on_idle,
                 chunk_ms,
             )
-            .await
+            .await;
+            Ok(())
         }
         TcpMode::Listen => {
             let listener = TcpListener::bind(&tcp.addr)
@@ -372,7 +374,7 @@ async fn run_tcp(
             loop {
                 let (socket, peer) = listener.accept().await?;
                 info!(stream = stream_id, %peer, "TCP source connected");
-                if let Err(e) = run_reader(
+                if let ReaderEnd::Error(e) = run_reader(
                     socket,
                     encoder,
                     bc.clone(),
@@ -487,16 +489,19 @@ async fn run_pipe(
             }
         }
 
-        if let Err(e) = result {
-            warn!(
-                stream = stream_id,
-                "Audio source read failed; restarting external process: {e}"
-            );
-        } else {
-            warn!(
-                stream = stream_id,
-                "Audio source closed; restarting external process"
-            );
+        match result {
+            ReaderEnd::Error(e) => {
+                warn!(
+                    stream = stream_id,
+                    "Audio source read failed; restarting external process: {e}"
+                );
+            }
+            ReaderEnd::Eof => {
+                warn!(
+                    stream = stream_id,
+                    "Audio source closed; restarting external process"
+                );
+            }
         }
 
         state.set_stream_status(stream_id, StreamStatus::Idle);
@@ -532,6 +537,131 @@ fn parse_pipe_uri(uri: &str) -> anyhow::Result<(String, Vec<String>)> {
     Ok((path.to_owned(), args))
 }
 
+// ── File/FIFO reopen supervision ─────────────────────────────────────────
+
+const REOPEN_BACKOFF_INITIAL: Duration = Duration::from_millis(50);
+const REOPEN_BACKOFF_MAX: Duration = Duration::from_secs(2);
+
+/// Reopen a path-backed source after EOF or a recoverable read/open failure.
+///
+/// This is intentionally used only for ordinary paths. Stdin, TCP, and
+/// `pipe://` sources retain their own source-specific lifecycle semantics.
+#[allow(clippy::too_many_arguments)]
+async fn run_reopening_reader(
+    source: &str,
+    encoder: &mut (dyn sonium_codec::Encoder + Send),
+    bc: Arc<Broadcaster>,
+    pcm_buf: &mut [u8],
+    enc_buf: &mut Vec<u8>,
+    stream_id: &str,
+    state: &Arc<ServerState>,
+    idle_timeout: Option<Duration>,
+    silence_on_idle: bool,
+    chunk_ms: u32,
+    cancel: CancellationToken,
+) -> anyhow::Result<()> {
+    if source.trim().is_empty() {
+        state.set_stream_status(stream_id, StreamStatus::Error);
+        anyhow::bail!("[{stream_id}] file/FIFO source path is empty");
+    }
+
+    let mut attempt = 0u32;
+    loop {
+        let open = tokio::select! {
+            result = open_file_source(source) => result,
+            _ = cancel.cancelled() => return Ok(()),
+        };
+
+        match open {
+            Ok(file) => {
+                state.set_stream_status(stream_id, StreamStatus::Playing);
+                match run_reader(
+                    file,
+                    encoder,
+                    bc.clone(),
+                    pcm_buf,
+                    enc_buf,
+                    stream_id,
+                    state,
+                    idle_timeout,
+                    silence_on_idle,
+                    chunk_ms,
+                )
+                .await
+                {
+                    ReaderEnd::Eof => {
+                        info!(stream = stream_id, "File/FIFO input closed; reopening");
+                    }
+                    ReaderEnd::Error(error) if terminal_source_error(&error) => {
+                        state.set_stream_status(stream_id, StreamStatus::Error);
+                        return Err(anyhow::anyhow!(
+                            "[{stream_id}] terminal read error from {source}: {error}"
+                        ));
+                    }
+                    ReaderEnd::Error(error) => {
+                        warn!(
+                            stream = stream_id,
+                            "File/FIFO read error; reopening: {error}"
+                        );
+                    }
+                }
+            }
+            Err(error) if terminal_source_error(&error) => {
+                state.set_stream_status(stream_id, StreamStatus::Error);
+                return Err(anyhow::anyhow!(
+                    "[{stream_id}] cannot open {source}: {error}"
+                ));
+            }
+            Err(error) => {
+                warn!(
+                    stream = stream_id,
+                    "File/FIFO open failed; reopening: {error}"
+                );
+            }
+        }
+
+        attempt = attempt.saturating_add(1);
+        let retry = reopen_backoff(attempt);
+        state.set_stream_recovering(stream_id, attempt, retry.as_millis() as u64);
+        info!(
+            stream = stream_id,
+            attempt,
+            retry_in_ms = retry.as_millis(),
+            "Waiting to reopen file/FIFO input"
+        );
+
+        tokio::select! {
+            _ = tokio::time::sleep(retry) => {}
+            _ = cancel.cancelled() => return Ok(()),
+        }
+    }
+}
+
+async fn open_file_source(source: &str) -> io::Result<tokio::fs::File> {
+    match tokio::fs::metadata(source).await {
+        Ok(metadata) if metadata.is_dir() => Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "source path is a directory",
+        )),
+        Ok(_) | Err(_) => tokio::fs::File::open(source).await,
+    }
+}
+
+fn terminal_source_error(error: &io::Error) -> bool {
+    matches!(
+        error.kind(),
+        io::ErrorKind::PermissionDenied | io::ErrorKind::InvalidInput | io::ErrorKind::Unsupported
+    )
+}
+
+fn reopen_backoff(attempt: u32) -> Duration {
+    let shift = attempt.saturating_sub(1).min(5);
+    REOPEN_BACKOFF_INITIAL
+        .checked_mul(1_u32 << shift)
+        .unwrap_or(REOPEN_BACKOFF_MAX)
+        .min(REOPEN_BACKOFF_MAX)
+}
+
 // ── Core read loop (with idle detection) ─────────────────────────────────
 
 #[allow(clippy::too_many_arguments)]
@@ -546,7 +676,7 @@ async fn run_reader<R: AsyncReadExt + Unpin>(
     idle_timeout: Option<Duration>,
     silence_on_idle: bool,
     chunk_ms: u32,
-) -> anyhow::Result<()> {
+) -> ReaderEnd {
     let silence_pcm: Vec<i16> = vec![0i16; pcm_buf.len() / 2];
     let mut is_idle = false;
     let level_interval = tokio::time::Duration::from_millis(100);
@@ -555,18 +685,18 @@ async fn run_reader<R: AsyncReadExt + Unpin>(
         .unwrap_or_else(tokio::time::Instant::now);
     let mut pcm_filled = 0usize;
 
-    'read: loop {
+    loop {
         // ── Try to read one frame ─────────────────────────────────────────
         let read_ok: bool = if let Some(dur) = idle_timeout {
             match read_pcm_frame(&mut src, pcm_buf, &mut pcm_filled, Some(dur)).await {
                 FrameRead::Frame => true,
                 FrameRead::Eof => {
                     info!(stream = stream_id, "Audio input closed");
-                    break 'read;
+                    return ReaderEnd::Eof;
                 }
                 FrameRead::Error(e) => {
                     warn!(stream = stream_id, "Audio input read error: {e}");
-                    break 'read;
+                    return ReaderEnd::Error(e);
                 }
                 FrameRead::Idle => {
                     // No data within idle_timeout → go idle.
@@ -596,11 +726,11 @@ async fn run_reader<R: AsyncReadExt + Unpin>(
                                         }
                                         FrameRead::Eof => {
                                             info!(stream = stream_id, "Audio input closed while idle");
-                                            break 'read;
+                                            return ReaderEnd::Eof;
                                         }
                                         FrameRead::Error(e) => {
                                             warn!(stream = stream_id, "Audio input read error while idle: {e}");
-                                            break 'read;
+                                            return ReaderEnd::Error(e);
                                         }
                                         FrameRead::Idle => unreachable!("idle is disabled while waiting for resumed audio"),
                                     }
@@ -625,11 +755,11 @@ async fn run_reader<R: AsyncReadExt + Unpin>(
                 FrameRead::Frame => true,
                 FrameRead::Eof => {
                     info!(stream = stream_id, "Audio input closed");
-                    break 'read;
+                    return ReaderEnd::Eof;
                 }
                 FrameRead::Error(e) => {
                     warn!(stream = stream_id, "Audio input read error: {e}");
-                    break 'read;
+                    return ReaderEnd::Error(e);
                 }
                 FrameRead::Idle => unreachable!("idle is disabled for blocking reads"),
             }
@@ -677,8 +807,11 @@ async fn run_reader<R: AsyncReadExt + Unpin>(
             });
         }
     }
+}
 
-    Ok(())
+enum ReaderEnd {
+    Eof,
+    Error(io::Error),
 }
 
 enum FrameRead {
@@ -726,6 +859,8 @@ async fn read_pcm_frame<R: AsyncReadExt + Unpin>(
 mod tests {
     use super::*;
     use tokio::io::AsyncWriteExt;
+    use tokio::time::timeout;
+    use tokio_util::sync::CancellationToken;
 
     #[tokio::test]
     async fn read_pcm_frame_preserves_partial_data_after_idle() {
@@ -756,5 +891,117 @@ mod tests {
 
         assert_eq!(filled, 0);
         assert_eq!(pcm, [1, 2, 3, 4, 5, 6, 7, 8]);
+    }
+
+    #[tokio::test]
+    async fn reopening_file_reader_recovers_after_eof_and_replacement() {
+        // This catches the old terminal-EOF behavior: removing the reopen loop
+        // would leave the source Idle and never publish the replacement frame.
+        let path = std::env::temp_dir().join(format!("sonium-reopen-{}", uuid::Uuid::new_v4()));
+        let first = vec![0x11; 16];
+        let replacement = vec![0x22; 16];
+        std::fs::write(&path, &first).unwrap();
+
+        let state = Arc::new(ServerState::new(
+            Arc::new(sonium_control::EventBus::new()),
+            None,
+            vec![],
+            vec![],
+        ));
+        state.register_stream(
+            "reopen-test",
+            None,
+            "pcm",
+            "800Hz/16bit/1ch",
+            path.to_string_lossy(),
+            1000,
+            false,
+            10,
+            false,
+            None,
+            false,
+        );
+
+        let bc = Arc::new(Broadcaster::new("reopen-test", 1000));
+        let mut audio = bc.subscribe();
+        let mut events = state.events().subscribe();
+        let cancel = CancellationToken::new();
+        let task_cancel = cancel.clone();
+        let task_state = state.clone();
+        let task_bc = bc.clone();
+        let task_path = path.to_string_lossy().to_string();
+
+        let task = tokio::spawn(async move {
+            let mut encoder =
+                make_encoder("pcm", sonium_common::SampleFormat::new(800, 16, 1)).unwrap();
+            let mut pcm_buf = vec![0u8; 16];
+            let mut enc_buf = Vec::new();
+            run_reopening_reader(
+                &task_path,
+                &mut *encoder,
+                task_bc,
+                &mut pcm_buf,
+                &mut enc_buf,
+                "reopen-test",
+                &task_state,
+                None,
+                false,
+                10,
+                task_cancel,
+            )
+            .await
+        });
+
+        let first_frame = timeout(Duration::from_secs(1), audio.recv())
+            .await
+            .expect("initial file frame should be published")
+            .unwrap();
+        assert!(first_frame.wire_bytes.ends_with(&first));
+
+        loop {
+            match timeout(Duration::from_secs(1), events.recv())
+                .await
+                .expect("EOF should publish a recovery status")
+                .unwrap()
+            {
+                Event::StreamStatus {
+                    status: StreamStatus::Recovering,
+                    ..
+                } => break,
+                _ => continue,
+            }
+        }
+
+        let stream = state
+            .all_streams()
+            .into_iter()
+            .find(|stream| stream.id == "reopen-test")
+            .unwrap();
+        assert_eq!(stream.status, StreamStatus::Recovering);
+        assert_eq!(
+            stream.recovery,
+            Some(sonium_control::state::StreamRecovery {
+                attempt: 1,
+                retry_in_ms: 50,
+            })
+        );
+
+        std::fs::remove_file(&path).unwrap();
+        std::fs::write(&path, &replacement).unwrap();
+
+        let replacement_frame = timeout(Duration::from_secs(1), audio.recv())
+            .await
+            .expect("replacement file frame should be published")
+            .unwrap();
+        assert!(replacement_frame.wire_bytes.ends_with(&replacement));
+
+        cancel.cancel();
+        timeout(Duration::from_secs(1), task)
+            .await
+            .expect("cancellation should interrupt reopening backoff")
+            .unwrap()
+            .unwrap();
+
+        let _ = std::fs::remove_file(path);
     }
 }

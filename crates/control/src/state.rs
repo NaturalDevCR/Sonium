@@ -129,6 +129,9 @@ pub struct StreamInfo {
     pub idle_timeout_ms: Option<u32>,
     pub silence_on_idle: bool,
     pub status: StreamStatus,
+    /// Reopen progress while a file/FIFO source waits for its producer.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub recovery: Option<StreamRecovery>,
     /// Per-stream EQ bands (empty = flat).
     #[serde(default)]
     pub eq_bands: Vec<EqBand>,
@@ -142,7 +145,17 @@ pub struct StreamInfo {
 pub enum StreamStatus {
     Playing,
     Idle,
+    Recovering,
     Error,
+}
+
+/// Context for a file/FIFO source that is waiting to be reopened.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct StreamRecovery {
+    /// Number of consecutive reopen attempts since the reader last produced input.
+    pub attempt: u32,
+    /// Bounded delay before the next reopen attempt.
+    pub retry_in_ms: u64,
 }
 
 fn default_chunk_ms() -> u32 {
@@ -232,6 +245,7 @@ impl ServerState {
                     idle_timeout_ms: None,
                     silence_on_idle: false,
                     status: StreamStatus::Idle,
+                    recovery: None,
                     eq_bands: ps.eq_bands.clone(),
                     eq_enabled: ps.eq_enabled,
                 },
@@ -254,6 +268,7 @@ impl ServerState {
                     idle_timeout_ms: None,
                     silence_on_idle: false,
                     status: StreamStatus::Idle,
+                    recovery: None,
                     eq_bands: vec![],
                     eq_enabled: true,
                 },
@@ -884,10 +899,29 @@ impl ServerState {
     pub fn set_stream_status(&self, stream_id: &str, status: StreamStatus) {
         let mut streams = self.streams.write();
         if let Some(s) = streams.get_mut(stream_id) {
+            if status != StreamStatus::Recovering {
+                s.recovery = None;
+            }
             s.status = status.clone();
             self.events.emit(crate::ws::Event::StreamStatus {
                 stream_id: stream_id.into(),
                 status,
+            });
+        }
+    }
+
+    /// Mark a source as awaiting a reopen, with operator-visible retry context.
+    pub fn set_stream_recovering(&self, stream_id: &str, attempt: u32, retry_in_ms: u64) {
+        let mut streams = self.streams.write();
+        if let Some(s) = streams.get_mut(stream_id) {
+            s.status = StreamStatus::Recovering;
+            s.recovery = Some(StreamRecovery {
+                attempt,
+                retry_in_ms,
+            });
+            self.events.emit(crate::ws::Event::StreamStatus {
+                stream_id: stream_id.into(),
+                status: StreamStatus::Recovering,
             });
         }
     }
@@ -989,6 +1023,7 @@ impl ServerState {
                     idle_timeout_ms,
                     silence_on_idle,
                     status: StreamStatus::Idle,
+                    recovery: None,
                     eq_bands,
                     eq_enabled,
                 }
