@@ -93,16 +93,22 @@ run_as_user() {
 
 legacy_server_audio_keys() {
   local config_path="$1"
+  # This is deliberately a bounded preflight scanner, not a TOML parser. It
+  # recognizes only the exact [server] table (including its simple quoted-key
+  # forms) and the three legacy assignments directly inside that table.
   awk '
-    /^[[:space:]]*\[server\][[:space:]]*(#.*)?$/ { in_server = 1; next }
+    /^[[:space:]]*\[[[:space:]]*(server|"server"|\047server\047)[[:space:]]*\][[:space:]]*(#.*)?$/ {
+      in_server = 1
+      next
+    }
     /^[[:space:]]*\[/ { in_server = 0 }
     in_server {
       entry = $0
       sub(/^[[:space:]]*/, "", entry)
-      if (entry ~ /^"?(buffer_ms|chunk_ms|output_prefill_ms)"?[[:space:]]*=/) {
-        split(entry, parts, /[[:space:]]*=/)
-        key = parts[1]
-        gsub(/"/, "", key)
+      if (entry ~ /^(buffer_ms|chunk_ms|output_prefill_ms|"buffer_ms"|"chunk_ms"|"output_prefill_ms"|\047buffer_ms\047|\047chunk_ms\047|\047output_prefill_ms\047)[[:space:]]*=/) {
+        key = entry
+        sub(/[[:space:]]*=.*/, "", key)
+        gsub(/[[:space:]"\047]/, "", key)
         print key
         found = 1
       }
@@ -123,7 +129,7 @@ preflight_server_config() {
   fi
 }
 
-if [[ -n "${PREFLIGHT_CONFIG}" ]]; then
+if [[ -n "${PREFLIGHT_CONFIG}" && "${UNINSTALL}" == "false" ]]; then
   preflight_server_config "${PREFLIGHT_CONFIG}"
   ok "Configuration preflight passed: ${PREFLIGHT_CONFIG}"
   exit 0

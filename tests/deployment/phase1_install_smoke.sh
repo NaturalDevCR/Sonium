@@ -5,6 +5,9 @@ root_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 installer="${root_dir}/install.sh"
 fixture="${root_dir}/tests/fixtures/legacy-server-audio.toml"
 quoted_fixture="${root_dir}/tests/fixtures/legacy-server-audio-quoted.toml"
+double_header_fixture="${root_dir}/tests/fixtures/legacy-server-header-double-quoted.toml"
+single_quoted_fixture="${root_dir}/tests/fixtures/legacy-server-audio-single-quoted.toml"
+audio_table_fixture="${root_dir}/tests/fixtures/server-audio-quoted-keys.toml"
 installation_doc="${root_dir}/docs/src/getting-started/installation.md"
 configuration_doc="${root_dir}/docs/src/getting-started/configuration.md"
 compose_file="${root_dir}/docker-compose.yml"
@@ -13,19 +16,29 @@ docker_bootstrap="${root_dir}/deploy/docker/init-admin.sh"
 fail() { printf 'FAIL: %s\n' "$*" >&2; exit 1; }
 contains() { grep -Fq -- "$2" "$1" || fail "missing '$2' in $1"; }
 
-if output="$(bash "${installer}" --preflight-config "${fixture}" 2>&1)"; then
-  fail "legacy preflight unexpectedly succeeded"
-fi
-[[ "${output}" == *"Legacy [server] audio keys detected"* ]] \
-  || fail "legacy preflight did not identify legacy audio keys"
-[[ "${output}" == *"Move buffer_ms, chunk_ms, and output_prefill_ms to [server.audio]"* ]] \
-  || fail "legacy preflight did not provide the exact migration instruction"
+for legacy_fixture in "${fixture}" "${quoted_fixture}" "${double_header_fixture}" "${single_quoted_fixture}"; do
+  if output="$(bash "${installer}" --preflight-config "${legacy_fixture}" 2>&1)"; then
+    fail "legacy preflight unexpectedly succeeded for ${legacy_fixture##*/}"
+  fi
+  [[ "${output}" == *"Legacy [server] audio keys detected"* ]] \
+    || fail "legacy preflight did not identify ${legacy_fixture##*/}"
+  [[ "${output}" == *"Move buffer_ms, chunk_ms, and output_prefill_ms to [server.audio]"* ]] \
+    || fail "legacy preflight did not provide migration instruction for ${legacy_fixture##*/}"
+done
 
-if output="$(bash "${installer}" --preflight-config "${quoted_fixture}" 2>&1)"; then
-  fail "quoted legacy preflight unexpectedly succeeded"
+if ! output="$(bash "${installer}" --preflight-config "${audio_table_fixture}" 2>&1)"; then
+  fail "[server.audio] keys unexpectedly blocked preflight: ${output}"
 fi
-[[ "${output}" == *"Legacy [server] audio keys detected"* ]] \
-  || fail "quoted legacy preflight did not identify legacy audio keys"
+
+# On a non-root test host this invocation stops at the platform/root guard,
+# before any uninstall action. It must not be rejected by legacy preflight.
+if [[ "${EUID}" -ne 0 ]]; then
+  if output="$(bash "${installer}" --uninstall --preflight-config "${fixture}" 2>&1)"; then
+    fail "uninstall test unexpectedly continued past the platform/root guard"
+  fi
+  [[ "${output}" != *"Legacy [server] audio keys detected"* ]] \
+    || fail "--uninstall must bypass legacy configuration preflight"
+fi
 
 if output="$(sh "${docker_bootstrap}" 2>&1)"; then
   fail "Docker bootstrap unexpectedly accepted an unset password"

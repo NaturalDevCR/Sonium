@@ -86,7 +86,7 @@ impl fmt::Display for TransportMode {
 /// [server.transport]
 /// mode     = "tcp"   # "tcp" (default) | "rtp_udp" | "rist" | "quic_dgram"
 /// udp_port = 0       # 0 auto-selects stream_port + 2 for rtp_udp/rist;
-///                    # it is required for tcp and quic_dgram
+///                    # it must remain 0 for tcp and quic_dgram
 /// ```
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(default, deny_unknown_fields)]
