@@ -14,19 +14,27 @@ timezone = "America/Costa_Rica"
 # IP address to bind to.  "0.0.0.0" listens on all interfaces.
 bind = "0.0.0.0"
 
+# Web UI, REST API, WebSocket, and metrics bind address. Keep loopback unless
+# remote administration is explicitly required on a trusted LAN.
+control_bind = "127.0.0.1"
+
 # TCP port for the audio stream protocol.
 stream_port = 1710
 
 # HTTP/WebSocket port for the control API and embedded web UI.
 control_port = 1711
 
+# Global limits for admitted and remembered client identities.
+max_clients = 64
+max_known_clients = 256
+
 # Advertise the server via mDNS so clients find it automatically.
 # Disable if you want manual IP configuration only.
 mdns = true
 
-# When true, also advertise _snapcast._tcp via mDNS so legacy Snapcast clients
-# can discover this server.  For full Snapcast compatibility you must also set
-# stream_port = 1704 and control_port = 1780.
+# When true, advertise _snapcast._tcp via mDNS for migration-oriented discovery.
+# Matching stream_port = 1704 and control_port = 1780 can help legacy setups,
+# but Sonium does not claim full Snapcast compatibility.
 snapcast_compat = false
 
 # ── Audio timing ───────────────────────────────────────────────────────────
@@ -170,3 +178,23 @@ Client:
 
 Environment variables take precedence over `sonium.toml` for the keys listed
 above.
+
+## Security and migration notes
+
+An absent configuration file uses defaults; an explicit file is parsed and
+validated strictly. Unknown keys, malformed TOML, invalid IP addresses and
+ports, or invalid timing/format combinations prevent startup. Fix the file
+rather than expecting Sonium to ignore unsupported settings.
+
+Phase 1 supports trusted-LAN deployments only. `server.bind` exposes the audio
+listener and media is neither TLS-encrypted nor authenticated. Keep
+`control_bind = "127.0.0.1"` unless a host firewall restricts an intentionally
+exposed trusted-LAN control port. JWT authentication protects control requests,
+not the audio transport.
+
+`users.json` beside the config contains password hashes and a JWT signing
+secret. On Unix it is atomically stored with `0600` permissions in a `0700`
+directory. Legacy account records without `session_version` load as version
+`0` and are persisted on the next successful startup; users must sign in again
+to obtain current versioned tokens. Do not overwrite a corrupt or unreadable
+existing account file—restore it from backup.

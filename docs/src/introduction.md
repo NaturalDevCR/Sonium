@@ -43,8 +43,9 @@ Sonium is built from scratch for correctness, performance, and ease of use:
 - **Admin UI** — users, roles, groups, streams, config editing, dependency checks, logs, and supervised restart requests.
 - **Desktop Agent** — tray app for macOS and Windows client instances.
 - **Home Assistant** — custom integration for zones, speakers, streams, health sensors, and latency controls.
-- **Snapcast migration path** — optional compatibility mode lets existing Snapcast clients connect
-  to a Sonium server during migration (see [configuration](./getting-started/configuration.md)).
+- **Snapcast migration path** — optional discovery mode can assist migration;
+  validate each client/version because full drop-in compatibility is not claimed
+  (see [configuration](./getting-started/configuration.md)).
 
 ## Current status
 

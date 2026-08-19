@@ -66,6 +66,16 @@ The Linux installer downloads the right release package, writes
 systemd service. It also installs a narrowly scoped sudoers rule so the web UI
 can restart `sonium-server.service` after admin-approved config changes.
 
+The generated control listener is `127.0.0.1`, while the audio listener is
+available on the LAN. This is deliberately a trusted-LAN profile: media is not
+TLS-encrypted or authenticated. Do not expose Sonium through a router or public
+address. To administer from another LAN machine, change `control_bind`
+explicitly and restrict `control_port` with the host firewall.
+
+`/etc/sonium` is private (`0700`) because `users.json` within it holds password
+hashes and the persistent JWT signing secret. Keep that directory persistent,
+back it up securely, and never add its contents to a configuration repository.
+
 ```bash
 curl -fsSL https://github.com/NaturalDevCR/Sonium/releases/latest/download/install.sh | sudo bash
 ```
@@ -86,6 +96,12 @@ After installation:
 systemctl status sonium-server
 journalctl -u sonium-server -f
 ```
+
+If upgrading an existing deployment, leave `users.json` in place. Old records
+without `session_version` migrate to version `0` on a successful startup; users
+must sign in again to obtain versioned tokens. A corrupt or unreadable existing
+account file stops the server and is deliberately not replaced—restore it from
+a known-good backup before retrying.
 
 If the admin UI says restart is not permitted, the service was likely installed
 before restart permissions existed or was written by hand. Re-run the installer
@@ -141,11 +157,24 @@ On Windows, run from PowerShell:
 ## Docker Server
 
 Docker is useful for the server. The client should usually run directly on the
-playback device because it needs access to local audio hardware.
+playback device because it needs access to local audio hardware. On first boot,
+create the administrator in the persistent Compose volume:
 
 ```bash
+docker compose run --rm sonium-server \
+  sonium-server --config /etc/sonium/sonium.toml --init-admin 'choose-a-strong-password'
 docker compose up -d
 ```
+
+The Compose template supplies a strict, valid TOML file, persists `users.json`
+in the named volume, and publishes the control port only as
+`127.0.0.1:1711`. Open it on the Docker host or through an SSH tunnel. To make
+it reachable from a trusted LAN, deliberately change the published port and
+add host-firewall restrictions; that does not add TLS or media authentication.
+The included stream reads stdin as a placeholder. Replace it with a mounted
+file/FIFO source for a persistent deployment. File/FIFO producer restarts enter
+`recovering` and reopen automatically; invalid paths or permissions enter
+`error`.
 
 The server exposes:
 

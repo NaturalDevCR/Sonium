@@ -38,6 +38,7 @@ mkfifo /tmp/sonium.fifo
 cat > sonium.toml <<'EOF'
 [server]
 bind = "0.0.0.0"
+control_bind = "127.0.0.1"
 stream_port = 1710
 control_port = 1711
 mdns = true

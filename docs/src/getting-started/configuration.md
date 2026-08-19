@@ -1,7 +1,10 @@
 # Configuration
 
-Sonium works **without any configuration file**. All defaults are chosen to be
-immediately useful on a typical home network.
+Sonium can use defaults when no configuration file exists, but a server still
+needs an initial administrator (`--init-admin`) before it can start. Once an
+explicit `sonium.toml` exists, it is strict: malformed TOML, unknown keys,
+invalid addresses, unsafe port combinations, and invalid audio timing values
+stop startup instead of falling back to defaults.
 
 If you need to customise behaviour, create a `sonium.toml` file in the working
 directory where you run `sonium-server` (typically `/etc/sonium/sonium.toml`
@@ -12,8 +15,11 @@ when installed via the Linux installer).
 ```toml
 [server]
 bind            = "0.0.0.0"   # Listen on all interfaces
+control_bind    = "127.0.0.1" # Web UI/API/metrics; keep local by default
 stream_port     = 1710        # Audio stream port (Sonium default)
 control_port    = 1711        # HTTP/WS control API and web UI
+max_clients     = 64          # 1–256 active sessions, including handshakes
+max_known_clients = 256       # Remembered clients; max_clients–1024
 mdns            = true        # Advertise via mDNS for zero-config discovery
 snapcast_compat = false       # Set true to also advertise _snapcast._tcp mDNS
 
@@ -31,7 +37,7 @@ step_down_ms  = 40            # Decrease step when playback remains stable
 cooldown_ms   = 8000          # Minimum delay between auto adjustments
 
 [server.transport]
-mode     = "tcp"              # "tcp" | "rtp_udp" | "quic_dgram"
+mode     = "tcp"              # "tcp" | "rtp_udp" | "rist" | "quic_dgram"
 udp_port = 0                  # Server UDP port for RTP (0 = same as stream_port)
 
 [[streams]]
@@ -57,6 +63,37 @@ timezone = "America/Costa_Rica"
 level = "info"  # "trace" | "debug" | "info" | "warn" | "error"
 ```
 
+### Trusted-LAN boundary and control bind
+
+This configuration is for a trusted LAN. `server.bind` is the audio listener;
+Sonium does not encrypt or authenticate that media path. Never expose it to the
+Internet or through an untrusted routed network.
+
+The web UI, REST API, WebSocket endpoint, and metrics endpoint use
+`server.control_bind`, not `server.bind`. The default is `127.0.0.1`, so a
+fresh install is administered locally. To administer from a trusted LAN host,
+set `control_bind` to a specific private address (preferred) or `0.0.0.0`, then
+apply a host firewall rule that permits only the intended administrator hosts.
+This is an explicit exposure decision; JWT login does not turn the deployment
+into a TLS or authenticated-media service.
+
+### Account storage and migration
+
+The account database is `users.json` next to `sonium.toml`. On Unix Sonium
+keeps the directory at `0700` and writes the account file atomically at `0600`.
+It includes password hashes and the persistent JWT signing secret, so keep it
+on durable local storage and never copy it into TOML, Compose files, URLs,
+logs, or source control.
+
+Existing account files that predate `session_version` remain readable: missing
+values are treated as `0` and are written back on the next successful startup.
+Tokens issued before session versions were added do not carry that claim and
+must be replaced by signing in again. Afterwards, a password, role, or account
+deletion change invalidates that user's earlier tokens, including after a
+restart. A present-but-corrupt, unreadable, or semantically invalid `users.json`
+is fatal and is not replaced; restore it from a known-good backup before
+retrying.
+
 ### Audio Timing
 
 `buffer_ms` is the client-side playout buffer target. Larger values tolerate more
@@ -71,7 +108,7 @@ most networks.
 | Wired LAN   | 0–50        | Zero-config if all devices use wired Ethernet |
 | Wi-Fi LAN   | 100–200     | Default; handles most Wi-Fi jitter |
 | Mesh/PLC    | 200–400     | Powerline or mesh Wi-Fi with higher latency |
-| Internet    | 500–1000    | Only for WAN streaming (not recommended) |
+| Internet    | N/A         | Unsupported in Phase 1; do not expose media to a WAN |
 
 `output_prefill_ms` is separate from `buffer_ms`. `buffer_ms` absorbs network
 jitter; `output_prefill_ms` keeps the client's local audio-device ring fed. Use
@@ -124,8 +161,11 @@ idle_timeout_ms = 3000
 silence_on_idle = true
 ```
 
-If the process output closes, Sonium marks the stream idle and restarts the
-external source with backoff.
+If the process output closes, Sonium restarts the external source with backoff.
+For ordinary file and FIFO paths, Sonium reports `recovering` with retry context
+and reopens after producer disconnects, path recreation, or file replacement.
+Unrecoverable path configuration and permission errors report `error` instead
+of pretending that the source is idle.
 
 ### Timezone
 
@@ -188,9 +228,9 @@ compensate so all speakers stay in sync:
 latency_ms = 150  # Adjust to match your Bluetooth device
 ```
 
-## Snapcast Migration (Drop-in Replacement)
+## Snapcast discovery migration
 
-To use Sonium as a drop-in replacement for an existing Snapcast setup:
+To advertise a Sonium server to legacy Snapcast discovery tooling:
 
 ```toml
 [server]
@@ -199,8 +239,9 @@ control_port    = 1780   # Snapcast's default HTTP port
 snapcast_compat = true   # Advertise _snapcast._tcp mDNS service
 ```
 
-> **Note:** Sonium's native defaults are `1710`/`1711`. Changing them to
-> Snapcast's ports is only needed for legacy client compatibility.
+> **Note:** Sonium's native defaults are `1710`/`1711`. Changing ports and
+> enabling the mDNS advertisement can assist discovery, but does **not** claim
+> drop-in protocol compatibility with all Snapcast clients or versions.
 
 ## Environment Variables
 

@@ -227,11 +227,14 @@ Implementations **must** reject messages that violate these constraints:
 
 ## Snapcast compatibility
 
-Sonium's wire encoding is binary-compatible with the Snapcast v2 protocol.
-When configured with matching ports (`stream_port = 1704`, `control_port = 1780`)
-and `snapcast_compat = true`, legacy Snapcast clients can connect to a Sonium
-server without modification — useful as a migration path.
+Sonium offers a migration-oriented Snapcast discovery mode. Setting matching
+ports (`stream_port = 1704`, `control_port = 1780`) and
+`snapcast_compat = true` advertises the legacy mDNS service, but does **not**
+claim binary or drop-in compatibility with every Snapcast client or version.
+Test each client/server combination before relying on it in a migration.
 
-- `SnapStreamProtocolVersion` in `Hello` must be `2`.
+- Where a peer speaks the supported compatibility subset,
+  `SnapStreamProtocolVersion` in `Hello` must be `2`.
 - The server ignores unknown JSON fields in `Hello`, `ServerSettings`, and
-  `ClientInfo` — forward-compatible.
+  `ClientInfo` as a best-effort forward-compatibility measure, not as proof of
+  complete interoperability.

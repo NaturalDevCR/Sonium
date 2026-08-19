@@ -307,7 +307,9 @@ if [[ "${INSTALL_SERVER}" == "true" ]]; then
 
   mkdir -p "${CONF_DIR}"
   chown "${SONIUM_USER}" "${CONF_DIR}"
-  chmod 0755 "${CONF_DIR}"
+  # users.json includes password hashes and the durable JWT signing secret.
+  # Keep the whole state directory private even if initialisation later fails.
+  chmod 0700 "${CONF_DIR}"
 
   # Pre-initialize admin account if users.json doesn't exist
   if [[ ! -f "${CONF_DIR}/users.json" ]]; then
@@ -329,6 +331,9 @@ if [[ "${INSTALL_SERVER}" == "true" ]]; then
     cat > "${CONF_DIR}/sonium.toml" <<EOF
 [server]
 bind = "0.0.0.0"
+# Keep the authenticated control plane local by default. Operators that
+# deliberately expose it on a trusted LAN must change this and their firewall.
+control_bind = "127.0.0.1"
 stream_port = ${STREAM_PORT}
 control_port = ${CONTROL_PORT}
 mdns = true
@@ -431,7 +436,12 @@ if [[ "${INSTALL_SERVER}" == "true" ]]; then
   cat <<EOF
 
 Server UI:
-  http://${HOST_IP}:${CONTROL_PORT}
+  http://127.0.0.1:${CONTROL_PORT} (local machine only)
+
+To administer the server from another trusted LAN host, explicitly set
+server.control_bind to the server's LAN address (or 0.0.0.0) in
+${CONF_DIR}/sonium.toml and restrict the port with a host firewall. Sonium does
+not provide TLS or authenticated media transport in this release.
 EOF
 
   if [[ -n "${GEN_PASS:-}" ]]; then
