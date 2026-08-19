@@ -104,8 +104,22 @@ We provide a lightweight native Desktop Agent (`.dmg` for macOS, `.exe` for Wind
 Docker can run the server:
 
 ```bash
-docker compose up -d
+read -r -s -p "Initial Sonium admin password: " SONIUM_INIT_ADMIN_PASSWORD
+printf '\n'
+export SONIUM_INIT_ADMIN_PASSWORD
+if docker compose --profile bootstrap run --rm init-admin; then
+  unset SONIUM_INIT_ADMIN_PASSWORD
+  docker compose up -d
+else
+  status=$?
+  unset SONIUM_INIT_ADMIN_PASSWORD
+  exit "$status"
+fi
 ```
+
+This bootstrap creates the administrator before the first normal server start
+without saving the password in Compose or shell history. See the installation
+guide for the trusted-LAN control-port profile and source mounting.
 
 The client should usually run directly on the playback machine because it needs
 access to local audio hardware.
@@ -149,7 +163,16 @@ silence_on_idle = true
 level = "info"
 EOF
 
-./target/release/sonium-server --config sonium.toml
+read -r -s -p "Initial Sonium admin password: " SONIUM_INIT_ADMIN_PASSWORD
+printf '\n'
+if ./target/release/sonium-server --config sonium.toml --init-admin "$SONIUM_INIT_ADMIN_PASSWORD"; then
+  unset SONIUM_INIT_ADMIN_PASSWORD
+  ./target/release/sonium-server --config sonium.toml
+else
+  status=$?
+  unset SONIUM_INIT_ADMIN_PASSWORD
+  exit "$status"
+fi
 ```
 
 Feed audio in another terminal:

@@ -15,6 +15,20 @@ services:
     # environment:
     #   - SONIUM_LOG=debug
 
+  init-admin:
+    image: sonium/server:latest
+    build: .
+    profiles: ["bootstrap"]
+    entrypoint: ["/bin/sh", "/opt/sonium/init-admin.sh"]
+    environment:
+      # Supply this only for `docker compose --profile bootstrap run`; it is
+      # intentionally not saved in this file or the server configuration.
+      SONIUM_INIT_ADMIN_PASSWORD: "${SONIUM_INIT_ADMIN_PASSWORD-}"
+    volumes:
+      - sonium-config:/etc/sonium
+      - ./deploy/docker/sonium.toml:/etc/sonium/sonium.toml:ro
+      - ./deploy/docker/init-admin.sh:/opt/sonium/init-admin.sh:ro
+
 volumes:
   sonium-config:
     # Stores users.json (password hashes + JWT secret), state, and logs.

@@ -56,7 +56,16 @@ silence_on_idle = true
 level = "info"
 EOF
 
-sonium-server --config sonium.toml
+read -r -s -p "Initial Sonium admin password: " SONIUM_INIT_ADMIN_PASSWORD
+printf '\n'
+if ./target/release/sonium-server --config sonium.toml --init-admin "$SONIUM_INIT_ADMIN_PASSWORD"; then
+  unset SONIUM_INIT_ADMIN_PASSWORD
+  ./target/release/sonium-server --config sonium.toml
+else
+  status=$?
+  unset SONIUM_INIT_ADMIN_PASSWORD
+  exit "$status"
+fi
 ```
 
 Open the web UI:

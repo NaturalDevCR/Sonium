@@ -15,6 +15,7 @@ FIFO_PATH="${SONIUM_FIFO:-/tmp/sonium.fifo}"
 STREAM_PORT="${SONIUM_STREAM_PORT:-1710}"
 CONTROL_PORT="${SONIUM_CONTROL_PORT:-1711}"
 SUDOERS_FILE="/etc/sudoers.d/sonium-server-restart"
+PREFLIGHT_CONFIG=""
 
 # Detect if we can be interactive
 if [[ -t 0 ]]; then
@@ -38,6 +39,7 @@ while [[ $# -gt 0 ]]; do
     --no-service) INSTALL_SERVICE=false; shift ;;
     --server-only) INSTALL_CLIENT=false; shift ;;
     --client-only) INSTALL_SERVER=false; shift ;;
+    --preflight-config) PREFLIGHT_CONFIG="$2"; shift 2 ;;
     --uninstall) UNINSTALL=true; shift ;;
     -h|--help)
       cat <<EOF
@@ -54,6 +56,8 @@ Options:
   --no-service    Install binaries and config only
   --server-only   Install only sonium-server
   --client-only   Install only sonium-client
+  --preflight-config FILE
+                 Check FILE for the legacy [server] audio keys and exit
   --uninstall     Remove Sonium from this system
 EOF
       exit 0
@@ -86,6 +90,42 @@ run_as_user() {
     return 1
   fi
 }
+
+legacy_server_audio_keys() {
+  local config_path="$1"
+  awk '
+    /^[[:space:]]*\[server\][[:space:]]*(#.*)?$/ { in_server = 1; next }
+    /^[[:space:]]*\[/ { in_server = 0 }
+    in_server {
+      entry = $0
+      sub(/^[[:space:]]*/, "", entry)
+      if (entry ~ /^(buffer_ms|chunk_ms|output_prefill_ms)[[:space:]]*=/) {
+        split(entry, parts, /[[:space:]]*=/)
+        print parts[1]
+        found = 1
+      }
+    }
+    END { exit(found ? 0 : 1) }
+  ' "${config_path}"
+}
+
+preflight_server_config() {
+  local config_path="$1"
+  local legacy_keys
+
+  [[ -e "${config_path}" ]] || return 0
+  [[ -r "${config_path}" ]] || die "Cannot read existing configuration ${config_path}; fix its permissions before rerunning the installer."
+
+  if legacy_keys="$(legacy_server_audio_keys "${config_path}")"; then
+    die "Legacy [server] audio keys detected in ${config_path}: ${legacy_keys//$'\n'/, }. Move buffer_ms, chunk_ms, and output_prefill_ms to [server.audio] (keeping their values) and rerun the installer. No binaries, services, account files, or configuration were changed."
+  fi
+}
+
+if [[ -n "${PREFLIGHT_CONFIG}" ]]; then
+  preflight_server_config "${PREFLIGHT_CONFIG}"
+  ok "Configuration preflight passed: ${PREFLIGHT_CONFIG}"
+  exit 0
+fi
 
 if [[ "$(uname)" == "Darwin" && "${UNINSTALL}" == "false" ]]; then
   warn "You are running this on macOS. We recommend using the native Sonium Desktop Agent instead."
@@ -226,6 +266,13 @@ if [[ "${EUID}" -ne 0 ]]; then
   die "Run as root, for example: curl ... | sudo bash"
 fi
 
+# Run this before downloading, replacing binaries, or touching systemd. Strict
+# Phase 1 config rejects the legacy keys, so continuing would risk a failed
+# restart of an otherwise healthy service.
+if [[ "${INSTALL_SERVER}" == "true" ]]; then
+  preflight_server_config "${CONF_DIR}/sonium.toml"
+fi
+
 BIN_DIR="${PREFIX}/bin"
 
 if [[ "${UNINSTALL}" == "true" ]]; then
@@ -364,7 +411,8 @@ EOF
     if run_as_user "${SONIUM_USER}" "${BIN_DIR}/sonium-server" --config "${CONF_DIR}/sonium.toml" --init-admin "${GEN_PASS}" >/dev/null 2>&1; then
       ok "Initialized default admin credentials"
     else
-      warn "Could not initialize default admin credentials automatically"
+      unset GEN_PASS
+      die "Could not initialize the initial admin account. Sonium was not enabled or restarted; inspect ${CONF_DIR}/sonium.toml and rerun the installer."
     fi
   fi
 

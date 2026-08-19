@@ -103,6 +103,17 @@ must sign in again to obtain versioned tokens. A corrupt or unreadable existing
 account file stops the server and is deliberately not replaced—restore it from
 a known-good backup before retrying.
 
+The installer also checks an existing `sonium.toml` **before** it downloads,
+replaces binaries, or changes systemd. Phase 1 rejects legacy
+`buffer_ms`, `chunk_ms`, and `output_prefill_ms` keys under `[server]`; if it
+finds any, it aborts without stopping the existing service and tells you to move
+those same values under `[server.audio]`, then rerun. Check an upgrade file
+without installing anything with:
+
+```bash
+sudo bash install.sh --preflight-config /etc/sonium/sonium.toml
+```
+
 If the admin UI says restart is not permitted, the service was likely installed
 before restart permissions existed or was written by hand. Re-run the installer
 or add an equivalent sudoers rule for the Sonium service user.
@@ -150,20 +161,45 @@ xattr -d com.apple.quarantine sonium-server sonium-client
 On Windows, run from PowerShell:
 
 ```powershell
+$adminPassword = Read-Host -AsSecureString "Initial Sonium admin password"
+$bstr = [Runtime.InteropServices.Marshal]::SecureStringToBSTR($adminPassword)
+try {
+  $plainPassword = [Runtime.InteropServices.Marshal]::PtrToStringBSTR($bstr)
+  .\sonium-server.exe --config .\sonium.toml --init-admin $plainPassword
+  if ($LASTEXITCODE -ne 0) { throw "Initial admin setup failed" }
+}
+finally {
+  if ($null -ne $bstr) { [Runtime.InteropServices.Marshal]::ZeroFreeBSTR($bstr) }
+  Remove-Variable plainPassword -ErrorAction SilentlyContinue
+}
 .\sonium-server.exe --config .\sonium.toml
 .\sonium-client.exe 192.168.1.50
 ```
+
+The password is prompted rather than written into PowerShell history, TOML, or
+an environment file. Run the bootstrap on the local trusted machine before the
+first normal server start; a server without `users.json` intentionally refuses
+to start.
 
 ## Docker Server
 
 Docker is useful for the server. The client should usually run directly on the
 playback device because it needs access to local audio hardware. On first boot,
-create the administrator in the persistent Compose volume:
+prompt for the administrator password without putting it in Compose, TOML, or
+shell history, then run the bootstrap profile before the server service:
 
 ```bash
-docker compose run --rm sonium-server \
-  sonium-server --config /etc/sonium/sonium.toml --init-admin 'choose-a-strong-password'
-docker compose up -d
+read -r -s -p "Initial Sonium admin password: " SONIUM_INIT_ADMIN_PASSWORD
+printf '\n'
+export SONIUM_INIT_ADMIN_PASSWORD
+if docker compose --profile bootstrap run --rm init-admin; then
+  unset SONIUM_INIT_ADMIN_PASSWORD
+  docker compose up -d
+else
+  status=$?
+  unset SONIUM_INIT_ADMIN_PASSWORD
+  exit "$status"
+fi
 ```
 
 The Compose template supplies a strict, valid TOML file, persists `users.json`
@@ -172,9 +208,11 @@ in the named volume, and publishes the control port only as
 it reachable from a trusted LAN, deliberately change the published port and
 add host-firewall restrictions; that does not add TLS or media authentication.
 The included stream reads stdin as a placeholder. Replace it with a mounted
-file/FIFO source for a persistent deployment. File/FIFO producer restarts enter
-`recovering` and reopen automatically; invalid paths or permissions enter
-`error`.
+file/FIFO source for a persistent deployment. Only recoverable file/FIFO
+open/read/EOF conditions enter `recovering` and reopen automatically; terminal
+path errors such as permissions, directories, unsupported paths, or symlink
+loops enter `error`. A `pipe://` child closing uses its separate restart loop
+and is not reported as this file/FIFO recovery state.
 
 The server exposes:
 

@@ -38,7 +38,11 @@ cooldown_ms   = 8000          # Minimum delay between auto adjustments
 
 [server.transport]
 mode     = "tcp"              # "tcp" | "rtp_udp" | "rist" | "quic_dgram"
-udp_port = 0                  # Server UDP port for RTP (0 = same as stream_port)
+udp_port = 0                  # 0 selects stream_port + 2 for rtp_udp/rist; TCP disables UDP
+
+# Timezone for log timestamps and web UI display. It must be a root key, so
+# declare it before [[streams]] rather than after an array table.
+timezone = "America/Costa_Rica"
 
 [[streams]]
 id        = "default"
@@ -55,9 +59,6 @@ silence_on_idle = true   # Optional: emit silence while idle
 # id     = "kitchen"
 # source = "/tmp/kitchen.fifo"
 # codec  = "flac"
-
-# Timezone for log timestamps and web UI display
-timezone = "America/Costa_Rica"
 
 [log]
 level = "info"  # "trace" | "debug" | "info" | "warn" | "error"
@@ -93,6 +94,15 @@ deletion change invalidates that user's earlier tokens, including after a
 restart. A present-but-corrupt, unreadable, or semantically invalid `users.json`
 is fatal and is not replaced; restore it from a known-good backup before
 retrying.
+
+### Legacy installer configuration
+
+Phase 1 accepts timing keys only in `[server.audio]`. The Linux installer
+preflights an existing configuration before it changes binaries or systemd. If
+it finds legacy `buffer_ms`, `chunk_ms`, or `output_prefill_ms` keys directly
+under `[server]`, it aborts without stopping the current service. Move those
+values to `[server.audio]` and rerun the installer; this deliberate stop avoids
+restarting a healthy service with a strict-config startup failure.
 
 ### Audio Timing
 
@@ -164,8 +174,10 @@ silence_on_idle = true
 If the process output closes, Sonium restarts the external source with backoff.
 For ordinary file and FIFO paths, Sonium reports `recovering` with retry context
 and reopens after producer disconnects, path recreation, or file replacement.
-Unrecoverable path configuration and permission errors report `error` instead
-of pretending that the source is idle.
+The Recovering state is only for ordinary file/FIFO sources after a recoverable
+open/read/EOF condition. `error` is reserved for terminal source failures such
+as an empty path, permission denial, a directory, unsupported path type, or a
+symlink loop; it does not mean a `pipe://` child simply closed.
 
 ### Timezone
 

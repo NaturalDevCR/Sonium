@@ -74,8 +74,8 @@ cooldown_ms = 8000
 # "quic_dgram" — config-visible placeholder; not implemented yet
 mode = "tcp"
 
-# UDP media port for rtp_udp/rist. 0 lets the server auto-bind when a UDP mode
-# requires it, or disables UDP when TCP is selected.
+# UDP media port for rtp_udp/rist. With udp_port = 0, Sonium selects
+# stream_port + 2 when either UDP mode is enabled; TCP leaves UDP disabled.
 udp_port = 0
 
 

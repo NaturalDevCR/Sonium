@@ -30,7 +30,9 @@ Sonium is built from scratch for correctness, performance, and ease of use:
 
 ## Key features
 
-- **Zero required config** — `sonium-server` runs immediately. Point a browser at `http://server:1711` and you're done.
+- **Zero required config** — server settings have defaults, but the first start
+  must explicitly initialize an administrator before the normal server process
+  runs. Point a local browser at `http://127.0.0.1:1711` afterward.
 - **Multi-codec** — Opus for bandwidth efficiency, FLAC for lossless quality, PCM for zero-latency.
 - **Multiple source types** — FIFO/file, TCP, external `pipe://` processes, ffmpeg radio templates, and meta streams.
 - **Recovering radio/process streams** — external sources restart with backoff if their stdout closes.
