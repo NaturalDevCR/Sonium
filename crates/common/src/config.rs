@@ -274,8 +274,6 @@ impl ServerConfig {
             self.server.audio.chunk_ms,
             None,
         )?;
-        validate_auto_buffer(&self.server.auto_buffer)?;
-
         if matches!(
             self.server.transport.mode,
             TransportMode::RtpUdp | TransportMode::Rist
@@ -288,15 +286,20 @@ impl ServerConfig {
             );
         }
 
+        let mut largest_chunk_ms = self.server.audio.chunk_ms;
         for stream in &self.streams {
-            validate_stream_format(stream)?;
+            let effective_chunk_ms = self.effective_chunk_ms(stream);
             validate_buffer_and_chunk(
                 &format!("stream `{}`", stream.id),
                 self.effective_buffer_ms(stream),
-                self.effective_chunk_ms(stream),
+                effective_chunk_ms,
                 Some(stream.codec.as_str()),
             )?;
+            validate_stream_format(stream, effective_chunk_ms)?;
+            largest_chunk_ms = largest_chunk_ms.max(effective_chunk_ms);
         }
+        validate_auto_buffer(&self.server.auto_buffer, largest_chunk_ms)?;
+        validate_log_config(&self.log)?;
 
         Ok(())
     }
@@ -336,7 +339,7 @@ fn validate_buffer_and_chunk(
     Ok(())
 }
 
-fn validate_auto_buffer(config: &AutoBufferConfig) -> anyhow::Result<()> {
+fn validate_auto_buffer(config: &AutoBufferConfig, largest_chunk_ms: u32) -> anyhow::Result<()> {
     if config.min_ms > config.max_ms {
         anyhow::bail!("server.auto_buffer.min_ms must not exceed max_ms");
     }
@@ -349,10 +352,15 @@ fn validate_auto_buffer(config: &AutoBufferConfig) -> anyhow::Result<()> {
     if config.max_ms > i32::MAX as u32 {
         anyhow::bail!("server.auto_buffer.max_ms exceeds the protocol's signed millisecond range");
     }
+    if config.enabled && config.min_ms < largest_chunk_ms {
+        anyhow::bail!(
+            "server.auto_buffer.min_ms must be at least the largest effective stream chunk ({largest_chunk_ms} ms)"
+        );
+    }
     Ok(())
 }
 
-fn validate_stream_format(stream: &StreamSource) -> anyhow::Result<()> {
+fn validate_stream_format(stream: &StreamSource, chunk_ms: u32) -> anyhow::Result<()> {
     let format = stream.sample_format;
     if format.rate == 0 {
         anyhow::bail!(
@@ -387,8 +395,69 @@ fn validate_stream_format(stream: &StreamSource) -> anyhow::Result<()> {
                 );
             }
         }
-        "pcm" | "flac" => {}
+        "pcm" => {}
+        "flac" => validate_flac_format(stream, chunk_ms)?,
         codec => anyhow::bail!("stream `{}` has unsupported codec `{codec}`", stream.id),
+    }
+    Ok(())
+}
+
+fn validate_flac_format(stream: &StreamSource, chunk_ms: u32) -> anyhow::Result<()> {
+    // flacenc 0.5.1 verifies StreamInfo against these codec limits. Keeping
+    // them here prevents startup from reaching the encoder with an unsupported
+    // format or allocating a frame outside the codec's maximum input shape.
+    const FLAC_MAX_SAMPLE_RATE: u32 = 96_000;
+    const FLAC_MAX_CHANNELS: u16 = 8;
+    const FLAC_MIN_BLOCK_SIZE: u64 = 32;
+    const FLAC_MAX_BLOCK_SIZE: u64 = 32_767;
+    const FLAC_ENCODER_FRAME_MS: u64 = 20;
+
+    let format = stream.sample_format;
+    if format.rate > FLAC_MAX_SAMPLE_RATE {
+        anyhow::bail!(
+            "stream `{}` flac sample_format.rate must not exceed {FLAC_MAX_SAMPLE_RATE}",
+            stream.id
+        );
+    }
+    if format.channels > FLAC_MAX_CHANNELS {
+        anyhow::bail!(
+            "stream `{}` flac sample_format.channels must not exceed {FLAC_MAX_CHANNELS}",
+            stream.id
+        );
+    }
+
+    let encoder_block_size = u64::from(format.rate)
+        .checked_mul(FLAC_ENCODER_FRAME_MS)
+        .ok_or_else(|| anyhow::anyhow!("stream `{}` flac block size overflows", stream.id))?
+        / 1_000;
+    if !(FLAC_MIN_BLOCK_SIZE..=FLAC_MAX_BLOCK_SIZE).contains(&encoder_block_size) {
+        anyhow::bail!(
+            "stream `{}` flac encoder block size must be between {FLAC_MIN_BLOCK_SIZE} and {FLAC_MAX_BLOCK_SIZE} samples",
+            stream.id
+        );
+    }
+
+    let frame_bytes = u64::from(format.rate)
+        .checked_mul(u64::from(chunk_ms))
+        .and_then(|samples_per_second| samples_per_second.checked_div(1_000))
+        .and_then(|frames| frames.checked_mul(u64::from(format.channels)))
+        .and_then(|samples| samples.checked_mul(2))
+        .ok_or_else(|| anyhow::anyhow!("stream `{}` frame size overflows", stream.id))?;
+    usize::try_from(frame_bytes).map_err(|_| {
+        anyhow::anyhow!(
+            "stream `{}` frame size does not fit this platform",
+            stream.id
+        )
+    })?;
+    Ok(())
+}
+
+fn validate_log_config(log: &LogConfig) -> anyhow::Result<()> {
+    if !matches!(
+        log.level.as_str(),
+        "trace" | "debug" | "info" | "warn" | "error"
+    ) {
+        anyhow::bail!("log.level must be trace, debug, info, warn, or error");
     }
     Ok(())
 }
@@ -467,6 +536,7 @@ impl ClientConfig {
         if self.server_port == 0 {
             anyhow::bail!("server_port must be between 1 and 65535");
         }
+        validate_log_config(&self.log)?;
         Ok(())
     }
 }
@@ -626,6 +696,59 @@ sample_format = { rate = 48000, bits = 24, channels = 2 }
             );
             fs::remove_file(path).expect("remove test configuration");
         }
+    }
+
+    #[test]
+    fn explicit_config_rejects_flac_formats_outside_encoder_and_frame_bounds() {
+        for (name, content) in [
+            (
+                "flac-rate-over-limit",
+                "[[streams]]\ncodec = \"flac\"\nsample_format = { rate = 96001, bits = 16, channels = 2 }\n",
+            ),
+            (
+                "flac-channel-over-limit",
+                "[[streams]]\ncodec = \"flac\"\nsample_format = { rate = 96000, bits = 16, channels = 9 }\n",
+            ),
+        ] {
+            let path = write_config(name, content);
+            assert!(
+                ServerConfig::from_file(&path).is_err(),
+                "{name} must be rejected before allocating a stream frame"
+            );
+            fs::remove_file(path).expect("remove test configuration");
+        }
+
+        let path = write_config(
+            "flac-maximum-supported-frame",
+            "[server.audio]\nchunk_ms = 60\n\n[[streams]]\ncodec = \"flac\"\nsample_format = { rate = 96000, bits = 16, channels = 8 }\n",
+        );
+        ServerConfig::from_file(&path).expect("flacenc's maximum supported frame is valid");
+        fs::remove_file(path).expect("remove test configuration");
+    }
+
+    #[test]
+    fn enabled_auto_buffer_requires_a_minimum_for_every_effective_chunk() {
+        let path = write_config(
+            "auto-buffer-below-stream-chunk",
+            "[server.auto_buffer]\nenabled = true\nmin_ms = 20\n\n[[streams]]\nchunk_ms = 60\n",
+        );
+
+        assert!(
+            ServerConfig::from_file(&path).is_err(),
+            "auto-buffer must not tune below an active stream's frame duration"
+        );
+        fs::remove_file(path).expect("remove test configuration");
+    }
+
+    #[test]
+    fn explicit_server_and_client_configs_reject_invalid_log_levels() {
+        let server_path = write_config("server-invalid-log", "[log]\nlevel = \"verbose\"\n");
+        assert!(ServerConfig::from_file(&server_path).is_err());
+        fs::remove_file(server_path).expect("remove test configuration");
+
+        let client_path = write_config("client-invalid-log", "[log]\nlevel = \"verbose\"\n");
+        assert!(ClientConfig::from_file(&client_path).is_err());
+        fs::remove_file(client_path).expect("remove test configuration");
     }
 
     #[test]

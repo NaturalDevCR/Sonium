@@ -255,7 +255,7 @@ impl AutoBufferTuner {
             } else {
                 self.step_up_ms
             };
-            return Some((current_buffer_ms + step).min(self.max_ms));
+            return Some(current_buffer_ms.saturating_add(step).min(self.max_ms));
         }
 
         if self.clean_intervals >= AUTO_BUFFER_CLEAN_INTERVALS_BEFORE_STEP_DOWN
@@ -1336,6 +1336,16 @@ mod tests {
         let report = rtp_report(0, AUTO_BUFFER_RTP_BURST_THRESHOLD + 1, 0, 0);
 
         assert_eq!(t.on_health(&report, 1200), Some(1600));
+    }
+
+    #[test]
+    fn auto_buffer_step_up_saturates_at_the_configured_maximum() {
+        let mut t = auto_tuner();
+        t.max_ms = u32::MAX;
+        t.step_up_ms = u32::MAX;
+        let report = rtp_report(1, 0, 0, 0);
+
+        assert_eq!(t.on_health(&report, u32::MAX - 1), Some(u32::MAX));
     }
 
     #[test]

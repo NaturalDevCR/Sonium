@@ -76,22 +76,40 @@ async fn require_admin_auth(
 }
 
 async fn post_config_validate(body: String) -> Response {
+    if let Err(response) = validate_config_body(&body) {
+        return response;
+    }
+    StatusCode::NO_CONTENT.into_response()
+}
+
+fn validate_config_body(body: &str) -> Result<(), Response> {
     if let Err(e) = toml::from_str::<toml::Value>(&body) {
-        return (
+        return Err((
             StatusCode::UNPROCESSABLE_ENTITY,
             format!("invalid TOML: {e}"),
         )
-            .into_response();
+            .into_response());
     }
-    if let Err(e) = toml::from_str::<sonium_common::config::ServerConfig>(&body) {
+    let config = match toml::from_str::<sonium_common::config::ServerConfig>(body) {
+        Ok(config) => config,
+        Err(e) => {
+            tracing::error!("Config validation failed: {e}");
+            return Err((
+                StatusCode::UNPROCESSABLE_ENTITY,
+                format!("config error: {e}"),
+            )
+                .into_response());
+        }
+    };
+    if let Err(e) = config.validate() {
         tracing::error!("Config validation failed: {e}");
-        return (
+        return Err((
             StatusCode::UNPROCESSABLE_ENTITY,
             format!("config error: {e}"),
         )
-            .into_response();
+            .into_response());
     }
-    StatusCode::NO_CONTENT.into_response()
+    Ok(())
 }
 
 async fn get_config_raw(State(s): State<ConfigApiState>) -> Response {
@@ -111,22 +129,8 @@ async fn get_config_raw(State(s): State<ConfigApiState>) -> Response {
 }
 
 async fn put_config_raw(State(s): State<ConfigApiState>, body: String) -> Response {
-    // Validate TOML before saving.
-    if let Err(e) = toml::from_str::<toml::Value>(&body) {
-        return (
-            StatusCode::UNPROCESSABLE_ENTITY,
-            format!("invalid TOML: {e}"),
-        )
-            .into_response();
-    }
-    // Also validate against ServerConfig shape.
-    if let Err(e) = toml::from_str::<sonium_common::config::ServerConfig>(&body) {
-        tracing::error!("Config validation failed: {e}");
-        return (
-            StatusCode::UNPROCESSABLE_ENTITY,
-            format!("config error: {e}"),
-        )
-            .into_response();
+    if let Err(response) = validate_config_body(&body) {
+        return response;
     }
 
     match std::fs::write(&s.config_path, &body) {
@@ -164,5 +168,39 @@ async fn post_config_reload(State(s): State<ConfigApiState>) -> Response {
             "config reload worker dropped response",
         )
             .into_response(),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use tempfile::tempdir;
+
+    #[tokio::test]
+    async fn config_validation_endpoint_rejects_semantically_invalid_config() {
+        let response = post_config_validate("[server]\nstream_port = 0\n".into()).await;
+
+        assert_eq!(response.status(), StatusCode::UNPROCESSABLE_ENTITY);
+    }
+
+    #[tokio::test]
+    async fn config_update_does_not_persist_semantically_invalid_config() {
+        let directory = tempdir().expect("create test directory");
+        let config_path = directory.path().join("sonium.toml");
+        let auth = UserStore::load_or_init(directory.path(), Some("admin-password".into()))
+            .expect("create test auth store");
+        let state = ConfigApiState {
+            config_path: config_path.clone(),
+            auth,
+            reload_tx: None,
+        };
+
+        let response = put_config_raw(State(state), "[server]\nstream_port = 0\n".into()).await;
+
+        assert_eq!(response.status(), StatusCode::UNPROCESSABLE_ENTITY);
+        assert!(
+            !config_path.exists(),
+            "an invalid config must not be written"
+        );
     }
 }
