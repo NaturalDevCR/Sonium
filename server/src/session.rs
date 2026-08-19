@@ -483,7 +483,7 @@ pub async fn handle(
 
     validate_client_id(&client_id)?;
     tracing::Span::current().record("client_id", client_id.as_str());
-    state.client_connected(
+    state.try_client_connected(
         &client_id,
         &hostname,
         &client_name,
@@ -491,7 +491,7 @@ pub async fn handle(
         &arch,
         peer,
         proto_ver,
-    );
+    )?;
     metrics::TOTAL_CONNECTIONS.inc();
     metrics::CONNECTED_CLIENTS.inc();
 

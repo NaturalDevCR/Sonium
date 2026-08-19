@@ -469,6 +469,55 @@ pub fn observe_active_transport(client_id: &str, active_transport: &str) {
     }
 }
 
+/// Remove all per-client Prometheus series when a client disconnects or is evicted.
+pub fn forget_client(client_id: &str) {
+    const TRANSPORTS: [&str; 5] = ["tcp", "rtp_udp", "rist", "arq_udp", "quic_dgram"];
+
+    macro_rules! remove_transport_series {
+        ($transport:expr, $($metric:ident),+ $(,)?) => {
+            $(let _ = $metric.remove_label_values(&[client_id, $transport]);)+
+        };
+    }
+
+    for transport in TRANSPORTS {
+        remove_transport_series!(
+            transport,
+            CLIENT_BUFFER_DEPTH_MS,
+            CLIENT_OUTPUT_BUFFER_MS,
+            CLIENT_JITTER_BUFFER_CHUNKS,
+            CLIENT_TARGET_PLAYOUT_LATENCY_MS,
+            CLIENT_CALLBACK_STARVATIONS,
+            CLIENT_AUDIO_CALLBACK_XRUNS,
+            CLIENT_JITTER_MS,
+            CLIENT_UNDERRUNS,
+            CLIENT_STALE_DROPS,
+            CLIENT_OVERRUNS,
+            CLIENT_CLOCK_OFFSET_MS,
+            CLIENT_RTP_PACKETS_RECEIVED,
+            CLIENT_RTP_SEQUENCE_GAPS,
+            CLIENT_RTP_DECODE_ERRORS,
+            CLIENT_RTP_CONCEALED_PACKETS,
+            CLIENT_ARQ_NACKS_SENT,
+            CLIENT_ARQ_RETRANSMIT_RECEIVED,
+            CLIENT_ARQ_FEC_RECOVERED,
+            CLIENT_CLOCK_OFFSET_US,
+            CLIENT_GROUP_OFFSET_US,
+            CLIENT_SYNC_ERROR_US,
+            CLIENT_PLAYOUT_ERROR_P50_US,
+            CLIENT_PLAYOUT_ERROR_P95_US,
+            CLIENT_PLAYOUT_ERROR_P99_US,
+            CLIENT_CALLBACK_DURATION_P99_US,
+            CLIENT_OUTPUT_LATENCY_US,
+            CLIENT_ARQ_FEC_RECOVERY_PCT_BP,
+            CLIENT_TRANSPORT_ACTIVE,
+        );
+        for state in AudioHealthState::ALL {
+            let _ =
+                CLIENT_HEALTH_STATE.remove_label_values(&[client_id, transport, state.as_str()]);
+        }
+    }
+}
+
 /// Update the per-group max absolute sync error in microseconds.
 ///
 /// Wired into the adaptive engine in Phase E; for Phase A the gauge is
@@ -489,4 +538,23 @@ pub fn gather() -> String {
         .encode(&prometheus::gather(), &mut buf)
         .unwrap_or(());
     String::from_utf8(buf).unwrap_or_default()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn forget_client_removes_client_labelled_series() {
+        let id = "metrics-cleanup-client";
+        let report = HealthReport::new(0, 0, 0, 100, 0, 0);
+
+        observe_client_health(id, "tcp", &report, AudioHealthState::Stable);
+        observe_active_transport(id, "tcp");
+        assert!(gather().contains(&format!("client_id=\"{id}\"")));
+
+        forget_client(id);
+
+        assert!(!gather().contains(&format!("client_id=\"{id}\"")));
+    }
 }

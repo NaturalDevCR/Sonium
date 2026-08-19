@@ -18,8 +18,10 @@ use std::sync::Arc;
 use crate::persistence::{PersistedClient, PersistedGroup, PersistedStream, PersistenceStore};
 use crate::ws::EventBus;
 use sonium_common::config::validate_client_id;
+use sonium_common::SoniumError;
 use sonium_protocol::messages::{EqBand, HealthReport};
 use sonium_transport::TransportMode;
+use std::cmp::Reverse;
 
 // ── Client ────────────────────────────────────────────────────────────────
 
@@ -156,6 +158,8 @@ struct TransportState {
 /// control API.
 pub struct ServerState {
     clients: RwLock<HashMap<String, ClientInfo>>,
+    max_known_clients: usize,
+    client_removal_hook: RwLock<Option<Arc<dyn Fn(&str) + Send + Sync>>>,
     groups: RwLock<HashMap<String, Group>>,
     streams: RwLock<HashMap<String, StreamInfo>>,
     events: Arc<EventBus>,
@@ -178,10 +182,23 @@ impl ServerState {
         saved_clients: Vec<PersistedClient>,
         saved_streams: Vec<PersistedStream>,
     ) -> Self {
-        let saved_clients: Vec<PersistedClient> = saved_clients
+        Self::new_with_known_client_limit(events, persistence, saved_clients, saved_streams, 256)
+    }
+
+    /// Construct state with an explicit bound for remembered, disconnected clients.
+    pub fn new_with_known_client_limit(
+        events: Arc<EventBus>,
+        persistence: Option<Arc<PersistenceStore>>,
+        saved_clients: Vec<PersistedClient>,
+        saved_streams: Vec<PersistedStream>,
+        max_known_clients: usize,
+    ) -> Self {
+        let mut saved_clients: Vec<PersistedClient> = saved_clients
             .into_iter()
             .filter(|client| validate_client_id(&client.id).is_ok())
             .collect();
+        saved_clients.sort_by_key(|client| Reverse(client.last_seen));
+        saved_clients.truncate(max_known_clients);
         let mut groups = HashMap::new();
         let default_grp = Group {
             id: "default".into(),
@@ -266,6 +283,8 @@ impl ServerState {
                     })
                     .collect(),
             ),
+            max_known_clients,
+            client_removal_hook: RwLock::new(None),
             groups: RwLock::new(groups),
             streams: RwLock::new(streams),
             events,
@@ -278,6 +297,17 @@ impl ServerState {
                 server_udp_port: 0,
             }),
             timezone: parking_lot::RwLock::new(None),
+        }
+    }
+
+    /// Register cleanup for client-labelled resources owned by the server binary.
+    pub fn set_client_removal_hook(&self, hook: Arc<dyn Fn(&str) + Send + Sync>) {
+        *self.client_removal_hook.write() = Some(hook);
+    }
+
+    fn notify_client_removed(&self, id: &str) {
+        if let Some(hook) = self.client_removal_hook.read().clone() {
+            hook(id);
         }
     }
 
@@ -371,68 +401,116 @@ impl ServerState {
         addr: SocketAddr,
         protocol_version: u32,
     ) {
+        let _ =
+            self.try_client_connected(id, hostname, client_name, os, arch, addr, protocol_version);
+    }
+
+    /// Atomically admit a client without replacing an active session.
+    #[allow(clippy::too_many_arguments)]
+    pub fn try_client_connected(
+        &self,
+        id: impl Into<String>,
+        hostname: impl Into<String>,
+        client_name: impl Into<String>,
+        os: impl Into<String>,
+        arch: impl Into<String>,
+        addr: SocketAddr,
+        protocol_version: u32,
+    ) -> Result<(), SoniumError> {
         let id = id.into();
-        if validate_client_id(&id).is_err() {
-            return;
-        }
+        validate_client_id(&id)?;
         let hostname = hostname.into();
 
-        // Restore settings from live state first, then the startup snapshot.
-        let existing = self.clients.read().get(&id).cloned();
-        let saved = self.saved_clients.iter().find(|c| c.id == id);
+        let (info, evicted) = {
+            let mut clients = self.clients.write();
+            let existing = clients.get(&id).cloned();
+            if existing.as_ref().is_some_and(ClientInfo::is_connected) {
+                return Err(SoniumError::Protocol(
+                    "client ID already has an active session".into(),
+                ));
+            }
 
-        let (volume, muted, latency_ms, group_id, display_name, observability_enabled) =
-            if let Some(c) = existing {
-                (
-                    c.volume,
-                    c.muted,
-                    c.latency_ms,
-                    c.group_id,
-                    c.display_name,
-                    c.observability_enabled,
-                )
-            } else if let Some(s) = saved {
-                (
-                    s.volume,
-                    s.muted,
-                    s.latency_ms,
-                    s.group_id.clone(),
-                    s.display_name.clone(),
-                    s.observability_enabled,
-                )
+            let evicted = if existing.is_none() && clients.len() >= self.max_known_clients {
+                let lru_id = clients
+                    .values()
+                    .filter(|client| !client.is_connected())
+                    .min_by_key(|client| client.connected_at)
+                    .map(|client| client.id.clone())
+                    .ok_or_else(|| {
+                        SoniumError::Protocol(
+                            "maximum known clients reached with no disconnected client to evict"
+                                .into(),
+                        )
+                    })?;
+                clients.remove(&lru_id)
             } else {
-                (100, false, 0, "default".into(), None, false)
+                None
             };
 
-        let info = ClientInfo {
-            id: id.clone(),
-            hostname: hostname.clone(),
-            client_name: client_name.into(),
-            os: os.into(),
-            arch: arch.into(),
-            remote_addr: addr.to_string(),
-            volume,
-            muted,
-            latency_ms,
-            group_id: group_id.clone(),
-            status: ClientStatus::Connected,
-            connected_at: Utc::now(),
-            protocol_version,
-            display_name,
-            observability_enabled,
-            health: None,
-            last_clock_offset_ms: None,
+            // Restore settings from live state first, then the startup snapshot.
+            let saved = self.saved_clients.iter().find(|client| client.id == id);
+            let (volume, muted, latency_ms, group_id, display_name, observability_enabled) =
+                if let Some(client) = existing {
+                    (
+                        client.volume,
+                        client.muted,
+                        client.latency_ms,
+                        client.group_id,
+                        client.display_name,
+                        client.observability_enabled,
+                    )
+                } else if let Some(client) = saved {
+                    (
+                        client.volume,
+                        client.muted,
+                        client.latency_ms,
+                        client.group_id.clone(),
+                        client.display_name.clone(),
+                        client.observability_enabled,
+                    )
+                } else {
+                    (100, false, 0, "default".into(), None, false)
+                };
+
+            let info = ClientInfo {
+                id: id.clone(),
+                hostname: hostname.clone(),
+                client_name: client_name.into(),
+                os: os.into(),
+                arch: arch.into(),
+                remote_addr: addr.to_string(),
+                volume,
+                muted,
+                latency_ms,
+                group_id,
+                status: ClientStatus::Connected,
+                connected_at: Utc::now(),
+                protocol_version,
+                display_name,
+                observability_enabled,
+                health: None,
+                last_clock_offset_ms: None,
+            };
+            clients.insert(id.clone(), info.clone());
+            (info, evicted)
         };
 
         // Place into the correct group (restored or default).
         {
             let mut groups = self.groups.write();
+            if let Some(evicted) = &evicted {
+                if let Some(group) = groups.get_mut(&evicted.group_id) {
+                    group
+                        .client_ids
+                        .retain(|client_id| client_id != &evicted.id);
+                }
+            }
             // Remove from any group that already lists this client (stale from previous session).
             for g in groups.values_mut() {
                 g.client_ids.retain(|cid| cid != &id);
             }
-            let target = if groups.contains_key(&group_id) {
-                group_id.clone()
+            let target = if groups.contains_key(&info.group_id) {
+                info.group_id.clone()
             } else {
                 "default".into()
             };
@@ -441,10 +519,16 @@ impl ServerState {
             }
         }
 
-        self.clients.write().insert(id.clone(), info.clone());
+        if let Some(evicted) = evicted {
+            self.events.emit(crate::ws::Event::ClientDeleted {
+                client_id: evicted.id.clone(),
+            });
+            self.notify_client_removed(&evicted.id);
+        }
         self.events
             .emit(crate::ws::Event::ClientConnected { client: info });
         self.persist();
+        Ok(())
     }
 
     /// Mark a client as disconnected (keeps history in the registry).
@@ -452,10 +536,12 @@ impl ServerState {
         let mut clients = self.clients.write();
         if let Some(c) = clients.get_mut(id) {
             c.status = ClientStatus::Disconnected;
+            c.connected_at = Utc::now();
             self.events.emit(crate::ws::Event::ClientDisconnected {
                 client_id: id.into(),
             });
             drop(clients);
+            self.notify_client_removed(id);
             self.persist();
         }
     }
@@ -477,6 +563,7 @@ impl ServerState {
         self.events.emit(crate::ws::Event::ClientDeleted {
             client_id: client_id.into(),
         });
+        self.notify_client_removed(client_id);
         self.persist();
         true
     }
@@ -926,6 +1013,7 @@ impl ServerState {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::sync::{Arc, Mutex};
 
     fn state() -> Arc<ServerState> {
         Arc::new(ServerState::new(
@@ -936,12 +1024,118 @@ mod tests {
         ))
     }
 
+    fn state_with_known_client_limit(max_known_clients: usize) -> Arc<ServerState> {
+        Arc::new(ServerState::new_with_known_client_limit(
+            Arc::new(EventBus::new()),
+            None,
+            vec![],
+            vec![],
+            max_known_clients,
+        ))
+    }
+
     fn addr() -> SocketAddr {
         "127.0.0.1:50000".parse().unwrap()
     }
 
     fn connect(s: &ServerState, id: &str) {
         s.client_connected(id, "pi", "Sonium", "linux", "aarch64", addr(), 2);
+    }
+
+    #[test]
+    fn evicts_the_least_recently_seen_disconnected_client_at_known_client_capacity() {
+        let s = state_with_known_client_limit(2);
+        connect(&s, "active-client");
+        connect(&s, "old-client");
+        s.client_disconnected("old-client");
+
+        s.try_client_connected(
+            "new-client",
+            "new-pi",
+            "Sonium",
+            "linux",
+            "aarch64",
+            addr(),
+            2,
+        )
+        .expect("a disconnected LRU client can be replaced");
+
+        assert!(s.get_client("old-client").is_none());
+        assert!(s.get_client("active-client").unwrap().is_connected());
+        assert!(s.get_client("new-client").unwrap().is_connected());
+        assert!(!s
+            .get_group("default")
+            .unwrap()
+            .client_ids
+            .contains(&"old-client".to_string()));
+    }
+
+    #[test]
+    fn rejects_a_duplicate_active_id_without_replacing_its_session_state() {
+        let s = state();
+        s.try_client_connected(
+            "living-room-1",
+            "first-host",
+            "Sonium",
+            "linux",
+            "aarch64",
+            addr(),
+            2,
+        )
+        .expect("first session admitted");
+
+        assert!(s
+            .try_client_connected(
+                "living-room-1",
+                "second-host",
+                "Sonium",
+                "linux",
+                "aarch64",
+                addr(),
+                2,
+            )
+            .is_err());
+        assert_eq!(
+            s.get_client("living-room-1").unwrap().hostname,
+            "first-host"
+        );
+    }
+
+    #[test]
+    fn removal_hook_runs_on_disconnect_delete_and_lru_eviction() {
+        let s = state_with_known_client_limit(1);
+        let removed = Arc::new(Mutex::new(Vec::<String>::new()));
+        let observed = removed.clone();
+        s.set_client_removal_hook(Arc::new(move |id| {
+            observed.lock().unwrap().push(id.to_owned())
+        }));
+
+        connect(&s, "first-client");
+        s.client_disconnected("first-client");
+        assert!(s.delete_client("first-client"));
+
+        connect(&s, "evicted-client");
+        s.client_disconnected("evicted-client");
+        s.try_client_connected(
+            "replacement-client",
+            "pi",
+            "Sonium",
+            "linux",
+            "aarch64",
+            addr(),
+            2,
+        )
+        .expect("disconnected client can be evicted");
+
+        assert_eq!(
+            *removed.lock().unwrap(),
+            vec![
+                "first-client",
+                "first-client",
+                "evicted-client",
+                "evicted-client"
+            ]
+        );
     }
 
     #[test]

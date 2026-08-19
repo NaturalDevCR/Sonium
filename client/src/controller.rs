@@ -12,7 +12,7 @@ use sonium_transport::arq::{decode_time_echo, encode_time_probe};
 use sonium_transport::{ArqReceiver, RtpPacket, RTP_CLOCK_RATE};
 use std::sync::atomic::{AtomicU64, Ordering};
 
-use sonium_common::config::ClientConfig;
+use sonium_common::config::{ClientConfig, MAX_CLIENT_ID_LEN};
 use sonium_protocol::{
     header::{validate_payload_size, HEADER_SIZE},
     messages::{EqBand, HealthReport, Hello, Message, TimeMsg},
@@ -45,6 +45,39 @@ const MAX_CONCEALMENT_PACKETS_PER_GAP: u16 = 10;
 
 const READ_TIMEOUT: Duration = Duration::from_secs(20);
 const WRITE_TIMEOUT: Duration = Duration::from_secs(5);
+
+/// Derive a stable protocol-safe ID from an arbitrary local hostname.
+fn client_id_from_hostname(hostname: &str, instance: u32) -> String {
+    let mut normalized = String::with_capacity(hostname.len());
+    for byte in hostname.bytes() {
+        if byte.is_ascii_alphanumeric() {
+            normalized.push((byte as char).to_ascii_lowercase());
+        } else if !normalized.ends_with('-') {
+            normalized.push('-');
+        }
+    }
+    let normalized = normalized.trim_matches('-');
+    let normalized = if normalized.is_empty() {
+        "sonium-client"
+    } else {
+        normalized
+    };
+    let instance_suffix = format!("-{instance}");
+    if normalized.len() + instance_suffix.len() <= MAX_CLIENT_ID_LEN {
+        return format!("{normalized}{instance_suffix}");
+    }
+
+    let disambiguator = format!("-{:08x}", stable_hostname_hash(hostname));
+    let prefix_len = MAX_CLIENT_ID_LEN - disambiguator.len() - instance_suffix.len();
+    let prefix = normalized[..prefix_len].trim_end_matches('-');
+    format!("{prefix}{disambiguator}{instance_suffix}")
+}
+
+fn stable_hostname_hash(hostname: &str) -> u32 {
+    hostname.bytes().fold(0x811c_9dc5, |hash, byte| {
+        (hash ^ u32::from(byte)).wrapping_mul(0x0100_0193)
+    })
+}
 
 /// Dedicated TCP writer task — owns the write half exclusively so the
 /// main select! loop never blocks on a TCP write.  Control messages
@@ -164,7 +197,7 @@ async fn connect_and_run(
         .map(|h| h.to_string_lossy().to_string())
         .unwrap_or_else(|_| "sonium-client".into());
     let display_name = cfg.client_name.as_deref().unwrap_or(&hostname);
-    let client_id = format!("{}-{}", hostname, cfg.instance);
+    let client_id = client_id_from_hostname(&hostname, cfg.instance);
 
     let mut hello_msg = Hello::new(display_name, &client_id);
     hello_msg.hostname = display_name.to_owned();
@@ -986,5 +1019,32 @@ fn apply_volume(samples: &mut [i16], volume: u8, muted: bool) {
     let gain = volume as f32 / 100.0;
     for sample in samples {
         *sample = (*sample as f32 * gain).clamp(i16::MIN as f32, i16::MAX as f32) as i16;
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use sonium_common::config::{validate_client_id, MAX_CLIENT_ID_LEN};
+
+    #[test]
+    fn client_id_normalizes_fqdn_hostname_into_the_protocol_charset() {
+        let id = client_id_from_hostname("living.room.example", 7);
+
+        assert_eq!(id, "living-room-example-7");
+        assert!(validate_client_id(&id).is_ok());
+    }
+
+    #[test]
+    fn long_hostnames_are_stably_bounded_without_colliding_on_the_prefix() {
+        let first_host = format!("{}-a.example.internal", "a".repeat(120));
+        let second_host = format!("{}-b.example.internal", "a".repeat(120));
+        let first = client_id_from_hostname(&first_host, 42);
+        let second = client_id_from_hostname(&second_host, 42);
+
+        assert!(first.len() <= MAX_CLIENT_ID_LEN);
+        assert!(validate_client_id(&first).is_ok());
+        assert_eq!(first, client_id_from_hostname(&first_host, 42));
+        assert_ne!(first, second);
     }
 }

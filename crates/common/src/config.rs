@@ -42,8 +42,11 @@ pub fn validate_client_id(id: &str) -> Result<(), ProtocolError> {
 /// ```toml
 /// [server]
 /// bind         = "0.0.0.0"
+/// control_bind = "127.0.0.1"
 /// stream_port  = 1710
 /// control_port = 1711
+/// max_clients = 64
+/// max_known_clients = 256
 /// mdns         = true
 /// snapcast_compat = false
 ///
@@ -96,6 +99,9 @@ pub struct ServerNet {
     pub control_port: u16,
     /// Maximum concurrent TCP client sessions, including clients awaiting Hello.
     pub max_clients: usize,
+    /// Maximum remembered clients. When full, the least-recently-seen
+    /// disconnected client is evicted; connected clients are never evicted.
+    pub max_known_clients: usize,
     /// Advertise via mDNS so clients can discover the server automatically.
     pub mdns: bool,
     /// Advertise `_snapcast._tcp` for legacy Snapcast client discovery.
@@ -215,6 +221,7 @@ impl Default for ServerNet {
             stream_port: 1710,
             control_port: 1711,
             max_clients: 64,
+            max_known_clients: 256,
             mdns: true,
             snapcast_compat: false,
             audio: AudioConfig::default(),
@@ -318,6 +325,9 @@ impl ServerConfig {
         }
         if !(1..=256).contains(&self.server.max_clients) {
             anyhow::bail!("server.max_clients must be between 1 and 256");
+        }
+        if !(self.server.max_clients..=1024).contains(&self.server.max_known_clients) {
+            anyhow::bail!("server.max_known_clients must be between server.max_clients and 1024");
         }
 
         validate_buffer_and_chunk(
@@ -681,6 +691,7 @@ source = "-"
 
         assert!(control_bind.is_loopback());
         assert!((1..=256).contains(&cfg.server.max_clients));
+        assert!((cfg.server.max_clients..=1024).contains(&cfg.server.max_known_clients));
     }
 
     #[test]

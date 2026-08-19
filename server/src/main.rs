@@ -180,12 +180,14 @@ async fn main() -> anyhow::Result<()> {
     let (saved_groups, saved_clients, saved_streams) = persistence.load();
 
     let events = Arc::new(EventBus::new());
-    let state = Arc::new(ServerState::new(
+    let state = Arc::new(ServerState::new_with_known_client_limit(
         events,
         Some(persistence),
         saved_clients,
         saved_streams,
+        cfg.server.max_known_clients,
     ));
+    state.set_client_removal_hook(Arc::new(metrics::forget_client));
     let registry = new_registry();
 
     // Auto-assign a UDP port when the transport mode requires it but udp_port was left at 0.
