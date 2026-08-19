@@ -5,11 +5,13 @@
 //! operator; it never writes credentials to logs.
 
 use std::collections::{HashMap, HashSet};
-use std::fs::{File, OpenOptions};
+use std::fs::OpenOptions;
 use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
+#[cfg(unix)]
+use std::fs::File;
 #[cfg(unix)]
 use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
 
@@ -122,6 +124,8 @@ pub struct UserStore {
     persistence: Mutex<()>,
     #[cfg(test)]
     persist_fault: Mutex<Option<PersistFault>>,
+    #[cfg(test)]
+    mutation_pause: Mutex<Option<MutationPause>>,
 }
 
 #[cfg(test)]
@@ -129,6 +133,13 @@ pub struct UserStore {
 enum PersistFault {
     BeforeWrite,
     BeforeRename,
+    AfterRename,
+}
+
+#[cfg(test)]
+struct MutationPause {
+    entered: Arc<std::sync::Barrier>,
+    release: Arc<std::sync::Barrier>,
 }
 
 impl UserStore {
@@ -149,6 +160,8 @@ impl UserStore {
             persistence: Mutex::new(()),
             #[cfg(test)]
             persist_fault: Mutex::new(None),
+            #[cfg(test)]
+            mutation_pause: Mutex::new(None),
         });
 
         let users_file_exists = match std::fs::metadata(&file_path) {
@@ -210,8 +223,13 @@ impl UserStore {
         };
         let mut users = HashMap::with_capacity(file.users.len());
         for r in file.users {
-            PasswordHash::new(&r.password_hash)
+            let password_hash = PasswordHash::new(&r.password_hash)
                 .map_err(|_| anyhow::anyhow!("users file contains an invalid password hash"))?;
+            if password_hash.algorithm.as_str() != "argon2id" {
+                return Err(anyhow::anyhow!(
+                    "users file contains an unsupported password hash algorithm"
+                ));
+            }
             let user = User {
                 id: r.id,
                 username: r.username,
@@ -237,9 +255,12 @@ impl UserStore {
     }
 
     fn persist_locked(&self) -> anyhow::Result<()> {
-        let records: Vec<UserRecord> = self
-            .users
-            .read()
+        let users = self.users.read();
+        self.persist_users_locked(&users)
+    }
+
+    fn persist_users_locked(&self, users: &HashMap<String, User>) -> anyhow::Result<()> {
+        let records: Vec<UserRecord> = users
             .values()
             .map(|u| UserRecord {
                 id: u.id.clone(),
@@ -279,7 +300,12 @@ impl UserStore {
                 return Err(anyhow::anyhow!("injected persistence rename failure"));
             }
             std::fs::rename(&temp_path, &self.file_path)?;
-            File::open(parent)?.sync_all()?;
+            if let Err(error) = self.sync_parent_after_rename(parent) {
+                warn!(
+                    path = %parent.display(),
+                    "Users file was replaced but directory fsync failed: {error}"
+                );
+            }
             Ok(())
         })();
 
@@ -287,6 +313,18 @@ impl UserStore {
             let _ = std::fs::remove_file(&temp_path);
         }
         result
+    }
+
+    fn sync_parent_after_rename(&self, parent: &Path) -> anyhow::Result<()> {
+        #[cfg(test)]
+        if self.take_persist_fault(PersistFault::AfterRename) {
+            return Err(anyhow::anyhow!("injected post-rename sync failure"));
+        }
+        #[cfg(unix)]
+        File::open(parent)?.sync_all()?;
+        #[cfg(not(unix))]
+        let _ = parent;
+        Ok(())
     }
 
     #[cfg(test)]
@@ -432,11 +470,11 @@ impl UserStore {
             session_version: 0,
         };
         users.insert(user.id.clone(), user.clone());
-        drop(users);
-        if let Err(error) = self.persist_locked() {
-            self.users.write().remove(&user.id);
+        if let Err(error) = self.persist_users_locked(&users) {
+            users.remove(&user.id);
             return Err(error);
         }
+        drop(users);
         info!(username, id = %user.id, "User created");
         Ok(Some(UserView::from(&user)))
     }
@@ -473,11 +511,13 @@ impl UserStore {
                 .ok_or_else(|| anyhow::anyhow!("session version exhausted"))?;
         }
         users.insert(id.to_owned(), updated);
-        drop(users);
-        if let Err(error) = self.persist_locked() {
-            self.users.write().insert(id.to_owned(), original);
+        #[cfg(test)]
+        self.pause_after_mutation();
+        if let Err(error) = self.persist_users_locked(&users) {
+            users.insert(id.to_owned(), original);
             return Err(error);
         }
+        drop(users);
         Ok(true)
     }
 
@@ -497,11 +537,11 @@ impl UserStore {
             return Ok(false);
         }
         let deleted = users.remove(id).expect("checked user exists");
-        drop(users);
-        if let Err(error) = self.persist_locked() {
-            self.users.write().insert(id.to_owned(), deleted);
+        if let Err(error) = self.persist_users_locked(&users) {
+            users.insert(id.to_owned(), deleted);
             return Err(error);
         }
+        drop(users);
         Ok(true)
     }
 }
@@ -895,6 +935,25 @@ mod tests {
     }
 
     #[test]
+    fn rejects_non_argon2id_password_hashes_without_rewrite() {
+        let dir = tempdir().unwrap();
+        let store =
+            UserStore::load_or_init(dir.path(), Some("admin-password".to_string())).unwrap();
+        drop(store);
+        let users_file = dir.path().join("users.json");
+        let mut file: serde_json::Value =
+            serde_json::from_slice(&std::fs::read(&users_file).unwrap()).unwrap();
+        let hash = file["users"][0]["password_hash"].as_str().unwrap();
+        file["users"][0]["password_hash"] =
+            serde_json::json!(hash.replacen("$argon2id$", "$argon2i$", 1,));
+        let invalid_bytes = serde_json::to_vec(&file).unwrap();
+        std::fs::write(&users_file, &invalid_bytes).unwrap();
+
+        assert!(UserStore::load_or_init(dir.path(), None).is_err());
+        assert_eq!(std::fs::read(&users_file).unwrap(), invalid_bytes);
+    }
+
+    #[test]
     fn session_version_exhaustion_rejects_the_update_without_invalidating_tokens() {
         let dir = tempdir().unwrap();
         let store =
@@ -968,11 +1027,97 @@ mod tests {
             Role::Operator
         );
     }
+
+    #[test]
+    fn failed_mutation_is_never_visible_to_token_readers() {
+        use std::sync::mpsc;
+        use std::time::Duration;
+
+        let dir = tempdir().unwrap();
+        let store =
+            UserStore::load_or_init(dir.path(), Some("admin-password".to_string())).unwrap();
+        let user = store
+            .create_user("alice", "alice-password", Role::Viewer)
+            .unwrap()
+            .unwrap();
+        let token = store.create_token(&store.authenticate("alice", "alice-password").unwrap(), 1);
+        let entered = Arc::new(std::sync::Barrier::new(2));
+        let release = Arc::new(std::sync::Barrier::new(2));
+        store.pause_after_next_mutation(entered.clone(), release.clone());
+        store.fail_next_persist(PersistFault::BeforeRename);
+        let (update_tx, update_rx) = mpsc::channel();
+        let updating_store = store.clone();
+        let id = user.id.clone();
+        let update = std::thread::spawn(move || {
+            update_tx
+                .send(updating_store.update_user(&id, Some(Role::Operator), None))
+                .unwrap();
+        });
+
+        entered.wait();
+        let (verify_tx, verify_rx) = mpsc::channel();
+        let verifying_store = store.clone();
+        let verify = std::thread::spawn(move || {
+            verify_tx
+                .send(verifying_store.verify_token(&token))
+                .unwrap();
+        });
+
+        let observed_while_paused = verify_rx.recv_timeout(Duration::from_millis(50));
+        release.wait();
+        assert!(observed_while_paused.is_err());
+        assert!(update_rx
+            .recv_timeout(Duration::from_secs(1))
+            .unwrap()
+            .is_err());
+        assert!(verify_rx
+            .recv_timeout(Duration::from_secs(1))
+            .unwrap()
+            .is_some());
+        update.join().unwrap();
+        verify.join().unwrap();
+    }
+
+    #[test]
+    fn post_rename_sync_failure_keeps_the_committed_state() {
+        let dir = tempdir().unwrap();
+        let store =
+            UserStore::load_or_init(dir.path(), Some("admin-password".to_string())).unwrap();
+        let user = store
+            .create_user("alice", "alice-password", Role::Viewer)
+            .unwrap()
+            .unwrap();
+        store.fail_next_persist(PersistFault::AfterRename);
+
+        assert!(store
+            .update_user(&user.id, Some(Role::Operator), None)
+            .is_ok());
+        assert_eq!(store.get_user(&user.id).unwrap().role, Role::Operator);
+        drop(store);
+
+        let reloaded = UserStore::load_or_init(dir.path(), None).unwrap();
+        assert_eq!(reloaded.get_user(&user.id).unwrap().role, Role::Operator);
+    }
 }
 
 #[cfg(test)]
 impl UserStore {
     fn fail_next_persist(&self, fault: PersistFault) {
         *self.persist_fault.lock() = Some(fault);
+    }
+
+    fn pause_after_next_mutation(
+        &self,
+        entered: Arc<std::sync::Barrier>,
+        release: Arc<std::sync::Barrier>,
+    ) {
+        *self.mutation_pause.lock() = Some(MutationPause { entered, release });
+    }
+
+    fn pause_after_mutation(&self) {
+        if let Some(pause) = self.mutation_pause.lock().take() {
+            pause.entered.wait();
+            pause.release.wait();
+        }
     }
 }
