@@ -11,7 +11,14 @@ from homeassistant.helpers.update_coordinator import DataUpdateCoordinator, Upda
 
 from .api import CannotConnect, InvalidAuth, SoniumApiClient
 from .const import CONF_HOST, CONF_PASSWORD, CONF_PORT, CONF_USERNAME
-from .models import HealthReport, SoniumClient, SoniumData, SoniumGroup, SoniumStream
+from .models import (
+    HealthReport,
+    SoniumClient,
+    SoniumData,
+    SoniumGroup,
+    SoniumStream,
+    StreamRecovery,
+)
 
 _LOGGER = logging.getLogger(__name__)
 SCAN_INTERVAL = timedelta(seconds=60)
@@ -174,6 +181,11 @@ class SoniumCoordinator(DataUpdateCoordinator[SoniumData]):
             s = data.streams.get(event["stream_id"])
             if s:
                 s.status = event["status"]
+                s.recovery = (
+                    StreamRecovery.from_dict(event["recovery"])
+                    if event.get("recovery")
+                    else None
+                )
 
         elif ev_type == "client_health":
             c = data.clients.get(event["client_id"])

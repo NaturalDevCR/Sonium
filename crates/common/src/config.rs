@@ -467,7 +467,23 @@ fn validate_stream_format(stream: &StreamSource, chunk_ms: u32) -> anyhow::Resul
                 );
             }
         }
-        "pcm" => {}
+        "pcm" => {
+            const PCM_MIN_SAMPLE_RATE: u32 = 8_000;
+            const PCM_MAX_SAMPLE_RATE: u32 = 192_000;
+            const PCM_MAX_CHANNELS: u16 = 8;
+            if !(PCM_MIN_SAMPLE_RATE..=PCM_MAX_SAMPLE_RATE).contains(&format.rate) {
+                anyhow::bail!(
+                    "stream `{}` pcm sample_format.rate must be between {PCM_MIN_SAMPLE_RATE} and {PCM_MAX_SAMPLE_RATE}",
+                    stream.id
+                );
+            }
+            if !(1..=PCM_MAX_CHANNELS).contains(&format.channels) {
+                anyhow::bail!(
+                    "stream `{}` pcm sample_format.channels must be between 1 and {PCM_MAX_CHANNELS}",
+                    stream.id
+                );
+            }
+        }
         "flac" => validate_flac_format(stream, chunk_ms)?,
         codec => anyhow::bail!("stream `{}` has unsupported codec `{codec}`", stream.id),
     }
@@ -803,6 +819,44 @@ udp_port = 1712
             );
             fs::remove_file(path).expect("remove test configuration");
         }
+    }
+
+    #[test]
+    fn explicit_pcm_format_is_bounded_before_runtime_allocation() {
+        for (name, format) in [
+            ("pcm-rate-too-low", "rate = 7999, bits = 16, channels = 2"),
+            (
+                "pcm-rate-too-high",
+                "rate = 192001, bits = 16, channels = 2",
+            ),
+            (
+                "pcm-too-many-channels",
+                "rate = 48000, bits = 16, channels = 9",
+            ),
+            (
+                "pcm-arithmetic-extreme",
+                "rate = 4294967295, bits = 16, channels = 65535",
+            ),
+        ] {
+            let path = write_config(
+                name,
+                &format!(
+                    "[server.audio]\nchunk_ms = 60\n\n[[streams]]\ncodec = \"pcm\"\nsample_format = {{ {format} }}\n"
+                ),
+            );
+            assert!(
+                ServerConfig::from_file(&path).is_err(),
+                "{name} must be rejected before allocating a PCM frame"
+            );
+            fs::remove_file(path).expect("remove test configuration");
+        }
+
+        let path = write_config(
+            "pcm-format-boundaries",
+            "[server.audio]\nchunk_ms = 60\n\n[[streams]]\ncodec = \"pcm\"\nsample_format = { rate = 192000, bits = 16, channels = 8 }\n",
+        );
+        ServerConfig::from_file(&path).expect("the documented PCM limits must be accepted");
+        fs::remove_file(path).expect("remove test configuration");
     }
 
     #[test]

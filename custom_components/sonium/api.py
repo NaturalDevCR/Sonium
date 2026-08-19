@@ -141,17 +141,22 @@ class SoniumApiClient:
     async def subscribe_events(self) -> AsyncGenerator[dict, None]:
         ws_url = (
             f"{self._ws_scheme}://{self._host}:{self._port}"
-            f"/api/events?token={self._token}"
+            "/api/events"
         )
         async with self._session.ws_connect(
             ws_url,
             heartbeat=30,
             ssl=self._ssl,
         ) as ws:
+            if not self._token:
+                raise InvalidAuth("WebSocket authentication requires a token")
+            await ws.send_json({"type": "authenticate", "token": self._token})
             async for msg in ws:
                 if msg.type == aiohttp.WSMsgType.TEXT:
                     try:
-                        yield json.loads(msg.data)
+                        event = json.loads(msg.data)
+                        if event.get("type") != "authenticated":
+                            yield event
                     except json.JSONDecodeError:
                         _LOGGER.debug("Failed to parse WS message: %s", msg.data)
                 elif msg.type in (aiohttp.WSMsgType.CLOSED, aiohttp.WSMsgType.ERROR):

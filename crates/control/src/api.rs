@@ -36,8 +36,12 @@ pub fn router(state: AppState) -> Router {
         .route("/clients", get(get_clients))
         .route("/groups", get(get_groups))
         .route("/streams", get(get_streams))
-        .route("/events", get(ws_handler)) // WS: also accepts ?token=
         .layer(middleware::from_fn(require_viewer));
+
+    // Browsers cannot attach Authorization headers to WebSocket upgrades.
+    // Upgrade without credentials, then authenticate with the first protocol
+    // message so no long-lived credential appears in the URL.
+    let ws_routes = Router::new().route("/events", get(ws_handler));
 
     // Operator or admin only
     let write_routes = Router::new()
@@ -60,6 +64,7 @@ pub fn router(state: AppState) -> Router {
 
     Router::new()
         .merge(read_routes)
+        .merge(ws_routes)
         .merge(write_routes)
         .with_state(state)
 }
@@ -67,19 +72,11 @@ pub fn router(state: AppState) -> Router {
 // ── Auth middleware ───────────────────────────────────────────────────────
 
 fn extract_token(req: &Request) -> Option<String> {
-    // 1. Authorization: Bearer <token>
     req.headers()
         .get(header::AUTHORIZATION)
         .and_then(|v| v.to_str().ok())
         .and_then(|s| s.strip_prefix("Bearer "))
         .map(String::from)
-        // 2. ?token= query param (required for WebSocket — browsers can't set WS headers)
-        .or_else(|| {
-            req.uri().query()?.split('&').find_map(|pair| {
-                let (k, v) = pair.split_once('=')?;
-                (k == "token").then(|| v.to_owned())
-            })
-        })
 }
 
 async fn require_viewer(
@@ -403,19 +400,70 @@ async fn get_streams(State(s): State<AppState>) -> impl IntoResponse {
 
 // ── WebSocket events ──────────────────────────────────────────────────────
 
-async fn ws_handler(ws: WebSocketUpgrade, State(s): State<AppState>) -> Response {
-    ws.on_upgrade(move |socket| handle_ws(socket, s))
+async fn ws_handler(
+    ws: WebSocketUpgrade,
+    State(s): State<AppState>,
+    Extension(auth): Extension<Arc<UserStore>>,
+) -> Response {
+    ws.on_upgrade(move |socket| handle_ws(socket, s, auth))
 }
 
-async fn handle_ws(mut socket: axum::extract::ws::WebSocket, state: AppState) {
+#[derive(Deserialize)]
+struct WsAuthMessage {
+    #[serde(rename = "type")]
+    kind: String,
+    token: String,
+}
+
+async fn handle_ws(
+    mut socket: axum::extract::ws::WebSocket,
+    state: AppState,
+    auth: Arc<UserStore>,
+) {
     use axum::extract::ws::Message as WsMsg;
+    use tokio::time::{timeout, Duration};
+
+    let Ok(Some(Ok(WsMsg::Text(message)))) = timeout(Duration::from_secs(5), socket.recv()).await
+    else {
+        let _ = socket.close().await;
+        return;
+    };
+    let Ok(message) = serde_json::from_str::<WsAuthMessage>(&message) else {
+        let _ = socket.close().await;
+        return;
+    };
+    if message.kind != "authenticate" || auth.verify_token(&message.token).is_none() {
+        let _ = socket.close().await;
+        return;
+    }
+    if socket
+        .send(WsMsg::Text(r#"{"type":"authenticated"}"#.into()))
+        .await
+        .is_err()
+    {
+        return;
+    }
+
+    let token = message.token;
     let mut rx = state.events().subscribe();
+    let mut session_check = tokio::time::interval(Duration::from_secs(1));
+    session_check.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
 
     loop {
         tokio::select! {
+            _ = session_check.tick() => {
+                if auth.verify_token(&token).is_none() {
+                    let _ = socket.close().await;
+                    break;
+                }
+            }
             event = rx.recv() => {
                 match event {
                     Ok(ev) => {
+                        if auth.verify_token(&token).is_none() {
+                            let _ = socket.close().await;
+                            break;
+                        }
                         if let Ok(json) = serde_json::to_string(&ev) {
                             if socket.send(WsMsg::Text(json)).await.is_err() {
                                 break;

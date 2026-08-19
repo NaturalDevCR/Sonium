@@ -4883,6 +4883,7 @@ dependencies = [
  "tower 0.4.13",
  "tracing",
  "uuid",
+ "windows-sys 0.59.0",
 ]
 
 [[package]]

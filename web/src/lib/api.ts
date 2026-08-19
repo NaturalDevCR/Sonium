@@ -419,12 +419,20 @@ export function subscribeEvents(
   onClose?: () => void,
 ): () => void {
   const protocol = location.protocol === 'https:' ? 'wss' : 'ws';
-  const tokenParam = _token ? `?token=${encodeURIComponent(_token)}` : '';
-  const ws = new WebSocket(`${protocol}://${location.host}/api/events${tokenParam}`);
+  const ws = new WebSocket(`${protocol}://${location.host}/api/events`);
+
+  ws.onopen = () => {
+    if (!_token) {
+      ws.close();
+      return;
+    }
+    ws.send(JSON.stringify({ type: 'authenticate', token: _token }));
+  };
 
   ws.onmessage = (msg) => {
     try {
-      onEvent(JSON.parse(msg.data) as Event);
+      const event = JSON.parse(msg.data) as Event | { type: 'authenticated' };
+      if (event.type !== 'authenticated') onEvent(event as Event);
     } catch {
       console.warn('Failed to parse event:', msg.data);
     }

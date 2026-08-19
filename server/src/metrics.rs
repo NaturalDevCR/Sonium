@@ -8,6 +8,7 @@ use prometheus::{
     register_int_counter, register_int_counter_vec, register_int_gauge, register_int_gauge_vec,
     IntCounter, IntCounterVec, IntGauge, IntGaugeVec, Opts,
 };
+use sonium_control::state::{StreamRecovery, StreamStatus};
 use sonium_protocol::messages::{AudioHealthState, HealthReport};
 use std::{collections::HashMap, sync::Mutex};
 
@@ -36,10 +37,30 @@ lazy_static! {
             "Number of active WebSocket event-stream connections"
         )).unwrap();
 
-    /// Stream status: 1=playing, 0=idle, -1=error, per stream_id label.
+    /// Stream status: 2=recovering, 1=playing, 0=idle, -1=error.
     pub static ref STREAM_STATUS: IntGaugeVec =
         register_int_gauge_vec!(
-            Opts::new("sonium_stream_status", "Stream status (1=playing, 0=idle, -1=error)"),
+            Opts::new("sonium_stream_status", "Stream status (2=recovering, 1=playing, 0=idle, -1=error)"),
+            &["stream_id"]
+        ).unwrap();
+
+    /// Current consecutive reopen attempt, or zero outside recovery.
+    pub static ref STREAM_RECOVERY_ATTEMPT: IntGaugeVec =
+        register_int_gauge_vec!(
+            Opts::new(
+                "sonium_stream_recovery_attempt",
+                "Current consecutive source reopen attempt (zero outside recovery)"
+            ),
+            &["stream_id"]
+        ).unwrap();
+
+    /// Delay before the next source reopen attempt, or zero outside recovery.
+    pub static ref STREAM_RECOVERY_RETRY_MS: IntGaugeVec =
+        register_int_gauge_vec!(
+            Opts::new(
+                "sonium_stream_recovery_retry_ms",
+                "Milliseconds before the next source reopen attempt (zero outside recovery)"
+            ),
             &["stream_id"]
         ).unwrap();
 
@@ -366,6 +387,38 @@ lazy_static! {
         ).unwrap();
 }
 
+/// Keep Prometheus synchronized with the canonical stream status stored by
+/// `ServerState` and emitted through REST/WebSocket.
+pub fn update_stream_status(
+    stream_id: &str,
+    status: StreamStatus,
+    recovery: Option<StreamRecovery>,
+) {
+    let status_value = match status {
+        StreamStatus::Playing => 1,
+        StreamStatus::Idle => 0,
+        StreamStatus::Recovering => 2,
+        StreamStatus::Error => -1,
+    };
+    STREAM_STATUS
+        .with_label_values(&[stream_id])
+        .set(status_value);
+    let (attempt, retry_in_ms) = recovery
+        .map(|recovery| {
+            (
+                i64::from(recovery.attempt),
+                i64::try_from(recovery.retry_in_ms).unwrap_or(i64::MAX),
+            )
+        })
+        .unwrap_or((0, 0));
+    STREAM_RECOVERY_ATTEMPT
+        .with_label_values(&[stream_id])
+        .set(attempt);
+    STREAM_RECOVERY_RETRY_MS
+        .with_label_values(&[stream_id])
+        .set(retry_in_ms);
+}
+
 /// Register a newly admitted session before it can create client metric labels.
 pub fn register_client_session(client_id: &str, generation: u64) {
     CLIENT_SESSION_GENERATIONS
@@ -566,6 +619,26 @@ pub fn gather() -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use sonium_control::state::{StreamRecovery, StreamStatus};
+
+    #[test]
+    fn recovering_metric_has_distinct_state_and_retry_context() {
+        update_stream_status(
+            "metric-recovery-test",
+            StreamStatus::Recovering,
+            Some(StreamRecovery {
+                attempt: 4,
+                retry_in_ms: 400,
+            }),
+        );
+
+        let metrics = gather();
+        assert!(metrics.contains("sonium_stream_status{stream_id=\"metric-recovery-test\"} 2"));
+        assert!(metrics
+            .contains("sonium_stream_recovery_attempt{stream_id=\"metric-recovery-test\"} 4"));
+        assert!(metrics
+            .contains("sonium_stream_recovery_retry_ms{stream_id=\"metric-recovery-test\"} 400"));
+    }
 
     #[test]
     fn forget_client_removes_client_labelled_series() {

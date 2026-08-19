@@ -68,6 +68,10 @@ struct Cli {
     /// line would expose it to process inspection and shell history.
     #[arg(long)]
     init_admin: bool,
+
+    /// Parse and semantically validate the explicit configuration, then exit.
+    #[arg(long, conflicts_with = "init_admin")]
+    check_config: bool,
 }
 
 fn read_initial_admin_password(mut reader: impl Read) -> anyhow::Result<String> {
@@ -86,8 +90,12 @@ fn read_initial_admin_password(mut reader: impl Read) -> anyhow::Result<String> 
 async fn main() -> anyhow::Result<()> {
     let cli = Cli::parse();
 
-    let mut cfg = ServerConfig::from_file_or_default(&cli.config)
-        .with_context(|| format!("cannot load configuration {}", cli.config.display()))?;
+    let mut cfg = if cli.check_config {
+        ServerConfig::from_file(&cli.config)
+    } else {
+        ServerConfig::from_file_or_default(&cli.config)
+    }
+    .with_context(|| format!("cannot load configuration {}", cli.config.display()))?;
 
     if let Some(p) = cli.stream_port {
         cfg.server.stream_port = p;
@@ -106,6 +114,10 @@ async fn main() -> anyhow::Result<()> {
     }
     cfg.validate()
         .with_context(|| format!("invalid configuration {}", cli.config.display()))?;
+    if cli.check_config {
+        println!("configuration is valid: {}", cli.config.display());
+        return Ok(());
+    }
     let audio_bind = cfg
         .server
         .bind
@@ -204,6 +216,7 @@ async fn main() -> anyhow::Result<()> {
         cfg.server.max_known_clients,
     ));
     state.set_client_removal_hook(Arc::new(metrics::forget_client));
+    state.set_stream_status_hook(Arc::new(metrics::update_stream_status));
     let registry = new_registry();
 
     // Auto-assign a UDP port when the transport mode requires it but udp_port was left at 0.
@@ -464,29 +477,22 @@ fn spawn_stream(
     let reg2 = registry.clone();
 
     let handle = tokio::spawn(async move {
-        metrics::STREAM_STATUS
-            .with_label_values(&[&stream_cfg.id])
-            .set(1);
-        state2.set_stream_status(&stream_cfg.id, sonium_control::state::StreamStatus::Playing);
+        state2.set_stream_status(&stream_cfg.id, sonium_control::state::StreamStatus::Idle);
         tokio::select! {
             result = streamreader::run(bc, stream_cfg.clone(), state2, reg2, task_cancel.clone()) => {
                 if let Err(e) = result {
                     warn!("[{}] Stream reader exited: {e}", stream_cfg.id);
-                    metrics::STREAM_STATUS.with_label_values(&[&stream_cfg.id]).set(-1);
                     state3.set_stream_status(&stream_cfg.id, sonium_control::state::StreamStatus::Error);
                 } else {
-                    metrics::STREAM_STATUS.with_label_values(&[&stream_cfg.id]).set(0);
                     state3.set_stream_status(&stream_cfg.id, sonium_control::state::StreamStatus::Idle);
                 }
             }
             _ = task_cancel.cancelled() => {
                 info!("[{}] Stream reader reloading", stream_cfg.id);
-                metrics::STREAM_STATUS.with_label_values(&[&stream_cfg.id]).set(0);
                 state3.set_stream_status(&stream_cfg.id, sonium_control::state::StreamStatus::Idle);
             }
             _ = shutdown.cancelled() => {
                 info!("[{}] Stream reader shutting down", stream_cfg.id);
-                metrics::STREAM_STATUS.with_label_values(&[&stream_cfg.id]).set(0);
                 state3.set_stream_status(&stream_cfg.id, sonium_control::state::StreamStatus::Idle);
             }
         }
@@ -518,9 +524,12 @@ async fn shutdown_signal() {
 
 #[cfg(test)]
 mod cli_tests {
-    use super::{read_initial_admin_password, Cli};
+    use super::{
+        new_registry, read_initial_admin_password, spawn_stream, Cli, StreamRuntimeConfig,
+    };
     use clap::Parser;
     use std::io::Cursor;
+    use std::sync::Arc;
 
     #[test]
     fn init_admin_is_a_valueless_stdin_flag() {
@@ -538,5 +547,83 @@ mod cli_tests {
             .expect("a non-empty stdin password must be accepted");
 
         assert_eq!(password, "stdin-secret");
+    }
+
+    #[test]
+    fn check_config_is_a_valueless_validation_flag() {
+        let cli = Cli::try_parse_from([
+            "sonium-server",
+            "--config",
+            "existing.toml",
+            "--check-config",
+        ])
+        .expect("the config validation flag must parse without a value");
+
+        assert!(cli.check_config);
+        assert!(!cli.init_admin);
+    }
+
+    #[tokio::test]
+    async fn empty_source_never_announces_playing_before_first_frame_or_recovery() {
+        use sonium_common::config::StreamSource;
+        use sonium_control::state::StreamStatus;
+        use sonium_control::{EventBus, ServerState};
+        use tokio_util::sync::CancellationToken;
+
+        let state = Arc::new(ServerState::new(
+            Arc::new(EventBus::new()),
+            None,
+            vec![],
+            vec![],
+        ));
+        let mut events = state.events().subscribe();
+        let source_path =
+            std::env::temp_dir().join(format!("sonium-empty-{}", uuid::Uuid::new_v4()));
+        std::fs::write(&source_path, []).unwrap();
+        let stream = StreamSource {
+            id: "missing-source-status-test".into(),
+            source: source_path.display().to_string(),
+            codec: "pcm".into(),
+            sample_format: sonium_common::SampleFormat::new(8_000, 16, 1),
+            chunk_ms: Some(10),
+            ..StreamSource::default()
+        };
+        let shutdown = CancellationToken::new();
+        let (cancel, handle) = spawn_stream(
+            stream,
+            StreamRuntimeConfig {
+                effective_buffer_ms: 200,
+                buffer_ms_overridden: false,
+                effective_chunk_ms: 10,
+                chunk_ms_overridden: true,
+            },
+            new_registry(),
+            state,
+            shutdown,
+        );
+
+        let mut announced_playing = false;
+        loop {
+            let event = tokio::time::timeout(std::time::Duration::from_secs(2), events.recv())
+                .await
+                .expect("missing source did not enter recovery")
+                .unwrap();
+            if let sonium_control::ws::Event::StreamStatus { status, .. } = event {
+                if status == StreamStatus::Playing {
+                    announced_playing = true;
+                }
+                if status == StreamStatus::Recovering {
+                    break;
+                }
+            }
+        }
+        cancel.cancel();
+        handle.await.unwrap();
+        std::fs::remove_file(source_path).unwrap();
+
+        assert!(
+            !announced_playing,
+            "a stream must not expose playing until the reader produces a frame"
+        );
     }
 }

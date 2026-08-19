@@ -114,6 +114,41 @@ struct UserRecord {
     session_version: u64,
 }
 
+#[cfg(not(windows))]
+fn replace_file(source: &Path, destination: &Path) -> std::io::Result<()> {
+    std::fs::rename(source, destination)
+}
+
+#[cfg(windows)]
+fn replace_file(source: &Path, destination: &Path) -> std::io::Result<()> {
+    use std::os::windows::ffi::OsStrExt;
+    use windows_sys::Win32::Storage::FileSystem::{
+        MoveFileExW, MOVEFILE_REPLACE_EXISTING, MOVEFILE_WRITE_THROUGH,
+    };
+
+    let source: Vec<u16> = source.as_os_str().encode_wide().chain(Some(0)).collect();
+    let destination: Vec<u16> = destination
+        .as_os_str()
+        .encode_wide()
+        .chain(Some(0))
+        .collect();
+    // MoveFileExW supplies the replace-existing behavior that std::fs::rename
+    // intentionally lacks on Windows. WRITE_THROUGH asks the OS not to report
+    // success until the move has reached durable storage.
+    let replaced = unsafe {
+        MoveFileExW(
+            source.as_ptr(),
+            destination.as_ptr(),
+            MOVEFILE_REPLACE_EXISTING | MOVEFILE_WRITE_THROUGH,
+        )
+    };
+    if replaced == 0 {
+        Err(std::io::Error::last_os_error())
+    } else {
+        Ok(())
+    }
+}
+
 // ── UserStore ─────────────────────────────────────────────────────────────
 
 pub struct UserStore {
@@ -222,7 +257,12 @@ impl UserStore {
             secret => secret,
         };
         let mut users = HashMap::with_capacity(file.users.len());
+        let mut usernames = HashSet::with_capacity(file.users.len());
+        let mut has_admin = false;
         for r in file.users {
+            if !usernames.insert(r.username.clone()) {
+                return Err(anyhow::anyhow!("users file contains duplicate usernames"));
+            }
             let password_hash = PasswordHash::new(&r.password_hash)
                 .map_err(|_| anyhow::anyhow!("users file contains an invalid password hash"))?;
             if password_hash.algorithm.as_str() != "argon2id" {
@@ -238,9 +278,16 @@ impl UserStore {
                 must_change_password: r.must_change_password,
                 session_version: r.session_version,
             };
+            has_admin |= user.role == Role::Admin;
             if users.insert(user.id.clone(), user).is_some() {
                 return Err(anyhow::anyhow!("users file contains duplicate user IDs"));
             }
+        }
+        if users.is_empty() {
+            return Err(anyhow::anyhow!("users file contains no accounts"));
+        }
+        if !has_admin {
+            return Err(anyhow::anyhow!("users file contains no admin account"));
         }
         if let Some(secret) = jwt_secret {
             *self.jwt_secret.write() = secret;
@@ -299,7 +346,7 @@ impl UserStore {
             if self.take_persist_fault(PersistFault::BeforeRename) {
                 return Err(anyhow::anyhow!("injected persistence rename failure"));
             }
-            std::fs::rename(&temp_path, &self.file_path)?;
+            replace_file(&temp_path, &self.file_path)?;
             if let Err(error) = self.sync_parent_after_rename(parent) {
                 warn!(
                     path = %parent.display(),
@@ -897,6 +944,20 @@ mod tests {
     }
 
     #[test]
+    fn atomic_replace_overwrites_an_existing_destination() {
+        let dir = tempdir().unwrap();
+        let destination = dir.path().join("users.json");
+        let replacement = dir.path().join("users.next.json");
+        std::fs::write(&destination, b"old").unwrap();
+        std::fs::write(&replacement, b"new").unwrap();
+
+        replace_file(&replacement, &destination).unwrap();
+
+        assert_eq!(std::fs::read(&destination).unwrap(), b"new");
+        assert!(!replacement.exists());
+    }
+
+    #[test]
     fn rejects_duplicate_ids_invalid_hashes_and_empty_jwt_secrets_without_rewrite() {
         enum InvalidCase {
             DuplicateId,
@@ -930,6 +991,61 @@ mod tests {
             std::fs::write(&users_file, &invalid_bytes).unwrap();
 
             assert!(UserStore::load_or_init(dir.path(), None).is_err());
+            assert_eq!(std::fs::read(&users_file).unwrap(), invalid_bytes);
+        }
+    }
+
+    #[test]
+    fn rejects_empty_no_admin_and_duplicate_username_files_without_rewrite() {
+        enum InvalidCase {
+            Empty,
+            NoAdmin,
+            DuplicateUsername,
+        }
+
+        for case in [
+            InvalidCase::Empty,
+            InvalidCase::NoAdmin,
+            InvalidCase::DuplicateUsername,
+        ] {
+            let dir = tempdir().unwrap();
+            let store =
+                UserStore::load_or_init(dir.path(), Some("admin-password".to_string())).unwrap();
+            let viewer = store
+                .create_user("alice", "alice-password", Role::Viewer)
+                .unwrap()
+                .unwrap();
+            drop(store);
+            let users_file = dir.path().join("users.json");
+            let mut file: serde_json::Value =
+                serde_json::from_slice(&std::fs::read(&users_file).unwrap()).unwrap();
+            match case {
+                InvalidCase::Empty => file["users"] = serde_json::json!([]),
+                InvalidCase::NoAdmin => {
+                    file["users"].as_array_mut().unwrap().retain(|user| {
+                        user["role"] != serde_json::Value::String("admin".to_owned())
+                    });
+                }
+                InvalidCase::DuplicateUsername => {
+                    let duplicate = file["users"]
+                        .as_array()
+                        .unwrap()
+                        .iter()
+                        .find(|user| user["id"] == viewer.id)
+                        .unwrap()
+                        .clone();
+                    let mut duplicate = duplicate;
+                    duplicate["id"] = serde_json::json!(Uuid::new_v4().to_string());
+                    file["users"].as_array_mut().unwrap().push(duplicate);
+                }
+            }
+            let invalid_bytes = serde_json::to_vec(&file).unwrap();
+            std::fs::write(&users_file, &invalid_bytes).unwrap();
+
+            assert!(
+                UserStore::load_or_init(dir.path(), None).is_err(),
+                "semantically invalid users file must prevent startup"
+            );
             assert_eq!(std::fs::read(&users_file).unwrap(), invalid_bytes);
         }
     }

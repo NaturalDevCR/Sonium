@@ -171,6 +171,9 @@ struct TransportState {
     server_udp_port: u16,
 }
 
+type StreamStatusHook = dyn Fn(&str, StreamStatus, Option<StreamRecovery>) + Send + Sync + 'static;
+type ClientRemovalHook = dyn Fn(&str, u64) + Send + Sync + 'static;
+
 // ── ServerState ──────────────────────────────────────────────────────────
 
 /// Thread-safe in-memory state shared between the audio server and the
@@ -178,15 +181,14 @@ struct TransportState {
 pub struct ServerState {
     clients: RwLock<HashMap<String, ClientInfo>>,
     max_known_clients: usize,
-    client_removal_hook: RwLock<Option<Arc<dyn Fn(&str, u64) + Send + Sync>>>,
+    client_removal_hook: RwLock<Option<Arc<ClientRemovalHook>>>,
     next_client_generation: AtomicU64,
+    stream_status_hook: RwLock<Option<Arc<StreamStatusHook>>>,
     groups: RwLock<HashMap<String, Group>>,
     streams: RwLock<HashMap<String, StreamInfo>>,
     events: Arc<EventBus>,
     start_time: DateTime<Utc>,
     persistence: Option<Arc<PersistenceStore>>,
-    /// Snapshot loaded at startup; used to restore per-client settings on reconnect.
-    saved_clients: Vec<PersistedClient>,
     /// Snapshot of stream settings loaded at startup.
     saved_streams: Vec<PersistedStream>,
     /// Active media transport configuration (runtime-mutable via control API).
@@ -309,12 +311,12 @@ impl ServerState {
             max_known_clients,
             client_removal_hook: RwLock::new(None),
             next_client_generation: AtomicU64::new(1),
+            stream_status_hook: RwLock::new(None),
             groups: RwLock::new(groups),
             streams: RwLock::new(streams),
             events,
             start_time: Utc::now(),
             persistence,
-            saved_clients,
             saved_streams,
             transport: parking_lot::Mutex::new(TransportState {
                 mode: TransportMode::Tcp,
@@ -325,13 +327,30 @@ impl ServerState {
     }
 
     /// Register cleanup for client-labelled resources owned by the server binary.
-    pub fn set_client_removal_hook(&self, hook: Arc<dyn Fn(&str, u64) + Send + Sync>) {
+    pub fn set_client_removal_hook(&self, hook: Arc<ClientRemovalHook>) {
         *self.client_removal_hook.write() = Some(hook);
     }
 
     fn notify_client_removed(&self, id: &str, generation: u64) {
         if let Some(hook) = self.client_removal_hook.read().clone() {
             hook(id, generation);
+        }
+    }
+
+    /// Register synchronization for stream-labelled resources owned by the
+    /// server binary, such as Prometheus gauges.
+    pub fn set_stream_status_hook(&self, hook: Arc<StreamStatusHook>) {
+        *self.stream_status_hook.write() = Some(hook);
+    }
+
+    fn notify_stream_status(
+        &self,
+        id: &str,
+        status: StreamStatus,
+        recovery: Option<StreamRecovery>,
+    ) {
+        if let Some(hook) = self.stream_status_hook.read().clone() {
+            hook(id, status, recovery);
         }
     }
 
@@ -471,8 +490,9 @@ impl ServerState {
                 None
             };
 
-            // Restore settings from live state first, then the startup snapshot.
-            let saved = self.saved_clients.iter().find(|client| client.id == id);
+            // The live registry already contains every retained startup entry.
+            // Once an entry is evicted or explicitly deleted, its old snapshot
+            // must not remain as a second restoration source.
             let (volume, muted, latency_ms, group_id, display_name, observability_enabled) =
                 if let Some(client) = existing {
                     (
@@ -481,15 +501,6 @@ impl ServerState {
                         client.latency_ms,
                         client.group_id,
                         client.display_name,
-                        client.observability_enabled,
-                    )
-                } else if let Some(client) = saved {
-                    (
-                        client.volume,
-                        client.muted,
-                        client.latency_ms,
-                        client.group_id.clone(),
-                        client.display_name.clone(),
                         client.observability_enabled,
                     )
                 } else {
@@ -905,8 +916,11 @@ impl ServerState {
             s.status = status.clone();
             self.events.emit(crate::ws::Event::StreamStatus {
                 stream_id: stream_id.into(),
-                status,
+                status: status.clone(),
+                recovery: None,
             });
+            drop(streams);
+            self.notify_stream_status(stream_id, status, None);
         }
     }
 
@@ -915,14 +929,18 @@ impl ServerState {
         let mut streams = self.streams.write();
         if let Some(s) = streams.get_mut(stream_id) {
             s.status = StreamStatus::Recovering;
-            s.recovery = Some(StreamRecovery {
+            let recovery = StreamRecovery {
                 attempt,
                 retry_in_ms,
-            });
+            };
+            s.recovery = Some(recovery.clone());
             self.events.emit(crate::ws::Event::StreamStatus {
                 stream_id: stream_id.into(),
                 status: StreamStatus::Recovering,
+                recovery: Some(recovery.clone()),
             });
+            drop(streams);
+            self.notify_stream_status(stream_id, StreamStatus::Recovering, Some(recovery));
         }
     }
 
@@ -1429,5 +1447,109 @@ mod tests {
         assert!(c.muted);
         assert_eq!(c.latency_ms, 50);
         assert_eq!(c.display_name.as_deref(), Some("Kitchen"));
+    }
+
+    #[test]
+    fn deleted_or_evicted_client_does_not_restore_the_startup_snapshot() {
+        let saved_client = PersistedClient {
+            id: "pi-1".into(),
+            hostname: "pi".into(),
+            display_name: Some("Stale Name".into()),
+            volume: 23,
+            muted: true,
+            latency_ms: 50,
+            observability_enabled: true,
+            group_id: "default".into(),
+            last_seen: Utc::now(),
+        };
+
+        let deleted = ServerState::new(
+            Arc::new(EventBus::new()),
+            None,
+            vec![saved_client.clone()],
+            vec![],
+        );
+        assert!(deleted.delete_client("pi-1"));
+        connect(&deleted, "pi-1");
+        let client = deleted.get_client("pi-1").unwrap();
+        assert_eq!(client.volume, 100);
+        assert!(!client.muted);
+        assert_eq!(client.display_name, None);
+
+        let evicted = ServerState::new_with_known_client_limit(
+            Arc::new(EventBus::new()),
+            None,
+            vec![saved_client],
+            vec![],
+            1,
+        );
+        connect(&evicted, "replacement");
+        evicted.client_disconnected("replacement");
+        connect(&evicted, "pi-1");
+        let client = evicted.get_client("pi-1").unwrap();
+        assert_eq!(client.volume, 100);
+        assert!(!client.muted);
+        assert_eq!(client.display_name, None);
+    }
+
+    #[test]
+    fn recovery_event_matches_rest_state_and_includes_retry_context() {
+        let s = state();
+        let mut events = s.events().subscribe();
+
+        s.set_stream_recovering("default", 3, 200);
+
+        let stream = s
+            .all_streams()
+            .into_iter()
+            .find(|stream| stream.id == "default")
+            .unwrap();
+        assert_eq!(stream.status, StreamStatus::Recovering);
+        assert_eq!(
+            stream.recovery,
+            Some(StreamRecovery {
+                attempt: 3,
+                retry_in_ms: 200,
+            })
+        );
+        match events.try_recv().unwrap() {
+            crate::ws::Event::StreamStatus {
+                stream_id,
+                status,
+                recovery,
+            } => {
+                assert_eq!(stream_id, "default");
+                assert_eq!(status, StreamStatus::Recovering);
+                assert_eq!(recovery, stream.recovery);
+            }
+            event => panic!("unexpected event: {event:?}"),
+        }
+    }
+
+    #[test]
+    fn stream_status_hook_receives_recovery_context_for_metrics() {
+        let s = state();
+        let observed = Arc::new(Mutex::new(Vec::new()));
+        let hook_observed = observed.clone();
+        s.set_stream_status_hook(Arc::new(move |id, status, recovery| {
+            hook_observed
+                .lock()
+                .unwrap()
+                .push((id.to_owned(), status, recovery));
+        }));
+
+        s.set_stream_recovering("default", 2, 100);
+
+        assert_eq!(
+            *observed.lock().unwrap(),
+            vec![(
+                "default".to_owned(),
+                StreamStatus::Recovering,
+                Some(StreamRecovery {
+                    attempt: 2,
+                    retry_in_ms: 100,
+                }),
+            )]
+        );
     }
 }

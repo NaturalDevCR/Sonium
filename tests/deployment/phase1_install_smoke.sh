@@ -12,6 +12,7 @@ multiline_fixture="${root_dir}/tests/fixtures/multiline-legacy-looking-content.t
 escaped_multiline_fixture="${root_dir}/tests/fixtures/multiline-escaped-comments.toml"
 legacy_after_multiline_fixture="${root_dir}/tests/fixtures/legacy-after-multiline.toml"
 invalid_toml_fixture="${root_dir}/tests/fixtures/invalid-preflight.toml"
+semantic_invalid_fixture="${root_dir}/tests/fixtures/semantic-invalid-preflight.toml"
 installation_doc="${root_dir}/docs/src/getting-started/installation.md"
 configuration_doc="${root_dir}/docs/src/getting-started/configuration.md"
 compose_file="${root_dir}/docker-compose.yml"
@@ -19,6 +20,9 @@ docker_bootstrap="${root_dir}/deploy/docker/init-admin.sh"
 
 fail() { printf 'FAIL: %s\n' "$*" >&2; exit 1; }
 contains() { grep -Fq -- "$2" "$1" || fail "missing '$2' in $1"; }
+
+server_bin="${SONIUM_SMOKE_SERVER_BIN:-${root_dir}/target/debug/sonium-server}"
+[[ -x "${server_bin}" ]] || fail "build sonium-server before running deployment smoke"
 
 for legacy_fixture in "${fixture}" "${quoted_fixture}" "${double_header_fixture}" "${single_quoted_fixture}"; do
   if output="$(bash "${installer}" --preflight-config "${legacy_fixture}" 2>&1)"; then
@@ -53,6 +57,18 @@ if output="$(bash "${installer}" --preflight-config "${invalid_toml_fixture}" 2>
 fi
 [[ "${output}" == *"Could not parse existing configuration"* ]] \
   || fail "malformed TOML did not produce an actionable preflight error"
+
+if "${server_bin}" --config "${semantic_invalid_fixture}" --check-config >/dev/null 2>&1; then
+  fail "sonium-server --check-config accepted semantically invalid TOML"
+fi
+if output="$(SONIUM_SERVER_CHECK_BIN="${server_bin}" bash "${installer}" --preflight-config "${semantic_invalid_fixture}" 2>&1)"; then
+  fail "installer preflight accepted TOML rejected by the downloaded server"
+fi
+[[ "${output}" == *"downloaded sonium-server rejected"* ]] \
+  || fail "semantic config failure did not identify the downloaded server check"
+if ! output="$(SONIUM_SERVER_CHECK_BIN="${server_bin}" bash "${installer}" --preflight-config "${audio_table_fixture}" 2>&1)"; then
+  fail "downloaded server rejected valid canonical config: ${output}"
+fi
 
 if output="$(PATH=/nonexistent /bin/bash "${installer}" --preflight-config "${audio_table_fixture}" 2>&1)"; then
   fail "preflight unexpectedly ran without python3/tomllib"
@@ -114,5 +130,24 @@ streams_line="$(grep -n '^\[\[streams\]\]' "${configuration_doc}" | head -n1 | c
   || fail "timezone must be declared before [[streams]]"
 contains "${configuration_doc}" "rtp_udp/rist use 0 = stream_port + 2"
 contains "${configuration_doc}" "ordinary file/FIFO sources after a recoverable"
+
+PYTHONDONTWRITEBYTECODE=1 python3 - "${root_dir}/custom_components/sonium/models.py" <<'PY'
+import importlib.util
+import sys
+
+module_path = sys.argv[1]
+spec = importlib.util.spec_from_file_location("sonium_models_smoke", module_path)
+module = importlib.util.module_from_spec(spec)
+sys.modules[spec.name] = module
+spec.loader.exec_module(module)
+stream = module.SoniumStream.from_dict({
+    "id": "default",
+    "status": "recovering",
+    "recovery": {"attempt": 3, "retry_in_ms": 200},
+})
+assert stream.status == "recovering"
+assert stream.recovery.attempt == 3
+assert stream.recovery.retry_in_ms == 200
+PY
 
 printf 'phase1 deployment smoke: PASS\n'

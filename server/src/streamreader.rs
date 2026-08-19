@@ -60,6 +60,9 @@ pub async fn run(
 
     let fmt = stream.sample_format;
     let codec = stream.codec.as_str();
+    let chunk_ms = stream_chunk_ms(&stream);
+    let frame_bytes = validated_pcm_frame_bytes(fmt, chunk_ms)
+        .map_err(|error| anyhow::anyhow!("[{}] {error}", stream.id))?;
 
     let mut encoder = make_encoder(codec, fmt)
         .map_err(|e| anyhow::anyhow!("[{}] encoder init: {e}", stream.id))?;
@@ -75,12 +78,10 @@ pub async fn run(
         source = %stream.source,
         codec,
         format = %fmt,
-        chunk_ms = stream_chunk_ms(&stream),
+        chunk_ms,
         "Stream reader started"
     );
 
-    let frame_samples = fmt.frames_for_ms(stream_chunk_ms(&stream) as f64) * fmt.channels as usize;
-    let frame_bytes = frame_samples * 2; // i16 = 2 bytes
     let mut pcm_buf = vec![0u8; frame_bytes];
     let mut enc_buf: Vec<u8> = Vec::new();
 
@@ -88,8 +89,6 @@ pub async fn run(
         .idle_timeout_ms
         .map(|ms| Duration::from_millis(ms as u64));
     let silence_on_idle = stream.silence_on_idle;
-
-    let chunk_ms = stream_chunk_ms(&stream);
 
     if stream.source == "-" {
         let _ = run_reader(
@@ -164,6 +163,27 @@ fn stream_chunk_ms(stream: &StreamSource) -> u32 {
         },
         _ => ms,
     }
+}
+
+fn validated_pcm_frame_bytes(
+    format: sonium_common::SampleFormat,
+    chunk_ms: u32,
+) -> anyhow::Result<usize> {
+    // WireChunk reserves 12 bytes for timestamp and data length inside the
+    // protocol's 1 MiB payload ceiling.
+    const MAX_PCM_FRAME_BYTES: usize = 1024 * 1024 - 12;
+    if format.bits != 16 {
+        anyhow::bail!("PCM input must use 16-bit samples");
+    }
+    let bytes = format
+        .frame_bytes_for_ms(chunk_ms)
+        .ok_or_else(|| anyhow::anyhow!("PCM frame size overflows this platform"))?;
+    if bytes == 0 || bytes > MAX_PCM_FRAME_BYTES {
+        anyhow::bail!(
+            "PCM frame size must be between 1 and {MAX_PCM_FRAME_BYTES} bytes, got {bytes}"
+        );
+    }
+    Ok(bytes)
 }
 
 // ── Meta streams ──────────────────────────────────────────────────────────
@@ -261,6 +281,7 @@ async fn run_meta(
             .unwrap_or_else(tokio::time::Instant::now);
         vec![long_ago; source_ids.len()]
     };
+    let mut is_playing = false;
 
     while let Some(tagged) = rx.recv().await {
         let now = tokio::time::Instant::now();
@@ -275,6 +296,10 @@ async fn run_meta(
 
         if active_idx == Some(tagged.idx) {
             bc.publish(tagged.frame.wire_bytes);
+            if !is_playing {
+                is_playing = true;
+                state.set_stream_status(&stream.id, StreamStatus::Playing);
+            }
         }
     }
 
@@ -597,7 +622,6 @@ async fn run_reopening_reader(
 
         match open {
             Ok(opened) => {
-                state.set_stream_status(stream_id, StreamStatus::Playing);
                 let end = tokio::select! {
                     end = run_reader(
                         opened.reader,
@@ -942,9 +966,11 @@ async fn run_reader<R: AsyncRead + Unpin>(
                                 }
                             }
                         }
+                        true
+                    } else {
+                        // No frame was read, so stay idle and retry the read.
+                        false
                     }
-                    // (If silence_on_idle is false, we simply looped back and try read again.)
-                    true
                 }
             }
         } else {
@@ -968,13 +994,14 @@ async fn run_reader<R: AsyncRead + Unpin>(
         if !read_ok {
             continue;
         }
+        let first_frame = !received_frame;
         received_frame = true;
 
-        // ── Transition idle → playing ─────────────────────────────────────
-        if is_idle {
+        // ── Transition unopened/idle/recovering → playing ─────────────────
+        if first_frame || is_idle {
             is_idle = false;
             state.set_stream_status(stream_id, StreamStatus::Playing);
-            info!(stream = stream_id, "Audio data resumed; stream playing");
+            info!(stream = stream_id, "Audio frame received; stream playing");
         }
 
         // ── Encode and broadcast ──────────────────────────────────────────
@@ -1076,6 +1103,126 @@ mod tests {
     use tokio::io::AsyncWriteExt;
     use tokio::time::timeout;
     use tokio_util::sync::CancellationToken;
+
+    #[test]
+    fn pcm_frame_allocation_rejects_overflow_and_protocol_oversize() {
+        assert_eq!(
+            validated_pcm_frame_bytes(sonium_common::SampleFormat::new(48_000, 16, 2), 20).unwrap(),
+            3_840
+        );
+        assert!(validated_pcm_frame_bytes(
+            sonium_common::SampleFormat::new(u32::MAX, u16::MAX, u16::MAX),
+            u32::MAX,
+        )
+        .is_err());
+        assert!(
+            validated_pcm_frame_bytes(sonium_common::SampleFormat::new(192_000, 16, 64), 60,)
+                .is_err()
+        );
+    }
+
+    #[tokio::test]
+    async fn idle_reader_without_silence_waits_for_a_real_frame_before_playing() {
+        let (reader, mut writer) = tokio::io::duplex(64);
+        let state = Arc::new(ServerState::new(
+            Arc::new(sonium_control::EventBus::new()),
+            None,
+            vec![],
+            vec![],
+        ));
+        let mut events = state.events().subscribe();
+        let task_state = state.clone();
+        let task = tokio::spawn(async move {
+            let mut encoder =
+                make_encoder("pcm", sonium_common::SampleFormat::new(800, 16, 1)).unwrap();
+            let mut pcm_buf = vec![0u8; 16];
+            let mut enc_buf = Vec::new();
+            run_reader(
+                reader,
+                &mut *encoder,
+                Arc::new(Broadcaster::new("default", 1000)),
+                &mut pcm_buf,
+                &mut enc_buf,
+                "default",
+                &task_state,
+                Some(Duration::from_millis(20)),
+                false,
+                10,
+            )
+            .await
+        });
+
+        wait_for_stream_status(&mut events, StreamStatus::Idle).await;
+        assert!(
+            timeout(
+                Duration::from_millis(50),
+                wait_for_stream_status(&mut events, StreamStatus::Playing,)
+            )
+            .await
+            .is_err(),
+            "an idle timeout must not turn an unfilled PCM buffer into playing"
+        );
+
+        writer.write_all(&[1u8; 16]).await.unwrap();
+        wait_for_stream_status(&mut events, StreamStatus::Playing).await;
+        drop(writer);
+        timeout(Duration::from_secs(1), task)
+            .await
+            .expect("reader should stop after its writer closes")
+            .unwrap();
+    }
+
+    #[tokio::test]
+    async fn meta_stream_announces_playing_only_after_forwarding_a_real_frame() {
+        let state = Arc::new(ServerState::new(
+            Arc::new(sonium_control::EventBus::new()),
+            None,
+            vec![],
+            vec![],
+        ));
+        state.register_stream(
+            "meta-test",
+            None,
+            "pcm",
+            "800Hz/16bit/1ch",
+            "meta://source-test",
+            1000,
+            false,
+            10,
+            false,
+            None,
+            false,
+        );
+        let registry = crate::broadcaster::new_registry();
+        let source = Arc::new(Broadcaster::new("source-test", 1000));
+        source.set_codec_header(Bytes::from_static(b"codec-header"));
+        crate::broadcaster::register(&registry, source.clone());
+        let output = Arc::new(Broadcaster::new("meta-test", 1000));
+        let mut audio = output.subscribe();
+        let mut events = state.events().subscribe();
+        let stream = StreamSource {
+            id: "meta-test".into(),
+            source: "meta://source-test".into(),
+            ..StreamSource::default()
+        };
+        let task = tokio::spawn(run_meta(stream, output, state, registry));
+        let publisher = tokio::spawn(async move {
+            loop {
+                source.publish(Bytes::from_static(b"real-frame"));
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        });
+
+        let frame = timeout(Duration::from_secs(1), audio.recv())
+            .await
+            .expect("meta stream should forward its source")
+            .unwrap();
+        assert_eq!(frame.wire_bytes, Bytes::from_static(b"real-frame"));
+        wait_for_stream_status(&mut events, StreamStatus::Playing).await;
+
+        publisher.abort();
+        task.abort();
+    }
 
     #[cfg(unix)]
     fn create_fifo(path: &Path) {
@@ -1419,8 +1566,16 @@ mod tests {
             .await
         });
 
-        wait_for_stream_status(&mut events, StreamStatus::Playing).await;
-        let mut writer = pipe::OpenOptions::new().open_sender(&path).unwrap();
+        let mut writer = timeout(Duration::from_secs(1), async {
+            loop {
+                match pipe::OpenOptions::new().open_sender(&path) {
+                    Ok(writer) => break writer,
+                    Err(_) => tokio::time::sleep(Duration::from_millis(10)).await,
+                }
+            }
+        })
+        .await
+        .expect("FIFO reader should open before the first writer");
         writer.write_all(&first).await.unwrap();
         drop(writer);
         let first_frame = timeout(Duration::from_secs(1), audio.recv())
@@ -1428,10 +1583,19 @@ mod tests {
             .expect("first FIFO writer should publish a frame")
             .unwrap();
         assert!(first_frame.wire_bytes.ends_with(&first));
+        wait_for_stream_status(&mut events, StreamStatus::Playing).await;
 
         wait_for_stream_status(&mut events, StreamStatus::Recovering).await;
-        wait_for_stream_status(&mut events, StreamStatus::Playing).await;
-        let mut writer = pipe::OpenOptions::new().open_sender(&path).unwrap();
+        let mut writer = timeout(Duration::from_secs(1), async {
+            loop {
+                match pipe::OpenOptions::new().open_sender(&path) {
+                    Ok(writer) => break writer,
+                    Err(_) => tokio::time::sleep(Duration::from_millis(10)).await,
+                }
+            }
+        })
+        .await
+        .expect("FIFO reader should reopen before the second writer");
         writer.write_all(&second).await.unwrap();
         drop(writer);
         let second_frame = timeout(Duration::from_secs(1), audio.recv())
@@ -1439,6 +1603,7 @@ mod tests {
             .expect("second FIFO writer should publish after reopening")
             .unwrap();
         assert!(second_frame.wire_bytes.ends_with(&second));
+        wait_for_stream_status(&mut events, StreamStatus::Playing).await;
 
         cancel.cancel();
         timeout(Duration::from_secs(1), task)

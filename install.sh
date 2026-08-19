@@ -93,6 +93,7 @@ run_as_user() {
 
 preflight_server_config() {
   local config_path="$1"
+  local checker_binary="${2:-}"
   local legacy_keys
   local preflight_status
 
@@ -132,29 +133,36 @@ if isinstance(server, dict):
         raise SystemExit(10)
 PY
   )"; then
-    return 0
+    :
   else
     preflight_status=$?
+    case "${preflight_status}" in
+      10)
+        die "Legacy [server] audio keys detected in ${config_path}: ${legacy_keys//$'\n'/, }. Move buffer_ms, chunk_ms, and output_prefill_ms to [server.audio] (keeping their values) and rerun the installer. No binaries, services, account files, or configuration were changed."
+        ;;
+      11)
+        die "Could not parse existing configuration ${config_path} with Python tomllib. Fix its TOML syntax and move buffer_ms, chunk_ms, and output_prefill_ms to [server.audio] if present before rerunning. No binaries, services, account files, or configuration were changed."
+        ;;
+      12)
+        die "Cannot preflight existing configuration ${config_path}: Python 3.11+ with tomllib is required. Install or enable Python 3.11+, then fix TOML syntax and move buffer_ms, chunk_ms, and output_prefill_ms to [server.audio] if present before rerunning. No binaries, services, account files, or configuration were changed."
+        ;;
+      *)
+        die "Could not preflight existing configuration ${config_path} with Python tomllib. Ensure Python 3.11+ is available, fix TOML syntax, and move buffer_ms, chunk_ms, and output_prefill_ms to [server.audio] if present before rerunning. No binaries, services, account files, or configuration were changed."
+        ;;
+    esac
   fi
 
-  case "${preflight_status}" in
-    10)
-      die "Legacy [server] audio keys detected in ${config_path}: ${legacy_keys//$'\n'/, }. Move buffer_ms, chunk_ms, and output_prefill_ms to [server.audio] (keeping their values) and rerun the installer. No binaries, services, account files, or configuration were changed."
-      ;;
-    11)
-      die "Could not parse existing configuration ${config_path} with Python tomllib. Fix its TOML syntax and move buffer_ms, chunk_ms, and output_prefill_ms to [server.audio] if present before rerunning. No binaries, services, account files, or configuration were changed."
-      ;;
-    12)
-      die "Cannot preflight existing configuration ${config_path}: Python 3.11+ with tomllib is required. Install or enable Python 3.11+, then fix TOML syntax and move buffer_ms, chunk_ms, and output_prefill_ms to [server.audio] if present before rerunning. No binaries, services, account files, or configuration were changed."
-      ;;
-    *)
-      die "Could not preflight existing configuration ${config_path} with Python tomllib. Ensure Python 3.11+ is available, fix TOML syntax, and move buffer_ms, chunk_ms, and output_prefill_ms to [server.audio] if present before rerunning. No binaries, services, account files, or configuration were changed."
-      ;;
-  esac
+  if [[ -n "${checker_binary}" ]]; then
+    [[ -x "${checker_binary}" ]] \
+      || die "Downloaded sonium-server is not executable; no binaries or services were changed."
+    if ! "${checker_binary}" --config "${config_path}" --check-config >/dev/null 2>&1; then
+      die "The downloaded sonium-server rejected existing configuration ${config_path}. Run '${checker_binary} --config ${config_path} --check-config' for details, fix every reported semantic error, and rerun the installer. No binaries, services, account files, or configuration were changed."
+    fi
+  fi
 }
 
 if [[ -n "${PREFLIGHT_CONFIG}" && "${UNINSTALL}" == "false" ]]; then
-  preflight_server_config "${PREFLIGHT_CONFIG}"
+  preflight_server_config "${PREFLIGHT_CONFIG}" "${SONIUM_SERVER_CHECK_BIN:-}"
   ok "Configuration preflight passed: ${PREFLIGHT_CONFIG}"
   exit 0
 fi
@@ -368,6 +376,12 @@ curl -fsSL "${BASE_URL}/${PACKAGE_NAME}" -o "${TMP_DIR}/sonium.tar.gz" \
 tar -xzf "${TMP_DIR}/sonium.tar.gz" -C "${TMP_DIR}"
 PACKAGE_DIR="$(find "${TMP_DIR}" -maxdepth 1 -type d -name 'sonium-*' | head -n 1)"
 [[ -n "${PACKAGE_DIR}" ]] || die "Release archive did not contain a sonium package directory"
+
+# The downloaded version is authoritative for the configuration it will run.
+# Check it before replacing the active binary or touching service state.
+if [[ "${INSTALL_SERVER}" == "true" ]]; then
+  preflight_server_config "${CONF_DIR}/sonium.toml" "${PACKAGE_DIR}/sonium-server"
+fi
 
 install -d "${BIN_DIR}"
 if [[ "${INSTALL_SERVER}" == "true" ]]; then

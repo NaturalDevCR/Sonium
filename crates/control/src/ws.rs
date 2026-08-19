@@ -4,7 +4,7 @@
 //! The server emits events from the [`crate::state::ServerState`] mutation
 //! methods; connected WebSocket handlers subscribe and forward them as JSON.
 
-use crate::state::{ClientInfo, Group, StreamStatus};
+use crate::state::{ClientInfo, Group, StreamRecovery, StreamStatus};
 use serde::Serialize;
 use sonium_protocol::messages::{EqBand, HealthReport};
 use tokio::sync::broadcast;
@@ -61,6 +61,8 @@ pub enum Event {
     StreamStatus {
         stream_id: String,
         status: StreamStatus,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        recovery: Option<StreamRecovery>,
     },
     StreamRestarted {
         stream_id: String,
