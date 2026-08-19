@@ -18,7 +18,7 @@ use argon2::{
     Argon2,
 };
 use jsonwebtoken::{decode, encode, DecodingKey, EncodingKey, Header, Validation};
-use parking_lot::RwLock;
+use parking_lot::{Mutex, RwLock};
 use rand::distributions::{Alphanumeric, DistString};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
@@ -119,6 +119,16 @@ pub struct UserStore {
     jwt_secret: RwLock<String>,
     file_path: PathBuf,
     revoked: RwLock<HashSet<String>>,
+    persistence: Mutex<()>,
+    #[cfg(test)]
+    persist_fault: Mutex<Option<PersistFault>>,
+}
+
+#[cfg(test)]
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum PersistFault {
+    BeforeWrite,
+    BeforeRename,
 }
 
 impl UserStore {
@@ -136,6 +146,9 @@ impl UserStore {
             jwt_secret: RwLock::new(Self::generate_secret()),
             file_path: file_path.clone(),
             revoked: RwLock::new(HashSet::new()),
+            persistence: Mutex::new(()),
+            #[cfg(test)]
+            persist_fault: Mutex::new(None),
         });
 
         let users_file_exists = match std::fs::metadata(&file_path) {
@@ -189,27 +202,41 @@ impl UserStore {
     fn load_from_disk(&self) -> anyhow::Result<()> {
         let raw = std::fs::read_to_string(&self.file_path)?;
         let file: UsersFile = serde_json::from_str(&raw)?;
-        if let Some(secret) = file.jwt_secret {
+        let jwt_secret = match file.jwt_secret {
+            Some(secret) if secret.is_empty() => {
+                return Err(anyhow::anyhow!("users file contains an empty JWT secret"));
+            }
+            secret => secret,
+        };
+        let mut users = HashMap::with_capacity(file.users.len());
+        for r in file.users {
+            PasswordHash::new(&r.password_hash)
+                .map_err(|_| anyhow::anyhow!("users file contains an invalid password hash"))?;
+            let user = User {
+                id: r.id,
+                username: r.username,
+                password_hash: r.password_hash,
+                role: r.role,
+                must_change_password: r.must_change_password,
+                session_version: r.session_version,
+            };
+            if users.insert(user.id.clone(), user).is_some() {
+                return Err(anyhow::anyhow!("users file contains duplicate user IDs"));
+            }
+        }
+        if let Some(secret) = jwt_secret {
             *self.jwt_secret.write() = secret;
         }
-        let mut map = self.users.write();
-        for r in file.users {
-            map.insert(
-                r.id.clone(),
-                User {
-                    id: r.id,
-                    username: r.username,
-                    password_hash: r.password_hash,
-                    role: r.role,
-                    must_change_password: r.must_change_password,
-                    session_version: r.session_version,
-                },
-            );
-        }
+        *self.users.write() = users;
         Ok(())
     }
 
     fn persist(&self) -> anyhow::Result<()> {
+        let _persistence = self.persistence.lock();
+        self.persist_locked()
+    }
+
+    fn persist_locked(&self) -> anyhow::Result<()> {
         let records: Vec<UserRecord> = self
             .users
             .read()
@@ -235,6 +262,10 @@ impl UserStore {
         let temp_path = parent.join(format!(".users-{}.tmp", Uuid::new_v4()));
 
         let result = (|| -> anyhow::Result<()> {
+            #[cfg(test)]
+            if self.take_persist_fault(PersistFault::BeforeWrite) {
+                return Err(anyhow::anyhow!("injected persistence write failure"));
+            }
             let mut options = OpenOptions::new();
             options.write(true).create_new(true);
             #[cfg(unix)]
@@ -243,6 +274,10 @@ impl UserStore {
             temp.write_all(&json)?;
             temp.sync_all()?;
             drop(temp);
+            #[cfg(test)]
+            if self.take_persist_fault(PersistFault::BeforeRename) {
+                return Err(anyhow::anyhow!("injected persistence rename failure"));
+            }
             std::fs::rename(&temp_path, &self.file_path)?;
             File::open(parent)?.sync_all()?;
             Ok(())
@@ -254,9 +289,14 @@ impl UserStore {
         result
     }
 
-    fn persist_or_warn(&self, message: &str) {
-        if let Err(e) = self.persist() {
-            warn!(path = %self.file_path.display(), "{message}: {e}");
+    #[cfg(test)]
+    fn take_persist_fault(&self, expected: PersistFault) -> bool {
+        let mut fault = self.persist_fault.lock();
+        if *fault == Some(expected) {
+            *fault = None;
+            true
+        } else {
+            false
         }
     }
 
@@ -371,62 +411,98 @@ impl UserStore {
         self.users.read().get(id).map(UserView::from)
     }
 
-    /// Create a new user. Returns `None` if the username is already taken.
-    pub fn create_user(&self, username: &str, password: &str, role: Role) -> Option<UserView> {
-        if self.users.read().values().any(|u| u.username == username) {
-            return None;
+    /// Create a new user. Returns `Ok(None)` if the username is already taken.
+    pub fn create_user(
+        &self,
+        username: &str,
+        password: &str,
+        role: Role,
+    ) -> anyhow::Result<Option<UserView>> {
+        let _persistence = self.persistence.lock();
+        let mut users = self.users.write();
+        if users.values().any(|u| u.username == username) {
+            return Ok(None);
         }
-        let user = self.create_user_internal(username, password, role, false);
-        self.persist_or_warn("Failed to persist created user");
+        let user = User {
+            id: Uuid::new_v4().to_string(),
+            username: username.to_owned(),
+            password_hash: Self::hash_password(password)?,
+            role,
+            must_change_password: false,
+            session_version: 0,
+        };
+        users.insert(user.id.clone(), user.clone());
+        drop(users);
+        if let Err(error) = self.persist_locked() {
+            self.users.write().remove(&user.id);
+            return Err(error);
+        }
         info!(username, id = %user.id, "User created");
-        Some(UserView::from(&user))
+        Ok(Some(UserView::from(&user)))
     }
 
-    /// Update a user's role and/or password.  Returns `false` if not found.
-    pub fn update_user(&self, id: &str, role: Option<Role>, new_password: Option<&str>) -> bool {
+    /// Update a user's role and/or password. Returns `Ok(false)` if not found.
+    pub fn update_user(
+        &self,
+        id: &str,
+        role: Option<Role>,
+        new_password: Option<&str>,
+    ) -> anyhow::Result<bool> {
+        let _persistence = self.persistence.lock();
         let mut users = self.users.write();
-        if let Some(u) = users.get_mut(id) {
-            let mut invalidate_sessions = false;
-            if let Some(r) = role {
-                if u.role != r {
-                    u.role = r;
-                    invalidate_sessions = true;
-                }
-            }
-            if let Some(p) = new_password {
-                u.password_hash = Self::hash_password(p).expect("hash failed");
-                u.must_change_password = false;
+        let Some(original) = users.get(id).cloned() else {
+            return Ok(false);
+        };
+        let mut updated = original.clone();
+        let mut invalidate_sessions = false;
+        if let Some(role) = role {
+            if updated.role != role {
+                updated.role = role;
                 invalidate_sessions = true;
             }
-            if invalidate_sessions {
-                u.session_version = u.session_version.saturating_add(1);
-            }
-            drop(users);
-            self.persist_or_warn("Failed to persist updated user");
-            true
-        } else {
-            false
         }
+        if let Some(password) = new_password {
+            updated.password_hash = Self::hash_password(password)?;
+            updated.must_change_password = false;
+            invalidate_sessions = true;
+        }
+        if invalidate_sessions {
+            updated.session_version = original
+                .session_version
+                .checked_add(1)
+                .ok_or_else(|| anyhow::anyhow!("session version exhausted"))?;
+        }
+        users.insert(id.to_owned(), updated);
+        drop(users);
+        if let Err(error) = self.persist_locked() {
+            self.users.write().insert(id.to_owned(), original);
+            return Err(error);
+        }
+        Ok(true)
     }
 
-    /// Delete a user. Returns `false` if not found or if deleting the last admin.
-    pub fn delete_user(&self, id: &str) -> bool {
-        let users = self.users.read();
+    /// Delete a user. Returns `Ok(false)` if not found or deleting the last admin.
+    pub fn delete_user(&self, id: &str) -> anyhow::Result<bool> {
+        let _persistence = self.persistence.lock();
+        let mut users = self.users.write();
         if let Some(u) = users.get(id) {
             if u.role == Role::Admin {
                 let admin_count = users.values().filter(|x| x.role == Role::Admin).count();
                 if admin_count <= 1 {
                     warn!("Cannot delete the last admin account");
-                    return false;
+                    return Ok(false);
                 }
             }
         } else {
-            return false;
+            return Ok(false);
         }
+        let deleted = users.remove(id).expect("checked user exists");
         drop(users);
-        self.users.write().remove(id);
-        self.persist_or_warn("Failed to persist deleted user");
-        true
+        if let Err(error) = self.persist_locked() {
+            self.users.write().insert(id.to_owned(), deleted);
+            return Err(error);
+        }
+        Ok(true)
     }
 }
 
@@ -434,9 +510,52 @@ impl UserStore {
 mod tests {
     use super::*;
     use tempfile::tempdir;
+    use tracing::field::{Field, Visit};
+    use tracing::span::{Attributes, Id, Record};
+    use tracing::{Event, Metadata, Subscriber};
+
+    struct LogCapture {
+        output: Arc<Mutex<String>>,
+    }
+
+    struct LogVisitor<'a> {
+        output: &'a Mutex<String>,
+    }
+
+    impl Visit for LogVisitor<'_> {
+        fn record_debug(&mut self, field: &Field, value: &dyn std::fmt::Debug) {
+            self.output
+                .lock()
+                .push_str(&format!("{}={value:?}\n", field.name()));
+        }
+    }
+
+    impl Subscriber for LogCapture {
+        fn enabled(&self, _: &Metadata<'_>) -> bool {
+            true
+        }
+
+        fn new_span(&self, _: &Attributes<'_>) -> Id {
+            Id::from_u64(1)
+        }
+
+        fn record(&self, _: &Id, _: &Record<'_>) {}
+
+        fn record_follows_from(&self, _: &Id, _: &Id) {}
+
+        fn event(&self, event: &Event<'_>) {
+            event.record(&mut LogVisitor {
+                output: &self.output,
+            });
+        }
+
+        fn enter(&self, _: &Id) {}
+
+        fn exit(&self, _: &Id) {}
+    }
 
     #[test]
-    fn test_auto_generated_password_auth() {
+    fn initial_admin_password_authenticates() {
         let dir = tempdir().unwrap();
         let store =
             UserStore::load_or_init(dir.path(), Some("generated-pass".to_string())).unwrap();
@@ -475,7 +594,7 @@ mod tests {
     }
 
     #[test]
-    fn test_auto_generated_password_persists_in_new_config_dir() {
+    fn initial_admin_password_persists_in_new_config_dir() {
         let root = tempdir().unwrap();
         let config_dir = root.path().join("nested/config");
 
@@ -514,6 +633,21 @@ mod tests {
 
         assert!(result.is_err());
         assert!(!dir.path().join("users.json").exists());
+    }
+
+    #[test]
+    fn initial_admin_password_is_never_logged() {
+        let dir = tempdir().unwrap();
+        let logs = Arc::new(Mutex::new(String::new()));
+        let dispatch = tracing::Dispatch::new(LogCapture {
+            output: logs.clone(),
+        });
+
+        tracing::dispatcher::with_default(&dispatch, || {
+            UserStore::load_or_init(dir.path(), Some("password-not-for-logs".to_string())).unwrap();
+        });
+
+        assert!(!logs.lock().contains("password-not-for-logs"));
     }
 
     #[test]
@@ -566,11 +700,14 @@ mod tests {
             UserStore::load_or_init(dir.path(), Some("admin-password".to_string())).unwrap();
         let user = store
             .create_user("alice", "initial-password", Role::Viewer)
+            .unwrap()
             .unwrap();
         let token =
             store.create_token(&store.authenticate("alice", "initial-password").unwrap(), 1);
 
-        assert!(store.update_user(&user.id, None, Some("new-password")));
+        assert!(store
+            .update_user(&user.id, None, Some("new-password"))
+            .unwrap());
 
         assert!(store.verify_token(&token).is_none());
     }
@@ -582,11 +719,14 @@ mod tests {
             UserStore::load_or_init(dir.path(), Some("admin-password".to_string())).unwrap();
         let user = store
             .create_user("alice", "initial-password", Role::Viewer)
+            .unwrap()
             .unwrap();
         let token =
             store.create_token(&store.authenticate("alice", "initial-password").unwrap(), 1);
 
-        assert!(store.update_user(&user.id, None, Some("new-password")));
+        assert!(store
+            .update_user(&user.id, None, Some("new-password"))
+            .unwrap());
         drop(store);
 
         let reloaded = UserStore::load_or_init(dir.path(), None).unwrap();
@@ -601,10 +741,13 @@ mod tests {
             UserStore::load_or_init(dir.path(), Some("admin-password".to_string())).unwrap();
         let user = store
             .create_user("alice", "alice-password", Role::Viewer)
+            .unwrap()
             .unwrap();
         let token = store.create_token(&store.authenticate("alice", "alice-password").unwrap(), 1);
 
-        assert!(store.update_user(&user.id, Some(Role::Operator), None));
+        assert!(store
+            .update_user(&user.id, Some(Role::Operator), None)
+            .unwrap());
 
         assert!(store.verify_token(&token).is_none());
     }
@@ -616,11 +759,220 @@ mod tests {
             UserStore::load_or_init(dir.path(), Some("admin-password".to_string())).unwrap();
         let user = store
             .create_user("alice", "alice-password", Role::Viewer)
+            .unwrap()
             .unwrap();
         let token = store.create_token(&store.authenticate("alice", "alice-password").unwrap(), 1);
 
-        assert!(store.delete_user(&user.id));
+        assert!(store.delete_user(&user.id).unwrap());
 
         assert!(store.verify_token(&token).is_none());
+    }
+
+    #[test]
+    fn failed_update_does_not_invalidate_or_persist_sessions() {
+        let dir = tempdir().unwrap();
+        let store =
+            UserStore::load_or_init(dir.path(), Some("admin-password".to_string())).unwrap();
+        let user = store
+            .create_user("alice", "initial-password", Role::Viewer)
+            .unwrap()
+            .unwrap();
+        let token =
+            store.create_token(&store.authenticate("alice", "initial-password").unwrap(), 1);
+        store.fail_next_persist(PersistFault::BeforeRename);
+
+        assert!(store
+            .update_user(&user.id, Some(Role::Operator), None)
+            .is_err());
+        assert!(store.verify_token(&token).is_some());
+        drop(store);
+
+        let reloaded = UserStore::load_or_init(dir.path(), None).unwrap();
+        assert!(reloaded.verify_token(&token).is_some());
+    }
+
+    #[test]
+    fn failed_delete_does_not_remove_or_persist_user() {
+        let dir = tempdir().unwrap();
+        let store =
+            UserStore::load_or_init(dir.path(), Some("admin-password".to_string())).unwrap();
+        let user = store
+            .create_user("alice", "alice-password", Role::Viewer)
+            .unwrap()
+            .unwrap();
+        let token = store.create_token(&store.authenticate("alice", "alice-password").unwrap(), 1);
+        store.fail_next_persist(PersistFault::BeforeRename);
+
+        assert!(store.delete_user(&user.id).is_err());
+        assert!(store.verify_token(&token).is_some());
+        drop(store);
+
+        let reloaded = UserStore::load_or_init(dir.path(), None).unwrap();
+        assert!(reloaded.verify_token(&token).is_some());
+    }
+
+    #[test]
+    fn failed_create_does_not_add_user() {
+        let dir = tempdir().unwrap();
+        let store =
+            UserStore::load_or_init(dir.path(), Some("admin-password".to_string())).unwrap();
+        store.fail_next_persist(PersistFault::BeforeRename);
+
+        assert!(store
+            .create_user("alice", "alice-password", Role::Viewer)
+            .is_err());
+        assert!(store.authenticate("alice", "alice-password").is_none());
+    }
+
+    #[test]
+    fn failed_atomic_replace_preserves_previous_bytes_and_permissions() {
+        #[cfg(unix)]
+        use std::os::unix::fs::PermissionsExt;
+
+        let dir = tempdir().unwrap();
+        let store =
+            UserStore::load_or_init(dir.path(), Some("admin-password".to_string())).unwrap();
+        let user = store
+            .create_user("alice", "alice-password", Role::Viewer)
+            .unwrap()
+            .unwrap();
+        let users_file = dir.path().join("users.json");
+        let old_bytes = std::fs::read(&users_file).unwrap();
+        #[cfg(unix)]
+        let old_permissions = std::fs::metadata(&users_file).unwrap().permissions().mode() & 0o777;
+        for fault in [PersistFault::BeforeWrite, PersistFault::BeforeRename] {
+            store.fail_next_persist(fault);
+
+            assert!(store
+                .update_user(&user.id, Some(Role::Operator), None)
+                .is_err());
+
+            assert_eq!(std::fs::read(&users_file).unwrap(), old_bytes);
+            #[cfg(unix)]
+            assert_eq!(
+                std::fs::metadata(&users_file).unwrap().permissions().mode() & 0o777,
+                old_permissions
+            );
+        }
+    }
+
+    #[test]
+    fn rejects_duplicate_ids_invalid_hashes_and_empty_jwt_secrets_without_rewrite() {
+        enum InvalidCase {
+            DuplicateId,
+            InvalidHash,
+            EmptySecret,
+        }
+
+        for case in [
+            InvalidCase::DuplicateId,
+            InvalidCase::InvalidHash,
+            InvalidCase::EmptySecret,
+        ] {
+            let dir = tempdir().unwrap();
+            let store =
+                UserStore::load_or_init(dir.path(), Some("admin-password".to_string())).unwrap();
+            drop(store);
+            let users_file = dir.path().join("users.json");
+            let mut file: serde_json::Value =
+                serde_json::from_slice(&std::fs::read(&users_file).unwrap()).unwrap();
+            match case {
+                InvalidCase::DuplicateId => {
+                    let duplicate = file["users"][0].clone();
+                    file["users"].as_array_mut().unwrap().push(duplicate);
+                }
+                InvalidCase::InvalidHash => {
+                    file["users"][0]["password_hash"] = serde_json::json!("not-a-phc-hash");
+                }
+                InvalidCase::EmptySecret => file["jwt_secret"] = serde_json::json!(""),
+            }
+            let invalid_bytes = serde_json::to_vec(&file).unwrap();
+            std::fs::write(&users_file, &invalid_bytes).unwrap();
+
+            assert!(UserStore::load_or_init(dir.path(), None).is_err());
+            assert_eq!(std::fs::read(&users_file).unwrap(), invalid_bytes);
+        }
+    }
+
+    #[test]
+    fn session_version_exhaustion_rejects_the_update_without_invalidating_tokens() {
+        let dir = tempdir().unwrap();
+        let store =
+            UserStore::load_or_init(dir.path(), Some("admin-password".to_string())).unwrap();
+        let user = store
+            .create_user("alice", "alice-password", Role::Viewer)
+            .unwrap()
+            .unwrap();
+        store
+            .users
+            .write()
+            .get_mut(&user.id)
+            .unwrap()
+            .session_version = u64::MAX;
+        let token = store.create_token(&store.authenticate("alice", "alice-password").unwrap(), 1);
+
+        assert!(store
+            .update_user(&user.id, Some(Role::Operator), None)
+            .is_err());
+        assert!(store.verify_token(&token).is_some());
+    }
+
+    #[test]
+    fn concurrent_mutations_wait_for_the_persistence_lock() {
+        use std::sync::mpsc;
+        use std::time::Duration;
+
+        let dir = tempdir().unwrap();
+        let store =
+            UserStore::load_or_init(dir.path(), Some("admin-password".to_string())).unwrap();
+        let user = store
+            .create_user("alice", "alice-password", Role::Viewer)
+            .unwrap()
+            .unwrap();
+        let other_user = store
+            .create_user("bob", "bob-password", Role::Viewer)
+            .unwrap()
+            .unwrap();
+        let lock = store.persistence.lock();
+        let (done_tx, done_rx) = mpsc::channel();
+        let first_done_tx = done_tx.clone();
+        let store_for_thread = store.clone();
+        let id = user.id.clone();
+        let worker = std::thread::spawn(move || {
+            let result = store_for_thread.update_user(&id, Some(Role::Operator), None);
+            first_done_tx.send(result).unwrap();
+        });
+        let store_for_second_thread = store.clone();
+        let other_id = other_user.id.clone();
+        let second_worker = std::thread::spawn(move || {
+            let result = store_for_second_thread.update_user(&other_id, Some(Role::Operator), None);
+            done_tx.send(result).unwrap();
+        });
+
+        assert!(done_rx.recv_timeout(Duration::from_millis(50)).is_err());
+        drop(lock);
+        for _ in 0..2 {
+            assert!(done_rx
+                .recv_timeout(Duration::from_secs(1))
+                .unwrap()
+                .unwrap());
+        }
+        worker.join().unwrap();
+        second_worker.join().unwrap();
+        drop(store);
+
+        let reloaded = UserStore::load_or_init(dir.path(), None).unwrap();
+        assert_eq!(reloaded.get_user(&user.id).unwrap().role, Role::Operator);
+        assert_eq!(
+            reloaded.get_user(&other_user.id).unwrap().role,
+            Role::Operator
+        );
+    }
+}
+
+#[cfg(test)]
+impl UserStore {
+    fn fail_next_persist(&self, fault: PersistFault) {
+        *self.persist_fault.lock() = Some(fault);
     }
 }

@@ -19,7 +19,9 @@ fn test_auth() -> (Arc<UserStore>, String) {
     let dir = std::env::temp_dir().join(format!("sonium-api-test-{}", uuid::Uuid::new_v4()));
     std::fs::create_dir_all(&dir).unwrap();
     let store = UserStore::load_or_init(&dir, Some("initial-admin-password".to_string())).unwrap();
-    let _ = store.create_user("test-admin", "test-password", Role::Admin);
+    let _ = store
+        .create_user("test-admin", "test-password", Role::Admin)
+        .unwrap();
     let user = store.authenticate("test-admin", "test-password").unwrap();
     let token = store.create_token(&user, 1);
     (store, token)
