@@ -115,11 +115,14 @@ Compose file, shell history, log, or source control.
 ### Legacy installer configuration
 
 Phase 1 accepts timing keys only in `[server.audio]`. The Linux installer
-preflights an existing configuration before it changes binaries or systemd. If
-it finds legacy `buffer_ms`, `chunk_ms`, or `output_prefill_ms` keys directly
-under `[server]`, it aborts without stopping the current service. Move those
-values to `[server.audio]` and rerun the installer; this deliberate stop avoids
-restarting a healthy service with a strict-config startup failure.
+preflights an existing configuration with Python 3.11+ `tomllib` before it
+changes binaries or systemd. If it finds legacy `buffer_ms`, `chunk_ms`, or
+`output_prefill_ms` keys directly under `[server]`, or cannot parse the
+existing TOML, it aborts without stopping the current service. Move those
+values to `[server.audio]`, fix any TOML syntax error, and rerun the installer.
+If the host lacks Python 3.11+ with `tomllib`, install or enable it first; this
+deliberate stop avoids restarting a healthy service with a strict-config
+startup failure.
 
 ### Audio Timing
 

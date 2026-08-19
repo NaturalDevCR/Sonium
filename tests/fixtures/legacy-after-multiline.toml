@@ -1,0 +1,9 @@
+[server]
+description = """
+# A multiline description can contain TOML-looking content.
+["not-server"]
+buffer_ms = 200
+"""
+buffer_ms = 1000
+"chunk_ms" = 20
+'output_prefill_ms' = 0

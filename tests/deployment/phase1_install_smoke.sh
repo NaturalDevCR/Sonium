@@ -9,6 +9,9 @@ double_header_fixture="${root_dir}/tests/fixtures/legacy-server-header-double-qu
 single_quoted_fixture="${root_dir}/tests/fixtures/legacy-server-audio-single-quoted.toml"
 audio_table_fixture="${root_dir}/tests/fixtures/server-audio-quoted-keys.toml"
 multiline_fixture="${root_dir}/tests/fixtures/multiline-legacy-looking-content.toml"
+escaped_multiline_fixture="${root_dir}/tests/fixtures/multiline-escaped-comments.toml"
+legacy_after_multiline_fixture="${root_dir}/tests/fixtures/legacy-after-multiline.toml"
+invalid_toml_fixture="${root_dir}/tests/fixtures/invalid-preflight.toml"
 installation_doc="${root_dir}/docs/src/getting-started/installation.md"
 configuration_doc="${root_dir}/docs/src/getting-started/configuration.md"
 compose_file="${root_dir}/docker-compose.yml"
@@ -34,6 +37,28 @@ fi
 if ! output="$(bash "${installer}" --preflight-config "${multiline_fixture}" 2>&1)"; then
   fail "multiline string content unexpectedly blocked preflight: ${output}"
 fi
+
+if ! output="$(bash "${installer}" --preflight-config "${escaped_multiline_fixture}" 2>&1)"; then
+  fail "escaped multiline string content unexpectedly blocked preflight: ${output}"
+fi
+
+if output="$(bash "${installer}" --preflight-config "${legacy_after_multiline_fixture}" 2>&1)"; then
+  fail "legacy keys after a multiline string unexpectedly passed preflight"
+fi
+[[ "${output}" == *"Legacy [server] audio keys detected"* ]] \
+  || fail "legacy keys after a multiline string were not detected"
+
+if output="$(bash "${installer}" --preflight-config "${invalid_toml_fixture}" 2>&1)"; then
+  fail "malformed TOML unexpectedly passed preflight"
+fi
+[[ "${output}" == *"Could not parse existing configuration"* ]] \
+  || fail "malformed TOML did not produce an actionable preflight error"
+
+if output="$(PATH=/nonexistent /bin/bash "${installer}" --preflight-config "${audio_table_fixture}" 2>&1)"; then
+  fail "preflight unexpectedly ran without python3/tomllib"
+fi
+[[ "${output}" == *"Python 3.11+ with tomllib is required"* ]] \
+  || fail "missing python3/tomllib did not produce an actionable preflight error"
 
 # On a non-root test host this invocation stops at the platform/root guard,
 # before any uninstall action. It must not be rejected by legacy preflight.
