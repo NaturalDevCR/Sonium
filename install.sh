@@ -333,6 +333,8 @@ stream_port = ${STREAM_PORT}
 control_port = ${CONTROL_PORT}
 mdns = true
 snapcast_compat = false
+
+[server.audio]
 buffer_ms = 1000
 chunk_ms = 20
 output_prefill_ms = 0

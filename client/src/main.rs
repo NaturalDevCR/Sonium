@@ -95,7 +95,8 @@ async fn main() -> anyhow::Result<()> {
         .config
         .unwrap_or_else(|| std::path::PathBuf::from("sonium-client.toml"));
 
-    let mut cfg = ClientConfig::from_file_or_default(&config_path);
+    let mut cfg = ClientConfig::from_file_or_default(&config_path)
+        .with_context(|| format!("cannot load configuration {}", config_path.display()))?;
 
     if let Some(s) = cli.server {
         cfg.server_host = s;
@@ -118,6 +119,8 @@ async fn main() -> anyhow::Result<()> {
     if let Some(log) = cli.log {
         cfg.log.level = log;
     }
+    cfg.validate()
+        .with_context(|| format!("invalid configuration {}", config_path.display()))?;
 
     tracing_subscriber::fmt()
         .with_env_filter(

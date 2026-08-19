@@ -21,6 +21,7 @@ use serde::{Deserialize, Serialize};
 
 /// Fully describes a linear PCM stream.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct SampleFormat {
     /// Samples per second (e.g. 44100, 48000).
     pub rate: u32,

@@ -70,7 +70,8 @@ struct Cli {
 async fn main() -> anyhow::Result<()> {
     let cli = Cli::parse();
 
-    let mut cfg = ServerConfig::from_file_or_default(&cli.config);
+    let mut cfg = ServerConfig::from_file_or_default(&cli.config)
+        .with_context(|| format!("cannot load configuration {}", cli.config.display()))?;
 
     if let Some(p) = cli.stream_port {
         cfg.server.stream_port = p;
@@ -87,6 +88,8 @@ async fn main() -> anyhow::Result<()> {
     if cli.no_mdns {
         cfg.server.mdns = false;
     }
+    cfg.validate()
+        .with_context(|| format!("invalid configuration {}", cli.config.display()))?;
 
     let config_dir = cli
         .config

@@ -88,7 +88,7 @@ impl fmt::Display for TransportMode {
 /// udp_port = 1712    # server UDP port for UDP media (0 = disabled)
 /// ```
 #[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(default)]
+#[serde(default, deny_unknown_fields)]
 pub struct TransportConfig {
     pub mode: TransportMode,
     /// UDP port the server listens on for RTP/UDP media delivery.
