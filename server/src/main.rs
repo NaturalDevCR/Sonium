@@ -153,13 +153,13 @@ async fn main() -> anyhow::Result<()> {
 
     // One-time initialization if requested.
     if let Some(password) = cli.init_admin {
-        let _ = UserStore::load_or_init(&config_dir, Some(password));
+        UserStore::load_or_init(&config_dir, Some(password))?;
         info!("Admin account initialized (if it didn't exist).");
         return Ok(());
     }
 
     // Auth: load users from config directory.
-    let auth = UserStore::load_or_init(&config_dir, None);
+    let auth = UserStore::load_or_init(&config_dir, None)?;
 
     // State persistence: load from sonium-state.json.
     let persistence = Arc::new(PersistenceStore::new(&config_dir));

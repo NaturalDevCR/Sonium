@@ -1,13 +1,17 @@
 //! User authentication — accounts, roles, JWT tokens.
 //!
 //! Users are stored in a JSON file alongside `sonium.toml`.  On first boot
-//! (no users file) Sonium creates a default `admin` account and prints the
-//! generated password to the log **once** — the user should change it via the
-//! web UI immediately.
+//! (no users file) Sonium requires an initial `admin` password from the
+//! operator; it never writes credentials to logs.
 
 use std::collections::{HashMap, HashSet};
+use std::fs::{File, OpenOptions};
+use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
+
+#[cfg(unix)]
+use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
 
 use argon2::{
     password_hash::{rand_core::OsRng, PasswordHash, PasswordHasher, PasswordVerifier, SaltString},
@@ -52,6 +56,8 @@ pub struct User {
     pub password_hash: String,
     pub role: Role,
     pub must_change_password: bool,
+    #[serde(default)]
+    pub session_version: u64,
 }
 
 /// Public view of a user (no password hash).
@@ -81,6 +87,7 @@ pub struct Claims {
     pub username: String,
     pub role: String,
     pub must_change_password: bool,
+    pub session_version: u64,
     pub exp: usize,
 }
 
@@ -101,6 +108,8 @@ struct UserRecord {
     role: Role,
     #[serde(default)]
     must_change_password: bool,
+    #[serde(default)]
+    session_version: u64,
 }
 
 // ── UserStore ─────────────────────────────────────────────────────────────
@@ -115,14 +124,13 @@ pub struct UserStore {
 impl UserStore {
     /// Load from `<config_dir>/users.json`, or create it with a default admin
     /// if the file does not exist.
-    pub fn load_or_init(config_dir: &Path, initial_password: Option<String>) -> Arc<Self> {
+    pub fn load_or_init(
+        config_dir: &Path,
+        initial_password: Option<String>,
+    ) -> anyhow::Result<Arc<Self>> {
         let file_path = config_dir.join("users.json");
-        if let Err(e) = std::fs::create_dir_all(config_dir) {
-            warn!(
-                path = %config_dir.display(),
-                "Failed to create auth config directory: {e}"
-            );
-        }
+        std::fs::create_dir_all(config_dir)?;
+        Self::set_directory_permissions(config_dir)?;
         let store = Arc::new(Self {
             users: RwLock::new(HashMap::new()),
             jwt_secret: RwLock::new(Self::generate_secret()),
@@ -130,30 +138,48 @@ impl UserStore {
             revoked: RwLock::new(HashSet::new()),
         });
 
-        if file_path.exists() {
-            if let Err(e) = store.load_from_disk() {
-                warn!("Failed to load users file: {e} — starting with empty user list");
-            } else {
-                info!(path = %file_path.display(), users = store.users.read().len(), "Loaded users");
-            }
+        let users_file_exists = match std::fs::metadata(&file_path) {
+            Ok(_) => true,
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => false,
+            Err(e) => return Err(e.into()),
+        };
+
+        if users_file_exists {
+            store.load_from_disk()?;
+            info!(path = %file_path.display(), users = store.users.read().len(), "Loaded users");
         }
 
-        if store.users.read().is_empty() {
-            let password = initial_password
-                .unwrap_or_else(|| Alphanumeric.sample_string(&mut rand::thread_rng(), 16));
+        if !users_file_exists && store.users.read().is_empty() {
+            let password = initial_password.ok_or_else(|| {
+                anyhow::anyhow!(
+                    "no users file found; initialize an admin with --init-admin before starting"
+                )
+            })?;
             store.create_user_internal("admin", &password, Role::Admin, true);
-            store.persist_or_warn("Failed to persist generated admin account");
+            store.persist()?;
             warn!("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━");
-            warn!(" No users found — created default admin account.");
+            warn!(" Created initial admin account.");
             warn!(" Username: admin");
-            warn!(" Password: {password}");
-            warn!(" Change this immediately in the web UI → /admin/users");
+            warn!(" Change the initial password in the web UI → /admin/users.");
             warn!("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━");
         }
         // Ensure older users.json files gain a persistent JWT secret.
-        store.persist_or_warn("Failed to persist users file");
+        if users_file_exists {
+            store.persist()?;
+        }
 
-        store
+        Ok(store)
+    }
+
+    #[cfg(unix)]
+    fn set_directory_permissions(config_dir: &Path) -> anyhow::Result<()> {
+        std::fs::set_permissions(config_dir, std::fs::Permissions::from_mode(0o700))?;
+        Ok(())
+    }
+
+    #[cfg(not(unix))]
+    fn set_directory_permissions(_config_dir: &Path) -> anyhow::Result<()> {
+        Ok(())
     }
 
     fn generate_secret() -> String {
@@ -176,6 +202,7 @@ impl UserStore {
                     password_hash: r.password_hash,
                     role: r.role,
                     must_change_password: r.must_change_password,
+                    session_version: r.session_version,
                 },
             );
         }
@@ -193,15 +220,38 @@ impl UserStore {
                 password_hash: u.password_hash.clone(),
                 role: u.role.clone(),
                 must_change_password: u.must_change_password,
+                session_version: u.session_version,
             })
             .collect();
         let file = UsersFile {
             users: records,
             jwt_secret: Some(self.jwt_secret.read().clone()),
         };
-        let json = serde_json::to_string_pretty(&file)?;
-        std::fs::write(&self.file_path, json)?;
-        Ok(())
+        let json = serde_json::to_vec_pretty(&file)?;
+        let parent = self
+            .file_path
+            .parent()
+            .ok_or_else(|| anyhow::anyhow!("users file has no parent directory"))?;
+        let temp_path = parent.join(format!(".users-{}.tmp", Uuid::new_v4()));
+
+        let result = (|| -> anyhow::Result<()> {
+            let mut options = OpenOptions::new();
+            options.write(true).create_new(true);
+            #[cfg(unix)]
+            options.mode(0o600);
+            let mut temp = options.open(&temp_path)?;
+            temp.write_all(&json)?;
+            temp.sync_all()?;
+            drop(temp);
+            std::fs::rename(&temp_path, &self.file_path)?;
+            File::open(parent)?.sync_all()?;
+            Ok(())
+        })();
+
+        if result.is_err() {
+            let _ = std::fs::remove_file(&temp_path);
+        }
+        result
     }
 
     fn persist_or_warn(&self, message: &str) {
@@ -242,6 +292,7 @@ impl UserStore {
             password_hash: hash,
             role,
             must_change_password: must_change,
+            session_version: 0,
         };
         self.users.write().insert(user.id.clone(), user.clone());
         user
@@ -274,6 +325,7 @@ impl UserStore {
             username: user.username.clone(),
             role: user.role.to_string(),
             must_change_password: user.must_change_password,
+            session_version: user.session_version,
             exp,
         };
         encode(
@@ -299,13 +351,16 @@ impl UserStore {
         if self.revoked.read().contains(&Self::token_hash(token)) {
             return None;
         }
-        decode::<Claims>(
+        let claims = decode::<Claims>(
             token,
             &DecodingKey::from_secret(self.jwt_secret.read().as_bytes()),
             &Validation::default(),
         )
         .ok()
-        .map(|d| d.claims)
+        .map(|d| d.claims)?;
+        let user = self.users.read().get(&claims.sub).cloned()?;
+        (user.role.to_string() == claims.role && user.session_version == claims.session_version)
+            .then_some(claims)
     }
 
     pub fn all_users(&self) -> Vec<UserView> {
@@ -331,12 +386,20 @@ impl UserStore {
     pub fn update_user(&self, id: &str, role: Option<Role>, new_password: Option<&str>) -> bool {
         let mut users = self.users.write();
         if let Some(u) = users.get_mut(id) {
+            let mut invalidate_sessions = false;
             if let Some(r) = role {
-                u.role = r;
+                if u.role != r {
+                    u.role = r;
+                    invalidate_sessions = true;
+                }
             }
             if let Some(p) = new_password {
                 u.password_hash = Self::hash_password(p).expect("hash failed");
                 u.must_change_password = false;
+                invalidate_sessions = true;
+            }
+            if invalidate_sessions {
+                u.session_version = u.session_version.saturating_add(1);
             }
             drop(users);
             self.persist_or_warn("Failed to persist updated user");
@@ -375,7 +438,8 @@ mod tests {
     #[test]
     fn test_auto_generated_password_auth() {
         let dir = tempdir().unwrap();
-        let store = UserStore::load_or_init(dir.path(), Some("generated-pass".to_string()));
+        let store =
+            UserStore::load_or_init(dir.path(), Some("generated-pass".to_string())).unwrap();
 
         // Verify it was created
         {
@@ -415,11 +479,148 @@ mod tests {
         let root = tempdir().unwrap();
         let config_dir = root.path().join("nested/config");
 
-        let store = UserStore::load_or_init(&config_dir, Some("generated-pass".to_string()));
+        let store =
+            UserStore::load_or_init(&config_dir, Some("generated-pass".to_string())).unwrap();
         assert!(store.authenticate("admin", "generated-pass").is_some());
         assert!(config_dir.join("users.json").exists());
 
-        let reloaded = UserStore::load_or_init(&config_dir, None);
+        let reloaded = UserStore::load_or_init(&config_dir, None).unwrap();
         assert!(reloaded.authenticate("admin", "generated-pass").is_some());
+    }
+
+    #[test]
+    fn corrupt_existing_account_file_is_not_replaced() {
+        let dir = tempdir().unwrap();
+        let users_file = dir.path().join("users.json");
+        let corrupt_contents = b"{ this is not valid json";
+        std::fs::write(&users_file, corrupt_contents).unwrap();
+
+        let result = UserStore::load_or_init(dir.path(), Some("generated-pass".to_string()));
+        assert!(
+            result.is_err(),
+            "a corrupt existing account file must prevent startup"
+        );
+        let error = result.err().unwrap();
+
+        assert!(error.to_string().contains("key must be a string"));
+        assert_eq!(std::fs::read(&users_file).unwrap(), corrupt_contents);
+    }
+
+    #[test]
+    fn missing_account_file_requires_an_initial_admin_password() {
+        let dir = tempdir().unwrap();
+
+        let result = UserStore::load_or_init(dir.path(), None);
+
+        assert!(result.is_err());
+        assert!(!dir.path().join("users.json").exists());
+    }
+
+    #[test]
+    fn legacy_account_files_default_the_session_version() {
+        let dir = tempdir().unwrap();
+        let store =
+            UserStore::load_or_init(dir.path(), Some("admin-password".to_string())).unwrap();
+        drop(store);
+        let users_file = dir.path().join("users.json");
+        let mut file: serde_json::Value =
+            serde_json::from_slice(&std::fs::read(&users_file).unwrap()).unwrap();
+        file["users"][0]
+            .as_object_mut()
+            .unwrap()
+            .remove("session_version");
+        std::fs::write(&users_file, serde_json::to_vec(&file).unwrap()).unwrap();
+
+        let reloaded = UserStore::load_or_init(dir.path(), None).unwrap();
+
+        assert!(reloaded.authenticate("admin", "admin-password").is_some());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn account_store_uses_owner_only_permissions() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let root = tempdir().unwrap();
+        let config_dir = root.path().join("auth");
+        let _ = UserStore::load_or_init(&config_dir, Some("admin-password".to_string())).unwrap();
+
+        assert_eq!(
+            std::fs::metadata(&config_dir).unwrap().permissions().mode() & 0o777,
+            0o700
+        );
+        assert_eq!(
+            std::fs::metadata(config_dir.join("users.json"))
+                .unwrap()
+                .permissions()
+                .mode()
+                & 0o777,
+            0o600
+        );
+    }
+
+    #[test]
+    fn password_change_invalidates_existing_tokens() {
+        let dir = tempdir().unwrap();
+        let store =
+            UserStore::load_or_init(dir.path(), Some("admin-password".to_string())).unwrap();
+        let user = store
+            .create_user("alice", "initial-password", Role::Viewer)
+            .unwrap();
+        let token =
+            store.create_token(&store.authenticate("alice", "initial-password").unwrap(), 1);
+
+        assert!(store.update_user(&user.id, None, Some("new-password")));
+
+        assert!(store.verify_token(&token).is_none());
+    }
+
+    #[test]
+    fn password_change_invalidation_survives_reload() {
+        let dir = tempdir().unwrap();
+        let store =
+            UserStore::load_or_init(dir.path(), Some("admin-password".to_string())).unwrap();
+        let user = store
+            .create_user("alice", "initial-password", Role::Viewer)
+            .unwrap();
+        let token =
+            store.create_token(&store.authenticate("alice", "initial-password").unwrap(), 1);
+
+        assert!(store.update_user(&user.id, None, Some("new-password")));
+        drop(store);
+
+        let reloaded = UserStore::load_or_init(dir.path(), None).unwrap();
+
+        assert!(reloaded.verify_token(&token).is_none());
+    }
+
+    #[test]
+    fn role_change_invalidates_existing_tokens() {
+        let dir = tempdir().unwrap();
+        let store =
+            UserStore::load_or_init(dir.path(), Some("admin-password".to_string())).unwrap();
+        let user = store
+            .create_user("alice", "alice-password", Role::Viewer)
+            .unwrap();
+        let token = store.create_token(&store.authenticate("alice", "alice-password").unwrap(), 1);
+
+        assert!(store.update_user(&user.id, Some(Role::Operator), None));
+
+        assert!(store.verify_token(&token).is_none());
+    }
+
+    #[test]
+    fn deleted_user_tokens_are_invalidated() {
+        let dir = tempdir().unwrap();
+        let store =
+            UserStore::load_or_init(dir.path(), Some("admin-password".to_string())).unwrap();
+        let user = store
+            .create_user("alice", "alice-password", Role::Viewer)
+            .unwrap();
+        let token = store.create_token(&store.authenticate("alice", "alice-password").unwrap(), 1);
+
+        assert!(store.delete_user(&user.id));
+
+        assert!(store.verify_token(&token).is_none());
     }
 }
