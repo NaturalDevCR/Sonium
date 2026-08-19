@@ -559,6 +559,8 @@ enum PathSourceKind {
 struct FileFingerprint {
     len: u64,
     modified: Option<SystemTime>,
+    /// Portable replacement identity for platforms without a Unix inode.
+    created: Option<SystemTime>,
     #[cfg(unix)]
     inode: u64,
 }
@@ -791,6 +793,7 @@ impl FileFingerprint {
         Self {
             len: metadata.len(),
             modified: metadata.modified().ok(),
+            created: metadata.created().ok(),
             #[cfg(unix)]
             inode: {
                 use std::os::unix::fs::MetadataExt;
@@ -1241,7 +1244,21 @@ mod tests {
         );
 
         std::fs::write(&replacement_path, &replacement).unwrap();
+        let original_mtime = std::fs::metadata(&path).unwrap().modified().unwrap();
+        let preserved_mtime = std::fs::File::open(&replacement_path)
+            .unwrap()
+            .set_times(std::fs::FileTimes::new().set_modified(original_mtime))
+            .is_ok();
+        // Windows cannot rename over an existing destination. The supervisor
+        // cannot observe this synchronous remove+rename pair until we await.
+        std::fs::remove_file(&path).unwrap();
         std::fs::rename(&replacement_path, &path).unwrap();
+        if preserved_mtime {
+            assert_eq!(
+                std::fs::metadata(&path).unwrap().modified().unwrap(),
+                original_mtime
+            );
+        }
 
         let replacement_frame = timeout(Duration::from_secs(1), audio.recv())
             .await
@@ -1339,6 +1356,125 @@ mod tests {
             .unwrap()
             .unwrap();
 
+        std::fs::remove_file(path).unwrap();
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn fifo_reader_reopens_after_a_writer_disconnects() {
+        // This catches losing FIFO recovery after switching to nonblocking
+        // receivers: separate writers must publish frames across an EOF.
+        use tokio::net::unix::pipe;
+
+        let path =
+            std::env::temp_dir().join(format!("sonium-fifo-reopen-{}", uuid::Uuid::new_v4()));
+        create_fifo(&path);
+        let first = vec![0x33; 16];
+        let second = vec![0x44; 16];
+        let state = Arc::new(ServerState::new(
+            Arc::new(sonium_control::EventBus::new()),
+            None,
+            vec![],
+            vec![],
+        ));
+        state.register_stream(
+            "fifo-reopen-test",
+            None,
+            "pcm",
+            "800Hz/16bit/1ch",
+            path.to_string_lossy(),
+            1000,
+            false,
+            10,
+            false,
+            None,
+            false,
+        );
+        let bc = Arc::new(Broadcaster::new("fifo-reopen-test", 1000));
+        let mut audio = bc.subscribe();
+        let mut events = state.events().subscribe();
+        let cancel = CancellationToken::new();
+        let task_cancel = cancel.clone();
+        let task_state = state.clone();
+        let task_bc = bc.clone();
+        let task_path = path.to_string_lossy().to_string();
+        let task = tokio::spawn(async move {
+            let mut encoder =
+                make_encoder("pcm", sonium_common::SampleFormat::new(800, 16, 1)).unwrap();
+            let mut pcm_buf = vec![0u8; 16];
+            let mut enc_buf = Vec::new();
+            run_reopening_reader(
+                &task_path,
+                &mut *encoder,
+                task_bc,
+                &mut pcm_buf,
+                &mut enc_buf,
+                "fifo-reopen-test",
+                &task_state,
+                None,
+                false,
+                10,
+                task_cancel,
+            )
+            .await
+        });
+
+        wait_for_stream_status(&mut events, StreamStatus::Playing).await;
+        let mut writer = pipe::OpenOptions::new().open_sender(&path).unwrap();
+        writer.write_all(&first).await.unwrap();
+        drop(writer);
+        let first_frame = timeout(Duration::from_secs(1), audio.recv())
+            .await
+            .expect("first FIFO writer should publish a frame")
+            .unwrap();
+        assert!(first_frame.wire_bytes.ends_with(&first));
+
+        wait_for_stream_status(&mut events, StreamStatus::Recovering).await;
+        wait_for_stream_status(&mut events, StreamStatus::Playing).await;
+        let mut writer = pipe::OpenOptions::new().open_sender(&path).unwrap();
+        writer.write_all(&second).await.unwrap();
+        drop(writer);
+        let second_frame = timeout(Duration::from_secs(1), audio.recv())
+            .await
+            .expect("second FIFO writer should publish after reopening")
+            .unwrap();
+        assert!(second_frame.wire_bytes.ends_with(&second));
+
+        cancel.cancel();
+        timeout(Duration::from_secs(1), task)
+            .await
+            .expect("FIFO reader cancellation should finish")
+            .unwrap()
+            .unwrap();
+        std::fs::remove_file(path).unwrap();
+    }
+
+    async fn wait_for_stream_status(
+        events: &mut tokio::sync::broadcast::Receiver<Event>,
+        expected: StreamStatus,
+    ) {
+        loop {
+            match timeout(Duration::from_secs(1), events.recv())
+                .await
+                .expect("stream status transition should arrive")
+                .unwrap()
+            {
+                Event::StreamStatus { status, .. } if status == expected => return,
+                _ => continue,
+            }
+        }
+    }
+
+    #[test]
+    fn file_fingerprint_keeps_creation_identity_when_available() {
+        // This catches non-Unix fingerprints that only use size and mtime,
+        // which can miss a same-sized replacement with preserved timestamps.
+        let path =
+            std::env::temp_dir().join(format!("sonium-fingerprint-{}", uuid::Uuid::new_v4()));
+        std::fs::write(&path, b"fingerprint").unwrap();
+        let metadata = std::fs::metadata(&path).unwrap();
+        let fingerprint = FileFingerprint::from_metadata(&metadata);
+        assert_eq!(fingerprint.created, metadata.created().ok());
         std::fs::remove_file(path).unwrap();
     }
 
