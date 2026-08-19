@@ -5,6 +5,7 @@ use axum::{
     Router,
 };
 use rust_embed::RustEmbed;
+use std::net::SocketAddr;
 use std::path::PathBuf;
 use std::sync::Arc;
 use tokio::sync::mpsc;
@@ -23,7 +24,7 @@ pub async fn run(
     auth: Arc<UserStore>,
     config_path: PathBuf,
     reload_tx: Option<mpsc::Sender<config_api::ReloadRequest>>,
-    port: u16,
+    addr: SocketAddr,
 ) -> anyhow::Result<()> {
     let config_state = config_api::ConfigApiState {
         config_path,
@@ -43,7 +44,6 @@ pub async fn run(
         // including the api::router middleware that guards read/write endpoints.
         .layer(axum::Extension(auth));
 
-    let addr = format!("0.0.0.0:{port}");
     let listener = tokio::net::TcpListener::bind(&addr).await?;
     info!("Control API + Web UI on http://{addr}");
     axum::serve(listener, app).await?;

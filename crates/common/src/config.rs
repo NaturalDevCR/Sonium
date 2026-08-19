@@ -4,6 +4,38 @@ use sonium_transport::{TransportConfig, TransportMode};
 
 use crate::SampleFormat;
 
+/// Error returned when a protocol value is rejected before it can affect
+/// server state or metric labels.
+pub type ProtocolError = crate::SoniumError;
+
+/// Largest permitted stable client identifier in bytes.
+///
+/// Sonium derives IDs as `hostname-instance`; 96 bytes leaves room for the
+/// longest practical hostname and instance suffix while keeping externally
+/// supplied state keys small.
+pub const MAX_CLIENT_ID_LEN: usize = 96;
+
+/// Validate a client-supplied stable identifier before admitting a session.
+///
+/// This is an input bound, not client authentication. Media authentication is
+/// deliberately outside this trusted-LAN phase.
+pub fn validate_client_id(id: &str) -> Result<(), ProtocolError> {
+    if id.is_empty() || id.len() > MAX_CLIENT_ID_LEN {
+        return Err(ProtocolError::Protocol(
+            "client ID must be 1 to 96 ASCII bytes".into(),
+        ));
+    }
+    if !id
+        .bytes()
+        .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_'))
+    {
+        return Err(ProtocolError::Protocol(
+            "client ID may contain only ASCII letters, digits, '-' and '_'".into(),
+        ));
+    }
+    Ok(())
+}
+
 /// Top-level config loaded from `sonium.toml` (or defaults — no file required).
 ///
 /// Example layout:
@@ -53,10 +85,17 @@ pub struct ServerConfig {
 #[serde(default, deny_unknown_fields)]
 pub struct ServerNet {
     pub bind: String,
+    /// Bind address for the control API, web UI, and metrics endpoint.
+    ///
+    /// This intentionally defaults to loopback because the control plane is
+    /// authenticated but should not be exposed accidentally on every adapter.
+    pub control_bind: String,
     /// TCP port for the audio stream protocol.
     pub stream_port: u16,
     /// HTTP/WS port for the control API and web UI.
     pub control_port: u16,
+    /// Maximum concurrent TCP client sessions, including clients awaiting Hello.
+    pub max_clients: usize,
     /// Advertise via mDNS so clients can discover the server automatically.
     pub mdns: bool,
     /// Advertise `_snapcast._tcp` for legacy Snapcast client discovery.
@@ -172,8 +211,10 @@ impl Default for ServerNet {
     fn default() -> Self {
         Self {
             bind: "0.0.0.0".into(),
+            control_bind: "127.0.0.1".into(),
             stream_port: 1710,
             control_port: 1711,
+            max_clients: 64,
             mdns: true,
             snapcast_compat: false,
             audio: AudioConfig::default(),
@@ -258,6 +299,14 @@ impl ServerConfig {
 
     /// Check values that TOML's type system cannot express safely.
     pub fn validate(&self) -> anyhow::Result<()> {
+        self.server
+            .bind
+            .parse::<std::net::IpAddr>()
+            .with_context(|| "server.bind must be an IP address")?;
+        self.server
+            .control_bind
+            .parse::<std::net::IpAddr>()
+            .with_context(|| "server.control_bind must be an IP address")?;
         if self.server.stream_port == 0 {
             anyhow::bail!("server.stream_port must be between 1 and 65535");
         }
@@ -266,6 +315,9 @@ impl ServerConfig {
         }
         if self.server.stream_port == self.server.control_port {
             anyhow::bail!("server.stream_port and server.control_port must differ");
+        }
+        if !(1..=256).contains(&self.server.max_clients) {
+            anyhow::bail!("server.max_clients must be between 1 and 256");
         }
 
         validate_buffer_and_chunk(
@@ -616,6 +668,19 @@ source = "-"
             cfg.server.transport.mode,
             sonium_transport::TransportMode::Tcp
         );
+    }
+
+    #[test]
+    fn defaults_keep_control_listener_on_loopback_with_a_bounded_client_cap() {
+        let cfg = ServerConfig::default();
+        let control_bind: std::net::IpAddr = cfg
+            .server
+            .control_bind
+            .parse()
+            .expect("the default control bind must be an IP address");
+
+        assert!(control_bind.is_loopback());
+        assert!((1..=256).contains(&cfg.server.max_clients));
     }
 
     #[test]

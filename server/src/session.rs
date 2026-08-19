@@ -19,8 +19,8 @@ use std::time::{Duration, Instant};
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
 use tokio::net::tcp::{OwnedReadHalf, OwnedWriteHalf};
 use tokio::net::{TcpStream, UdpSocket};
-use tokio::sync::broadcast;
 use tokio::sync::mpsc;
+use tokio::sync::{broadcast, OwnedSemaphorePermit, Semaphore};
 use tokio::time::timeout;
 use tracing::{debug, info, instrument, warn};
 
@@ -31,7 +31,10 @@ use tracing::{debug, info, instrument, warn};
 /// backpressure from stalling the session select loop.
 const AUDIO_QUEUE_CAPACITY: usize = 1024;
 
-use sonium_common::config::ServerConfig;
+use sonium_common::{
+    config::{validate_client_id, ProtocolError, ServerConfig},
+    SoniumError,
+};
 use sonium_control::{ws::Event, ServerState};
 use sonium_protocol::{
     header::{validate_payload_size, HEADER_SIZE},
@@ -62,6 +65,21 @@ const STABLE_STREAK_REQUIRED: u32 = 5;
 const AUTO_BUFFER_CLEAN_INTERVALS_BEFORE_STEP_DOWN: u32 = 8;
 const AUTO_BUFFER_RTP_BURST_THRESHOLD: u32 = 6;
 const AUTO_BUFFER_STALE_BURST_THRESHOLD: u32 = 4;
+
+/// A global admission slot held for the complete lifetime of one TCP session.
+/// Dropping it releases capacity on every normal, error, or cancellation path.
+pub struct ClientSessionPermit {
+    _permit: OwnedSemaphorePermit,
+}
+
+impl ClientSessionPermit {
+    pub fn try_acquire(capacity: Arc<Semaphore>) -> Result<Self, ProtocolError> {
+        capacity
+            .try_acquire_owned()
+            .map(|permit| Self { _permit: permit })
+            .map_err(|_| SoniumError::Protocol("maximum concurrent client sessions reached".into()))
+    }
+}
 
 /// Dedicated TCP writer task.  Owns the `OwnedWriteHalf` exclusively so the
 /// select loop never blocks on a TCP write.  Audio frames arrive via a bounded
@@ -423,6 +441,7 @@ fn next_id() -> u16 {
 }
 
 #[instrument(skip_all, fields(%peer, client_id = tracing::field::Empty))]
+#[allow(clippy::too_many_arguments)] // Session dependencies are passed independently for testability.
 pub async fn handle(
     mut stream: TcpStream,
     peer: SocketAddr,
@@ -431,6 +450,7 @@ pub async fn handle(
     state: Arc<ServerState>,
     udp_socket: Option<Arc<UdpSocket>>,
     nack_router: crate::nack_router::NackRouter,
+    _permit: ClientSessionPermit,
 ) -> anyhow::Result<()> {
     // ── TCP tuning ────────────────────────────────────────────────────────
     // Ensure TCP_NODELAY is set (main.rs sets it too, but belt-and-braces).
@@ -461,9 +481,8 @@ pub async fn handle(
             ));
         };
 
+    validate_client_id(&client_id)?;
     tracing::Span::current().record("client_id", client_id.as_str());
-    metrics::TOTAL_CONNECTIONS.inc();
-    metrics::CONNECTED_CLIENTS.inc();
     state.client_connected(
         &client_id,
         &hostname,
@@ -473,6 +492,8 @@ pub async fn handle(
         peer,
         proto_ver,
     );
+    metrics::TOTAL_CONNECTIONS.inc();
+    metrics::CONNECTED_CLIENTS.inc();
 
     let (reader, writer) = stream.into_split();
     let result = session_loop(
@@ -1197,6 +1218,7 @@ where
 mod tests {
     use super::*;
     use sonium_protocol::messages::HealthReport;
+    use tokio::sync::Semaphore;
 
     const BUF_MS: u32 = 1200;
 
@@ -1214,6 +1236,42 @@ mod tests {
 
     fn feed(tracker: &mut HealthTransitionTracker, report: &HealthReport) -> AudioHealthState {
         tracker.observe("test-client", "tcp", report, BUF_MS)
+    }
+
+    #[test]
+    fn client_id_validation_rejects_unsafe_or_oversized_ids() {
+        assert!(validate_client_id("bedroom-pi-1").is_ok());
+
+        for invalid in [
+            "",
+            "living room",
+            "living/room",
+            "living.room",
+            &"a".repeat(97),
+        ] {
+            assert!(
+                validate_client_id(invalid).is_err(),
+                "{invalid:?} must not become a state or metric label"
+            );
+        }
+    }
+
+    #[test]
+    fn global_session_capacity_releases_after_disconnect_or_error() {
+        let capacity = Arc::new(Semaphore::new(1));
+        let first =
+            ClientSessionPermit::try_acquire(capacity.clone()).expect("first session admitted");
+
+        assert!(
+            ClientSessionPermit::try_acquire(capacity.clone()).is_err(),
+            "a session over the configured global cap must be rejected"
+        );
+
+        drop(first);
+        assert!(
+            ClientSessionPermit::try_acquire(capacity).is_ok(),
+            "dropping a session permit must release capacity for the next client"
+        );
     }
 
     #[test]

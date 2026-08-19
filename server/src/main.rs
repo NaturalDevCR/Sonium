@@ -9,8 +9,9 @@ mod streamreader;
 use anyhow::Context;
 use clap::Parser;
 use socket2::{SockRef, TcpKeepalive};
-use std::{path::PathBuf, sync::Arc};
+use std::{net::SocketAddr, path::PathBuf, sync::Arc};
 use tokio::net::{TcpListener, TcpStream, UdpSocket};
+use tokio::sync::Semaphore;
 use tokio::task::JoinHandle;
 use tokio_util::sync::CancellationToken;
 use tracing::{info, warn};
@@ -90,6 +91,16 @@ async fn main() -> anyhow::Result<()> {
     }
     cfg.validate()
         .with_context(|| format!("invalid configuration {}", cli.config.display()))?;
+    let audio_bind = cfg
+        .server
+        .bind
+        .parse()
+        .expect("validated server.bind must be an IP address");
+    let control_bind = cfg
+        .server
+        .control_bind
+        .parse()
+        .expect("validated server.control_bind must be an IP address");
 
     let config_dir = cli
         .config
@@ -244,11 +255,11 @@ async fn main() -> anyhow::Result<()> {
         let state = state.clone();
         let auth = auth.clone();
         let config_path = cli.config.clone();
-        let port = cfg.server.control_port;
+        let addr = SocketAddr::new(control_bind, cfg.server.control_port);
         let cancel = shutdown.clone();
         tokio::spawn(async move {
             tokio::select! {
-                result = control_server::run(state, auth, config_path, None, port) => {
+                result = control_server::run(state, auth, config_path, None, addr) => {
                     if let Err(e) = result {
                         warn!("Control server error: {e}");
                     }
@@ -281,7 +292,7 @@ async fn main() -> anyhow::Result<()> {
 
     // ── UDP socket for RTP/UDP media delivery (Phase 2) ──────────────────
     let udp_socket: Option<Arc<UdpSocket>> = if effective_udp_port > 0 {
-        let udp_addr = format!("{}:{}", cfg.server.bind, effective_udp_port);
+        let udp_addr = SocketAddr::new(audio_bind, effective_udp_port);
         match UdpSocket::bind(&udp_addr).await {
             Ok(sock) => {
                 info!("RTP/UDP media socket bound to {udp_addr}");
@@ -306,11 +317,12 @@ async fn main() -> anyhow::Result<()> {
     }
 
     // ── TCP listener for audio clients ────────────────────────────────────
-    let addr = format!("{}:{}", cfg.server.bind, cfg.server.stream_port);
+    let addr = SocketAddr::new(audio_bind, cfg.server.stream_port);
     let listener = TcpListener::bind(&addr)
         .await
         .with_context(|| format!("cannot bind to {addr}"))?;
     info!("Listening for audio clients on {addr}");
+    let session_capacity = Arc::new(Semaphore::new(cfg.server.max_clients));
 
     // ── Accept loop with graceful shutdown ─────────────────────────────────
     let shutdown_signal = shutdown_signal();
@@ -320,6 +332,13 @@ async fn main() -> anyhow::Result<()> {
         tokio::select! {
             accept = listener.accept() => {
                 let (stream, peer) = accept?;
+                let permit = match session::ClientSessionPermit::try_acquire(session_capacity.clone()) {
+                    Ok(permit) => permit,
+                    Err(error) => {
+                        warn!(%peer, %error, "Rejecting client: session capacity reached");
+                        continue;
+                    }
+                };
                 let _ = stream.set_nodelay(true);
                 configure_tcp_stream(&stream);
                 info!(%peer, "New client connected");
@@ -331,7 +350,7 @@ async fn main() -> anyhow::Result<()> {
                 let nack_rtr = nack_router.clone();
                 tokio::spawn(async move {
                     tokio::select! {
-                        result = session::handle(stream, peer, registry, session_cfg, state, udp_sock, nack_rtr) => {
+                        result = session::handle(stream, peer, registry, session_cfg, state, udp_sock, nack_rtr, permit) => {
                             if let Err(e) = result {
                                 warn!(%peer, "Session error: {e}");
                             }

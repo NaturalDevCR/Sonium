@@ -17,6 +17,7 @@ use std::sync::Arc;
 
 use crate::persistence::{PersistedClient, PersistedGroup, PersistedStream, PersistenceStore};
 use crate::ws::EventBus;
+use sonium_common::config::validate_client_id;
 use sonium_protocol::messages::{EqBand, HealthReport};
 use sonium_transport::TransportMode;
 
@@ -177,6 +178,10 @@ impl ServerState {
         saved_clients: Vec<PersistedClient>,
         saved_streams: Vec<PersistedStream>,
     ) -> Self {
+        let saved_clients: Vec<PersistedClient> = saved_clients
+            .into_iter()
+            .filter(|client| validate_client_id(&client.id).is_ok())
+            .collect();
         let mut groups = HashMap::new();
         let default_grp = Group {
             id: "default".into(),
@@ -367,6 +372,9 @@ impl ServerState {
         protocol_version: u32,
     ) {
         let id = id.into();
+        if validate_client_id(&id).is_err() {
+            return;
+        }
         let hostname = hostname.into();
 
         // Restore settings from live state first, then the startup snapshot.
@@ -934,6 +942,44 @@ mod tests {
 
     fn connect(s: &ServerState, id: &str) {
         s.client_connected(id, "pi", "Sonium", "linux", "aarch64", addr(), 2);
+    }
+
+    #[test]
+    fn unsafe_persisted_client_ids_are_not_restored() {
+        let saved_clients = vec![PersistedClient {
+            id: "living room/speaker".into(),
+            hostname: "pi".into(),
+            display_name: None,
+            volume: 100,
+            muted: false,
+            latency_ms: 0,
+            observability_enabled: false,
+            group_id: "default".into(),
+            last_seen: Utc::now(),
+        }];
+        let s = ServerState::new(Arc::new(EventBus::new()), None, saved_clients, vec![]);
+
+        assert!(
+            s.get_client("living room/speaker").is_none(),
+            "an unadmitted ID must not occupy persistent server state"
+        );
+    }
+
+    #[test]
+    fn unsafe_connected_client_ids_are_not_added_or_persisted() {
+        let s = state();
+
+        s.client_connected(
+            "living room/speaker",
+            "pi",
+            "Sonium",
+            "linux",
+            "aarch64",
+            addr(),
+            2,
+        );
+
+        assert!(s.all_clients().is_empty());
     }
 
     #[test]
