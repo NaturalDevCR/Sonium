@@ -1,7 +1,8 @@
 use bytes::Bytes;
 use std::io;
 use std::sync::Arc;
-use tokio::io::AsyncReadExt;
+use std::time::SystemTime;
+use tokio::io::{AsyncRead, AsyncReadExt};
 use tokio::net::{TcpListener, TcpStream};
 use tokio::process::Command;
 use tokio::time::Duration;
@@ -374,7 +375,7 @@ async fn run_tcp(
             loop {
                 let (socket, peer) = listener.accept().await?;
                 info!(stream = stream_id, %peer, "TCP source connected");
-                if let ReaderEnd::Error(e) = run_reader(
+                if let ReaderEnd::Error { error: e, .. } = run_reader(
                     socket,
                     encoder,
                     bc.clone(),
@@ -490,13 +491,13 @@ async fn run_pipe(
         }
 
         match result {
-            ReaderEnd::Error(e) => {
+            ReaderEnd::Error { error: e, .. } => {
                 warn!(
                     stream = stream_id,
                     "Audio source read failed; restarting external process: {e}"
                 );
             }
-            ReaderEnd::Eof => {
+            ReaderEnd::Eof { .. } => {
                 warn!(
                     stream = stream_id,
                     "Audio source closed; restarting external process"
@@ -542,6 +543,26 @@ fn parse_pipe_uri(uri: &str) -> anyhow::Result<(String, Vec<String>)> {
 const REOPEN_BACKOFF_INITIAL: Duration = Duration::from_millis(50);
 const REOPEN_BACKOFF_MAX: Duration = Duration::from_secs(2);
 
+type PathReader = Box<dyn AsyncRead + Send + Unpin>;
+
+struct OpenedPathSource {
+    reader: PathReader,
+    kind: PathSourceKind,
+}
+
+enum PathSourceKind {
+    Fifo,
+    Regular(FileFingerprint),
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct FileFingerprint {
+    len: u64,
+    modified: Option<SystemTime>,
+    #[cfg(unix)]
+    inode: u64,
+}
+
 /// Reopen a path-backed source after EOF or a recoverable read/open failure.
 ///
 /// This is intentionally used only for ordinary paths. Stdin, TCP, and
@@ -573,36 +594,65 @@ async fn run_reopening_reader(
         };
 
         match open {
-            Ok(file) => {
+            Ok(opened) => {
                 state.set_stream_status(stream_id, StreamStatus::Playing);
-                match run_reader(
-                    file,
-                    encoder,
-                    bc.clone(),
-                    pcm_buf,
-                    enc_buf,
-                    stream_id,
-                    state,
-                    idle_timeout,
-                    silence_on_idle,
-                    chunk_ms,
-                )
-                .await
-                {
-                    ReaderEnd::Eof => {
+                let end = tokio::select! {
+                    end = run_reader(
+                        opened.reader,
+                        encoder,
+                        bc.clone(),
+                        pcm_buf,
+                        enc_buf,
+                        stream_id,
+                        state,
+                        idle_timeout,
+                        silence_on_idle,
+                        chunk_ms,
+                    ) => end,
+                    _ = cancel.cancelled() => return Ok(()),
+                };
+                let received_frame = end.received_frame();
+                match end {
+                    ReaderEnd::Eof { .. } => {
                         info!(stream = stream_id, "File/FIFO input closed; reopening");
                     }
-                    ReaderEnd::Error(error) if terminal_source_error(&error) => {
+                    ReaderEnd::Error { error, .. } if terminal_source_error(&error) => {
                         state.set_stream_status(stream_id, StreamStatus::Error);
                         return Err(anyhow::anyhow!(
                             "[{stream_id}] terminal read error from {source}: {error}"
                         ));
                     }
-                    ReaderEnd::Error(error) => {
+                    ReaderEnd::Error { error, .. } => {
                         warn!(
                             stream = stream_id,
                             "File/FIFO read error; reopening: {error}"
                         );
+                    }
+                }
+
+                if received_frame {
+                    attempt = 0;
+                }
+
+                match opened.kind {
+                    PathSourceKind::Fifo => {
+                        if !wait_before_reopen(stream_id, state, &mut attempt, &cancel).await {
+                            return Ok(());
+                        }
+                    }
+                    PathSourceKind::Regular(fingerprint) => {
+                        if !wait_for_regular_source_change(
+                            source,
+                            &fingerprint,
+                            stream_id,
+                            state,
+                            &mut attempt,
+                            &cancel,
+                        )
+                        .await?
+                        {
+                            return Ok(());
+                        }
                     }
                 }
             }
@@ -620,38 +670,175 @@ async fn run_reopening_reader(
             }
         }
 
-        attempt = attempt.saturating_add(1);
-        let retry = reopen_backoff(attempt);
-        state.set_stream_recovering(stream_id, attempt, retry.as_millis() as u64);
-        info!(
-            stream = stream_id,
-            attempt,
-            retry_in_ms = retry.as_millis(),
-            "Waiting to reopen file/FIFO input"
-        );
-
-        tokio::select! {
-            _ = tokio::time::sleep(retry) => {}
-            _ = cancel.cancelled() => return Ok(()),
+        if !wait_before_reopen(stream_id, state, &mut attempt, &cancel).await {
+            return Ok(());
         }
     }
 }
 
-async fn open_file_source(source: &str) -> io::Result<tokio::fs::File> {
+async fn wait_before_reopen(
+    stream_id: &str,
+    state: &Arc<ServerState>,
+    attempt: &mut u32,
+    cancel: &CancellationToken,
+) -> bool {
+    *attempt = attempt.saturating_add(1);
+    let retry = reopen_backoff(*attempt);
+    state.set_stream_recovering(stream_id, *attempt, retry.as_millis() as u64);
+    info!(
+        stream = stream_id,
+        attempt = *attempt,
+        retry_in_ms = retry.as_millis(),
+        "Waiting to reopen file/FIFO input"
+    );
+    tokio::select! {
+        _ = tokio::time::sleep(retry) => true,
+        _ = cancel.cancelled() => false,
+    }
+}
+
+async fn wait_for_regular_source_change(
+    source: &str,
+    fingerprint: &FileFingerprint,
+    stream_id: &str,
+    state: &Arc<ServerState>,
+    attempt: &mut u32,
+    cancel: &CancellationToken,
+) -> anyhow::Result<bool> {
+    loop {
+        if !wait_before_reopen(stream_id, state, attempt, cancel).await {
+            return Ok(false);
+        }
+
+        match regular_file_fingerprint(source).await {
+            Ok(Some(current)) if current != *fingerprint => return Ok(true),
+            Ok(Some(_)) => continue,
+            // Removal is a source change. The next open will retain its
+            // recoverable NotFound behavior until a producer recreates it.
+            Ok(None) => return Ok(true),
+            Err(error) if terminal_source_error(&error) => {
+                state.set_stream_status(stream_id, StreamStatus::Error);
+                return Err(anyhow::anyhow!(
+                    "[{stream_id}] cannot inspect {source}: {error}"
+                ));
+            }
+            Err(error) => {
+                warn!(
+                    stream = stream_id,
+                    "File change check failed; reopening: {error}"
+                );
+                return Ok(true);
+            }
+        }
+    }
+}
+
+async fn open_file_source(source: &str) -> io::Result<OpenedPathSource> {
+    let metadata = tokio::fs::metadata(source).await?;
+    if metadata.is_dir() {
+        return Err(io::Error::new(
+            io::ErrorKind::IsADirectory,
+            "source path is a directory",
+        ));
+    }
+
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::FileTypeExt;
+
+        if metadata.file_type().is_fifo() {
+            let reader = tokio::net::unix::pipe::OpenOptions::new().open_receiver(source)?;
+            return Ok(OpenedPathSource {
+                reader: Box::new(reader),
+                kind: PathSourceKind::Fifo,
+            });
+        }
+    }
+
+    if !metadata.is_file() {
+        return Err(io::Error::new(
+            io::ErrorKind::Unsupported,
+            "source path is neither a regular file nor FIFO",
+        ));
+    }
+
+    let fingerprint = FileFingerprint::from_metadata(&metadata);
+    let file = tokio::fs::File::open(source).await?;
+    Ok(OpenedPathSource {
+        reader: Box::new(file),
+        kind: PathSourceKind::Regular(fingerprint),
+    })
+}
+
+async fn regular_file_fingerprint(source: &str) -> io::Result<Option<FileFingerprint>> {
     match tokio::fs::metadata(source).await {
+        Ok(metadata) if metadata.is_file() => Ok(Some(FileFingerprint::from_metadata(&metadata))),
         Ok(metadata) if metadata.is_dir() => Err(io::Error::new(
-            io::ErrorKind::InvalidInput,
+            io::ErrorKind::IsADirectory,
             "source path is a directory",
         )),
-        Ok(_) | Err(_) => tokio::fs::File::open(source).await,
+        Ok(_) => Err(io::Error::new(
+            io::ErrorKind::Unsupported,
+            "source path is no longer a regular file",
+        )),
+        Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(None),
+        Err(error) => Err(error),
+    }
+}
+
+impl FileFingerprint {
+    fn from_metadata(metadata: &std::fs::Metadata) -> Self {
+        Self {
+            len: metadata.len(),
+            modified: metadata.modified().ok(),
+            #[cfg(unix)]
+            inode: {
+                use std::os::unix::fs::MetadataExt;
+                metadata.ino()
+            },
+        }
     }
 }
 
 fn terminal_source_error(error: &io::Error) -> bool {
     matches!(
         error.kind(),
-        io::ErrorKind::PermissionDenied | io::ErrorKind::InvalidInput | io::ErrorKind::Unsupported
-    )
+        io::ErrorKind::PermissionDenied
+            | io::ErrorKind::InvalidInput
+            | io::ErrorKind::InvalidData
+            | io::ErrorKind::NotADirectory
+            | io::ErrorKind::IsADirectory
+            | io::ErrorKind::TooManyLinks
+            | io::ErrorKind::InvalidFilename
+            | io::ErrorKind::Unsupported
+    ) || is_symlink_loop(error)
+}
+
+fn is_symlink_loop(error: &io::Error) -> bool {
+    #[cfg(any(target_os = "linux", target_os = "android"))]
+    const ELOOP: i32 = 40;
+    #[cfg(any(
+        target_os = "macos",
+        target_os = "ios",
+        target_os = "freebsd",
+        target_os = "openbsd",
+        target_os = "netbsd",
+        target_os = "dragonfly"
+    ))]
+    const ELOOP: i32 = 62;
+    #[cfg(not(any(
+        target_os = "linux",
+        target_os = "android",
+        target_os = "macos",
+        target_os = "ios",
+        target_os = "freebsd",
+        target_os = "openbsd",
+        target_os = "netbsd",
+        target_os = "dragonfly"
+    )))]
+    const ELOOP: i32 = -1;
+
+    error.raw_os_error() == Some(ELOOP)
 }
 
 fn reopen_backoff(attempt: u32) -> Duration {
@@ -665,7 +852,7 @@ fn reopen_backoff(attempt: u32) -> Duration {
 // ── Core read loop (with idle detection) ─────────────────────────────────
 
 #[allow(clippy::too_many_arguments)]
-async fn run_reader<R: AsyncReadExt + Unpin>(
+async fn run_reader<R: AsyncRead + Unpin>(
     mut src: R,
     encoder: &mut (dyn sonium_codec::Encoder + Send),
     bc: Arc<Broadcaster>,
@@ -684,6 +871,7 @@ async fn run_reader<R: AsyncReadExt + Unpin>(
         .checked_sub(level_interval)
         .unwrap_or_else(tokio::time::Instant::now);
     let mut pcm_filled = 0usize;
+    let mut received_frame = false;
 
     loop {
         // ── Try to read one frame ─────────────────────────────────────────
@@ -692,11 +880,14 @@ async fn run_reader<R: AsyncReadExt + Unpin>(
                 FrameRead::Frame => true,
                 FrameRead::Eof => {
                     info!(stream = stream_id, "Audio input closed");
-                    return ReaderEnd::Eof;
+                    return ReaderEnd::Eof { received_frame };
                 }
                 FrameRead::Error(e) => {
                     warn!(stream = stream_id, "Audio input read error: {e}");
-                    return ReaderEnd::Error(e);
+                    return ReaderEnd::Error {
+                        error: e,
+                        received_frame,
+                    };
                 }
                 FrameRead::Idle => {
                     // No data within idle_timeout → go idle.
@@ -726,11 +917,14 @@ async fn run_reader<R: AsyncReadExt + Unpin>(
                                         }
                                         FrameRead::Eof => {
                                             info!(stream = stream_id, "Audio input closed while idle");
-                                            return ReaderEnd::Eof;
+                                            return ReaderEnd::Eof { received_frame };
                                         }
                                         FrameRead::Error(e) => {
                                             warn!(stream = stream_id, "Audio input read error while idle: {e}");
-                                            return ReaderEnd::Error(e);
+                                            return ReaderEnd::Error {
+                                                error: e,
+                                                received_frame,
+                                            };
                                         }
                                         FrameRead::Idle => unreachable!("idle is disabled while waiting for resumed audio"),
                                     }
@@ -755,11 +949,14 @@ async fn run_reader<R: AsyncReadExt + Unpin>(
                 FrameRead::Frame => true,
                 FrameRead::Eof => {
                     info!(stream = stream_id, "Audio input closed");
-                    return ReaderEnd::Eof;
+                    return ReaderEnd::Eof { received_frame };
                 }
                 FrameRead::Error(e) => {
                     warn!(stream = stream_id, "Audio input read error: {e}");
-                    return ReaderEnd::Error(e);
+                    return ReaderEnd::Error {
+                        error: e,
+                        received_frame,
+                    };
                 }
                 FrameRead::Idle => unreachable!("idle is disabled for blocking reads"),
             }
@@ -768,6 +965,7 @@ async fn run_reader<R: AsyncReadExt + Unpin>(
         if !read_ok {
             continue;
         }
+        received_frame = true;
 
         // ── Transition idle → playing ─────────────────────────────────────
         if is_idle {
@@ -810,8 +1008,21 @@ async fn run_reader<R: AsyncReadExt + Unpin>(
 }
 
 enum ReaderEnd {
-    Eof,
-    Error(io::Error),
+    Eof {
+        received_frame: bool,
+    },
+    Error {
+        error: io::Error,
+        received_frame: bool,
+    },
+}
+
+impl ReaderEnd {
+    fn received_frame(&self) -> bool {
+        match self {
+            Self::Eof { received_frame } | Self::Error { received_frame, .. } => *received_frame,
+        }
+    }
 }
 
 enum FrameRead {
@@ -858,9 +1069,19 @@ async fn read_pcm_frame<R: AsyncReadExt + Unpin>(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::path::Path;
     use tokio::io::AsyncWriteExt;
     use tokio::time::timeout;
     use tokio_util::sync::CancellationToken;
+
+    #[cfg(unix)]
+    fn create_fifo(path: &Path) {
+        let status = std::process::Command::new("mkfifo")
+            .arg(path)
+            .status()
+            .expect("mkfifo must be available on Unix test hosts");
+        assert!(status.success());
+    }
 
     #[tokio::test]
     async fn read_pcm_frame_preserves_partial_data_after_idle() {
@@ -894,10 +1115,12 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn reopening_file_reader_recovers_after_eof_and_replacement() {
-        // This catches the old terminal-EOF behavior: removing the reopen loop
-        // would leave the source Idle and never publish the replacement frame.
+    async fn reopening_file_reader_waits_for_a_change_before_replaying() {
+        // This catches reopening a regular file at byte offset zero after EOF.
+        // The test waits for a second recovery attempt, rather than racing the
+        // first 50 ms delay, and asserts no duplicate audio was broadcast.
         let path = std::env::temp_dir().join(format!("sonium-reopen-{}", uuid::Uuid::new_v4()));
+        let replacement_path = path.with_extension("replacement");
         let first = vec![0x11; 16];
         let replacement = vec![0x22; 16];
         std::fs::write(&path, &first).unwrap();
@@ -986,14 +1209,72 @@ mod tests {
             })
         );
 
-        std::fs::remove_file(&path).unwrap();
-        std::fs::write(&path, &replacement).unwrap();
+        loop {
+            match timeout(Duration::from_secs(1), events.recv())
+                .await
+                .expect("unchanged file should schedule another recovery attempt")
+                .unwrap()
+            {
+                Event::StreamStatus {
+                    status: StreamStatus::Recovering,
+                    ..
+                } => {
+                    let stream = state
+                        .all_streams()
+                        .into_iter()
+                        .find(|stream| stream.id == "reopen-test")
+                        .unwrap();
+                    if stream
+                        .recovery
+                        .as_ref()
+                        .is_some_and(|recovery| recovery.attempt >= 2)
+                    {
+                        break;
+                    }
+                }
+                _ => continue,
+            }
+        }
+        assert!(
+            audio.try_recv().is_err(),
+            "unchanged regular files must not be replayed from byte offset zero"
+        );
+
+        std::fs::write(&replacement_path, &replacement).unwrap();
+        std::fs::rename(&replacement_path, &path).unwrap();
 
         let replacement_frame = timeout(Duration::from_secs(1), audio.recv())
             .await
             .expect("replacement file frame should be published")
             .unwrap();
         assert!(replacement_frame.wire_bytes.ends_with(&replacement));
+
+        loop {
+            match timeout(Duration::from_secs(1), events.recv())
+                .await
+                .expect("replacement EOF should begin a fresh recovery sequence")
+                .unwrap()
+            {
+                Event::StreamStatus {
+                    status: StreamStatus::Recovering,
+                    ..
+                } => {
+                    let stream = state
+                        .all_streams()
+                        .into_iter()
+                        .find(|stream| stream.id == "reopen-test")
+                        .unwrap();
+                    if stream
+                        .recovery
+                        .as_ref()
+                        .is_some_and(|recovery| recovery.attempt == 1)
+                    {
+                        break;
+                    }
+                }
+                _ => continue,
+            }
+        }
 
         cancel.cancel();
         timeout(Duration::from_secs(1), task)
@@ -1003,5 +1284,204 @@ mod tests {
             .unwrap();
 
         let _ = std::fs::remove_file(path);
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn fifo_open_without_a_writer_is_nonblocking_and_reader_cancellation_is_prompt() {
+        // This catches tokio::fs::File::open: it uses spawn_blocking and blocks
+        // in open(2) until a FIFO writer exists, even after its future is dropped.
+        let path = std::env::temp_dir().join(format!("sonium-fifo-{}", uuid::Uuid::new_v4()));
+        create_fifo(&path);
+
+        let fifo_source = path.to_string_lossy().into_owned();
+        let reader = timeout(Duration::from_secs(1), open_file_source(&fifo_source))
+            .await
+            .expect("opening a FIFO reader must not wait for a writer")
+            .unwrap();
+        drop(reader);
+
+        let state = Arc::new(ServerState::new(
+            Arc::new(sonium_control::EventBus::new()),
+            None,
+            vec![],
+            vec![],
+        ));
+        let cancel = CancellationToken::new();
+        let task_cancel = cancel.clone();
+        let task_path = path.to_string_lossy().to_string();
+        let task = tokio::spawn(async move {
+            let mut encoder =
+                make_encoder("pcm", sonium_common::SampleFormat::new(800, 16, 1)).unwrap();
+            let mut pcm_buf = vec![0u8; 16];
+            let mut enc_buf = Vec::new();
+            run_reopening_reader(
+                &task_path,
+                &mut *encoder,
+                Arc::new(Broadcaster::new("fifo-cancel-test", 1000)),
+                &mut pcm_buf,
+                &mut enc_buf,
+                "fifo-cancel-test",
+                &state,
+                None,
+                false,
+                10,
+                task_cancel,
+            )
+            .await
+        });
+
+        tokio::task::yield_now().await;
+        cancel.cancel();
+        timeout(Duration::from_secs(1), task)
+            .await
+            .expect("cancellation must not wait for a FIFO writer")
+            .unwrap()
+            .unwrap();
+
+        std::fs::remove_file(path).unwrap();
+    }
+
+    #[tokio::test]
+    async fn not_a_directory_source_is_terminal_error_not_recovery() {
+        // This catches treating a malformed path as a transient missing producer.
+        let parent = std::env::temp_dir().join(format!("sonium-notadir-{}", uuid::Uuid::new_v4()));
+        std::fs::write(&parent, b"not a directory").unwrap();
+        let source = parent.join("child");
+        let state = Arc::new(ServerState::new(
+            Arc::new(sonium_control::EventBus::new()),
+            None,
+            vec![],
+            vec![],
+        ));
+        state.register_stream(
+            "notadir-test",
+            None,
+            "pcm",
+            "800Hz/16bit/1ch",
+            source.to_string_lossy(),
+            1000,
+            false,
+            10,
+            false,
+            None,
+            false,
+        );
+        let cancel = CancellationToken::new();
+        let task_cancel = cancel.clone();
+        let task_state = state.clone();
+        let task_source = source.to_string_lossy().to_string();
+        let mut task = tokio::spawn(async move {
+            let mut encoder =
+                make_encoder("pcm", sonium_common::SampleFormat::new(800, 16, 1)).unwrap();
+            let mut pcm_buf = vec![0u8; 16];
+            let mut enc_buf = Vec::new();
+            run_reopening_reader(
+                &task_source,
+                &mut *encoder,
+                Arc::new(Broadcaster::new("notadir-test", 1000)),
+                &mut pcm_buf,
+                &mut enc_buf,
+                "notadir-test",
+                &task_state,
+                None,
+                false,
+                10,
+                task_cancel,
+            )
+            .await
+        });
+
+        let completed = timeout(Duration::from_secs(1), &mut task).await;
+        let result = match completed {
+            Ok(result) => result.unwrap(),
+            Err(_) => {
+                cancel.cancel();
+                task.await.unwrap()
+            }
+        };
+        assert!(result.is_err(), "NotADirectory must not retry forever");
+        let stream = state
+            .all_streams()
+            .into_iter()
+            .find(|stream| stream.id == "notadir-test")
+            .unwrap();
+        assert_eq!(stream.status, StreamStatus::Error);
+        assert_eq!(stream.recovery, None);
+
+        std::fs::remove_file(parent).unwrap();
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn symlink_loop_source_is_terminal_error_not_recovery() {
+        // This catches a permanent path configuration error that must not spin
+        // forever under the same retry policy as a missing producer.
+        use std::os::unix::fs::symlink;
+
+        let source = std::env::temp_dir().join(format!("sonium-loop-{}", uuid::Uuid::new_v4()));
+        symlink(&source, &source).unwrap();
+        let state = Arc::new(ServerState::new(
+            Arc::new(sonium_control::EventBus::new()),
+            None,
+            vec![],
+            vec![],
+        ));
+        state.register_stream(
+            "loop-test",
+            None,
+            "pcm",
+            "800Hz/16bit/1ch",
+            source.to_string_lossy(),
+            1000,
+            false,
+            10,
+            false,
+            None,
+            false,
+        );
+        let cancel = CancellationToken::new();
+        let task_cancel = cancel.clone();
+        let task_state = state.clone();
+        let task_source = source.to_string_lossy().to_string();
+        let mut task = tokio::spawn(async move {
+            let mut encoder =
+                make_encoder("pcm", sonium_common::SampleFormat::new(800, 16, 1)).unwrap();
+            let mut pcm_buf = vec![0u8; 16];
+            let mut enc_buf = Vec::new();
+            run_reopening_reader(
+                &task_source,
+                &mut *encoder,
+                Arc::new(Broadcaster::new("loop-test", 1000)),
+                &mut pcm_buf,
+                &mut enc_buf,
+                "loop-test",
+                &task_state,
+                None,
+                false,
+                10,
+                task_cancel,
+            )
+            .await
+        });
+
+        let completed = timeout(Duration::from_secs(1), &mut task).await;
+        let result = match completed {
+            Ok(result) => result.unwrap(),
+            Err(_) => {
+                cancel.cancel();
+                task.await.unwrap()
+            }
+        };
+        assert!(result.is_err(), "symlink loops must not retry forever");
+        let stream = state
+            .all_streams()
+            .into_iter()
+            .find(|stream| stream.id == "loop-test")
+            .unwrap();
+        assert_eq!(stream.status, StreamStatus::Error);
+        assert_eq!(stream.recovery, None);
+
+        std::fs::remove_file(source).unwrap();
     }
 }

@@ -127,6 +127,13 @@ export interface EqBand {
   enabled:     boolean;
 }
 
+export type StreamStatus = 'playing' | 'idle' | 'recovering' | 'error';
+
+export interface StreamRecovery {
+  attempt: number;
+  retry_in_ms: number;
+}
+
 export interface Stream {
   id:           string;
   display_name?: string | null;
@@ -139,7 +146,8 @@ export interface Stream {
   chunk_ms_overridden?: boolean;
   idle_timeout_ms?: number | null;
   silence_on_idle: boolean;
-  status:       'playing' | 'idle' | 'error';
+  status:       StreamStatus;
+  recovery?:    StreamRecovery | null;
   eq_bands?:    EqBand[];
   eq_enabled?:  boolean;
 }
@@ -223,7 +231,7 @@ export type Event =
   | { type: 'group_deleted';       group_id: string }
   | { type: 'group_renamed';       group_id: string; name: string }
   | { type: 'group_stream_changed';group_id: string; stream_id: string }
-  | { type: 'stream_status';       stream_id: string; status: string }
+  | { type: 'stream_status';       stream_id: string; status: StreamStatus; recovery?: StreamRecovery | null }
   | { type: 'heartbeat';           uptime_s: number }
   | { type: 'stream_level';        stream_id: string; rms_db: number }
   | { type: 'stream_eq_changed';   stream_id: string; eq_bands: EqBand[]; enabled: boolean }
