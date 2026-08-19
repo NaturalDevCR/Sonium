@@ -9,7 +9,7 @@ mod streamreader;
 use anyhow::Context;
 use clap::Parser;
 use socket2::{SockRef, TcpKeepalive};
-use std::{net::SocketAddr, path::PathBuf, sync::Arc};
+use std::{io::Read, net::SocketAddr, path::PathBuf, sync::Arc};
 use tokio::net::{TcpListener, TcpStream, UdpSocket};
 use tokio::sync::Semaphore;
 use tokio::task::JoinHandle;
@@ -62,9 +62,24 @@ struct Cli {
     #[arg(long, env = "SONIUM_NO_MDNS")]
     no_mdns: bool,
 
-    /// Initialize admin password and exit (only if no users exist).
+    /// Read the initial admin password from standard input and exit (only if no users exist).
+    ///
+    /// This intentionally accepts no value: passing a password on the command
+    /// line would expose it to process inspection and shell history.
     #[arg(long)]
-    init_admin: Option<String>,
+    init_admin: bool,
+}
+
+fn read_initial_admin_password(mut reader: impl Read) -> anyhow::Result<String> {
+    let mut password = String::new();
+    reader
+        .read_to_string(&mut password)
+        .context("could not read the initial admin password from standard input")?;
+    let password = password.trim_end_matches(['\r', '\n']).to_owned();
+    if password.is_empty() {
+        anyhow::bail!("initial admin password from standard input must not be empty");
+    }
+    Ok(password)
 }
 
 #[tokio::main]
@@ -166,7 +181,8 @@ async fn main() -> anyhow::Result<()> {
     let shutdown = CancellationToken::new();
 
     // One-time initialization if requested.
-    if let Some(password) = cli.init_admin {
+    if cli.init_admin {
+        let password = read_initial_admin_password(std::io::stdin().lock())?;
         UserStore::load_or_init(&config_dir, Some(password))?;
         info!("Admin account initialized (if it didn't exist).");
         return Ok(());
@@ -497,5 +513,30 @@ async fn shutdown_signal() {
     #[cfg(not(unix))]
     {
         ctrl_c.await.ok();
+    }
+}
+
+#[cfg(test)]
+mod cli_tests {
+    use super::{read_initial_admin_password, Cli};
+    use clap::Parser;
+    use std::io::Cursor;
+
+    #[test]
+    fn init_admin_is_a_valueless_stdin_flag() {
+        let cli = Cli::try_parse_from(["sonium-server", "--init-admin"])
+            .expect("the bootstrap flag must not require a password argument");
+        assert!(cli.init_admin);
+        assert!(
+            Cli::try_parse_from(["sonium-server", "--init-admin", "plaintext-password"]).is_err()
+        );
+    }
+
+    #[test]
+    fn init_admin_password_is_read_from_stdin_without_retaining_newlines() {
+        let password = read_initial_admin_password(Cursor::new(b"stdin-secret\r\n"))
+            .expect("a non-empty stdin password must be accepted");
+
+        assert_eq!(password, "stdin-secret");
     }
 }

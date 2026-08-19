@@ -165,7 +165,7 @@ EOF
 
 read -r -s -p "Initial Sonium admin password: " SONIUM_INIT_ADMIN_PASSWORD
 printf '\n'
-if ./target/release/sonium-server --config sonium.toml --init-admin "$SONIUM_INIT_ADMIN_PASSWORD"; then
+if printf '%s' "$SONIUM_INIT_ADMIN_PASSWORD" | ./target/release/sonium-server --config sonium.toml --init-admin; then
   unset SONIUM_INIT_ADMIN_PASSWORD
   ./target/release/sonium-server --config sonium.toml
 else
@@ -174,6 +174,10 @@ else
   exit "$status"
 fi
 ```
+
+`--init-admin` reads the password from standard input and accepts no password
+argument. This replaces the former `--init-admin PASSWORD` form so secrets do
+not appear in process listings or shell history.
 
 Feed audio in another terminal:
 

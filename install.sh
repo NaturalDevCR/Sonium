@@ -99,9 +99,11 @@ legacy_server_audio_keys() {
     in_server {
       entry = $0
       sub(/^[[:space:]]*/, "", entry)
-      if (entry ~ /^(buffer_ms|chunk_ms|output_prefill_ms)[[:space:]]*=/) {
+      if (entry ~ /^"?(buffer_ms|chunk_ms|output_prefill_ms)"?[[:space:]]*=/) {
         split(entry, parts, /[[:space:]]*=/)
-        print parts[1]
+        key = parts[1]
+        gsub(/"/, "", key)
+        print key
         found = 1
       }
     }
@@ -269,7 +271,7 @@ fi
 # Run this before downloading, replacing binaries, or touching systemd. Strict
 # Phase 1 config rejects the legacy keys, so continuing would risk a failed
 # restart of an otherwise healthy service.
-if [[ "${INSTALL_SERVER}" == "true" ]]; then
+if [[ "${INSTALL_SERVER}" == "true" && "${UNINSTALL}" == "false" ]]; then
   preflight_server_config "${CONF_DIR}/sonium.toml"
 fi
 
@@ -408,7 +410,7 @@ EOF
   fi
 
   if [[ -n "${GEN_PASS:-}" ]]; then
-    if run_as_user "${SONIUM_USER}" "${BIN_DIR}/sonium-server" --config "${CONF_DIR}/sonium.toml" --init-admin "${GEN_PASS}" >/dev/null 2>&1; then
+    if printf '%s' "${GEN_PASS}" | run_as_user "${SONIUM_USER}" "${BIN_DIR}/sonium-server" --config "${CONF_DIR}/sonium.toml" --init-admin >/dev/null 2>&1; then
       ok "Initialized default admin credentials"
     else
       unset GEN_PASS

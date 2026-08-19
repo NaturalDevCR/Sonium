@@ -85,14 +85,16 @@ impl fmt::Display for TransportMode {
 /// ```toml
 /// [server.transport]
 /// mode     = "tcp"   # "tcp" (default) | "rtp_udp" | "rist" | "quic_dgram"
-/// udp_port = 1712    # server UDP port for UDP media (0 = disabled)
+/// udp_port = 0       # 0 auto-selects stream_port + 2 for rtp_udp/rist;
+///                    # it is required for tcp and quic_dgram
 /// ```
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(default, deny_unknown_fields)]
 pub struct TransportConfig {
     pub mode: TransportMode,
-    /// UDP port the server listens on for RTP/UDP media delivery.
-    /// `0` disables the UDP media path even when `mode = "rtp_udp"`.
+    /// UDP port the server listens on for RTP/UDP or RIST media delivery.
+    /// `0` auto-selects `stream_port + 2` for those UDP modes. It must remain
+    /// `0` for `tcp` and `quic_dgram`.
     pub udp_port: u16,
 }
 

@@ -165,7 +165,7 @@ $adminPassword = Read-Host -AsSecureString "Initial Sonium admin password"
 $bstr = [Runtime.InteropServices.Marshal]::SecureStringToBSTR($adminPassword)
 try {
   $plainPassword = [Runtime.InteropServices.Marshal]::PtrToStringBSTR($bstr)
-  .\sonium-server.exe --config .\sonium.toml --init-admin $plainPassword
+  $plainPassword | .\sonium-server.exe --config .\sonium.toml --init-admin
   if ($LASTEXITCODE -ne 0) { throw "Initial admin setup failed" }
 }
 finally {
@@ -177,9 +177,11 @@ finally {
 ```
 
 The password is prompted rather than written into PowerShell history, TOML, or
-an environment file. Run the bootstrap on the local trusted machine before the
-first normal server start; a server without `users.json` intentionally refuses
-to start.
+an environment file, then is passed over the child process's standard input.
+Run the bootstrap on the local trusted machine before the first normal server
+start; a server without `users.json` intentionally refuses to start. If you
+previously automated `--init-admin PASSWORD`, replace it with stdin input: the
+plaintext argument form is deliberately rejected.
 
 ## Docker Server
 
@@ -213,6 +215,12 @@ open/read/EOF conditions enter `recovering` and reopen automatically; terminal
 path errors such as permissions, directories, unsupported paths, or symlink
 loops enter `error`. A `pipe://` child closing uses its separate restart loop
 and is not reported as this file/FIFO recovery state.
+
+The bootstrap profile temporarily receives the prompted value through its
+environment and its entrypoint pipes it to `sonium-server` over stdin; it never
+passes the password as a command-line argument. Unset the shell variable in
+both success and failure paths as shown. For a secret manager, supply the value
+only to that one bootstrap invocation, not to the long-running server service.
 
 The server exposes:
 

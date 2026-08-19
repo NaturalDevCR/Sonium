@@ -4,6 +4,7 @@ set -euo pipefail
 root_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 installer="${root_dir}/install.sh"
 fixture="${root_dir}/tests/fixtures/legacy-server-audio.toml"
+quoted_fixture="${root_dir}/tests/fixtures/legacy-server-audio-quoted.toml"
 installation_doc="${root_dir}/docs/src/getting-started/installation.md"
 configuration_doc="${root_dir}/docs/src/getting-started/configuration.md"
 compose_file="${root_dir}/docker-compose.yml"
@@ -20,11 +21,31 @@ fi
 [[ "${output}" == *"Move buffer_ms, chunk_ms, and output_prefill_ms to [server.audio]"* ]] \
   || fail "legacy preflight did not provide the exact migration instruction"
 
+if output="$(bash "${installer}" --preflight-config "${quoted_fixture}" 2>&1)"; then
+  fail "quoted legacy preflight unexpectedly succeeded"
+fi
+[[ "${output}" == *"Legacy [server] audio keys detected"* ]] \
+  || fail "quoted legacy preflight did not identify legacy audio keys"
+
 if output="$(sh "${docker_bootstrap}" 2>&1)"; then
   fail "Docker bootstrap unexpectedly accepted an unset password"
 fi
 [[ "${output}" == *"SONIUM_INIT_ADMIN_PASSWORD must be set"* ]] \
   || fail "Docker bootstrap did not reject an unset password"
+
+if grep -RE -- '--init-admin[[:space:]]+[^>;[:space:]]' \
+  "${installer}" "${docker_bootstrap}"; then
+  fail "a first-party bootstrap still passes a plaintext password in argv"
+fi
+if awk '
+  /^```(bash|sh|shell|powershell)$/ { in_block = 1; next }
+  in_block && /^```$/ { in_block = 0; next }
+  in_block { print }
+' "${root_dir}/README.md" "${installation_doc}" \
+  "${root_dir}/docs/src/getting-started/quick-start.md" \
+  | grep -E -- '--init-admin[[:space:]]+[^>;[:space:]]'; then
+  fail "a documented bootstrap still passes a plaintext password in argv"
+fi
 
 contains "${compose_file}" "init-admin:"
 contains "${compose_file}" "profiles: [\"bootstrap\"]"
@@ -48,7 +69,7 @@ timezone_line="$(grep -n '^timezone = ' "${configuration_doc}" | head -n1 | cut 
 streams_line="$(grep -n '^\[\[streams\]\]' "${configuration_doc}" | head -n1 | cut -d: -f1)"
 [[ -n "${timezone_line}" && -n "${streams_line}" && "${timezone_line}" -lt "${streams_line}" ]] \
   || fail "timezone must be declared before [[streams]]"
-contains "${configuration_doc}" "0 selects stream_port + 2 for rtp_udp/rist"
+contains "${configuration_doc}" "rtp_udp/rist use 0 = stream_port + 2"
 contains "${configuration_doc}" "ordinary file/FIFO sources after a recoverable"
 
 printf 'phase1 deployment smoke: PASS\n'

@@ -6,6 +6,13 @@ explicit `sonium.toml` exists, it is strict: malformed TOML, unknown keys,
 invalid addresses, unsafe port combinations, and invalid audio timing values
 stop startup instead of falling back to defaults.
 
+`--init-admin` is a flag with no password argument. Provide the password on
+standard input, for example `printf '%s' "$SONIUM_INIT_ADMIN_PASSWORD" |
+sonium-server --init-admin`. Releases that accepted
+`--init-admin PASSWORD` no longer do so, because command-line arguments can be
+read from process inspection and shell history. Update automation to feed stdin
+or an inherited protected file descriptor; do not restore the old argument form.
+
 If you need to customise behaviour, create a `sonium.toml` file in the working
 directory where you run `sonium-server` (typically `/etc/sonium/sonium.toml`
 when installed via the Linux installer).
@@ -13,6 +20,10 @@ when installed via the Linux installer).
 ## Server — `sonium.toml`
 
 ```toml
+# Timezone for log timestamps and web UI display. It is a root key and must
+# appear before the first TOML table.
+timezone = "America/Costa_Rica"
+
 [server]
 bind            = "0.0.0.0"   # Listen on all interfaces
 control_bind    = "127.0.0.1" # Web UI/API/metrics; keep local by default
@@ -38,11 +49,7 @@ cooldown_ms   = 8000          # Minimum delay between auto adjustments
 
 [server.transport]
 mode     = "tcp"              # "tcp" | "rtp_udp" | "rist" | "quic_dgram"
-udp_port = 0                  # 0 selects stream_port + 2 for rtp_udp/rist; TCP disables UDP
-
-# Timezone for log timestamps and web UI display. It must be a root key, so
-# declare it before [[streams]] rather than after an array table.
-timezone = "America/Costa_Rica"
+udp_port = 0                  # Must be 0 for tcp/quic_dgram; rtp_udp/rist use 0 = stream_port + 2
 
 [[streams]]
 id        = "default"
@@ -94,6 +101,16 @@ deletion change invalidates that user's earlier tokens, including after a
 restart. A present-but-corrupt, unreadable, or semantically invalid `users.json`
 is fatal and is not replaced; restore it from a known-good backup before
 retrying.
+
+### Initial-admin bootstrap
+
+Run the one-time bootstrap locally before the first ordinary server start. The
+server reads its only input from standard input only when `--init-admin` is
+present, then exits; normal server startup never reads stdin for a password.
+The Docker, source, Windows, and Linux-installer procedures all use this same
+stdin contract. Keep any temporary secret in memory only, clear it immediately
+after success or failure, and never place it in a command argument, TOML file,
+Compose file, shell history, log, or source control.
 
 ### Legacy installer configuration
 

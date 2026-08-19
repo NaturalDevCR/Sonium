@@ -329,6 +329,16 @@ impl ServerConfig {
         if !(self.server.max_clients..=1024).contains(&self.server.max_known_clients) {
             anyhow::bail!("server.max_known_clients must be between server.max_clients and 1024");
         }
+        if self.server.transport.udp_port != 0
+            && !matches!(
+                self.server.transport.mode,
+                TransportMode::RtpUdp | TransportMode::Rist
+            )
+        {
+            anyhow::bail!(
+                "server.transport.udp_port must be 0 unless server.transport.mode is rtp_udp or rist"
+            );
+        }
 
         validate_buffer_and_chunk(
             "server.audio",
@@ -641,6 +651,19 @@ mod tests {
             .replace("${FIFO_PATH}", "/tmp/sonium.fifo")
     }
 
+    fn getting_started_server_config() -> String {
+        const DOCUMENT: &str = include_str!("../../../docs/src/getting-started/configuration.md");
+        let server_start = DOCUMENT
+            .find("## Server — `sonium.toml`\n\n```toml\n")
+            .expect("getting-started server TOML start")
+            + "## Server — `sonium.toml`\n\n```toml\n".len();
+        let server_end = DOCUMENT[server_start..]
+            .find("\n```\n")
+            .expect("getting-started server TOML end")
+            + server_start;
+        DOCUMENT[server_start..server_end].to_owned()
+    }
+
     #[test]
     fn test_deserialize_new_structure() {
         let toml_str = r#"
@@ -764,6 +787,14 @@ chunk_ms = 15
 sample_format = { rate = 48000, bits = 24, channels = 2 }
 "#,
             ),
+            (
+                "tcp-with-udp-port",
+                r#"
+[server.transport]
+mode = "tcp"
+udp_port = 1712
+"#,
+            ),
         ] {
             let path = write_config(name, content);
             assert!(
@@ -772,6 +803,16 @@ sample_format = { rate = 48000, bits = 24, channels = 2 }
             );
             fs::remove_file(path).expect("remove test configuration");
         }
+    }
+
+    #[test]
+    fn getting_started_server_config_is_complete_and_has_root_timezone() {
+        let path = write_config("getting-started", &getting_started_server_config());
+        let config = ServerConfig::from_file(&path)
+            .expect("the complete getting-started TOML must parse as ServerConfig");
+
+        assert_eq!(config.timezone.as_deref(), Some("America/Costa_Rica"));
+        fs::remove_file(path).expect("remove test configuration");
     }
 
     #[test]

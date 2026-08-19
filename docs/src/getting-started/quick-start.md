@@ -58,7 +58,7 @@ EOF
 
 read -r -s -p "Initial Sonium admin password: " SONIUM_INIT_ADMIN_PASSWORD
 printf '\n'
-if ./target/release/sonium-server --config sonium.toml --init-admin "$SONIUM_INIT_ADMIN_PASSWORD"; then
+if printf '%s' "$SONIUM_INIT_ADMIN_PASSWORD" | ./target/release/sonium-server --config sonium.toml --init-admin; then
   unset SONIUM_INIT_ADMIN_PASSWORD
   ./target/release/sonium-server --config sonium.toml
 else
@@ -67,6 +67,10 @@ else
   exit "$status"
 fi
 ```
+
+`--init-admin` takes no password argument: it reads this one-time secret from
+standard input. Migrate any old `--init-admin PASSWORD` automation to a stdin
+pipe or protected inherited file descriptor.
 
 Open the web UI:
 
