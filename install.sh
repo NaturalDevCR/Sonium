@@ -95,22 +95,55 @@ legacy_server_audio_keys() {
   local config_path="$1"
   # This is deliberately a bounded preflight scanner, not a TOML parser. It
   # recognizes only the exact [server] table (including its simple quoted-key
-  # forms) and the three legacy assignments directly inside that table.
+  # forms) and the three legacy assignments directly inside that table. It
+  # skips reasonable TOML multiline-string blocks, but strict startup remains
+  # responsible for complete TOML validation.
   awk '
-    /^[[:space:]]*\[[[:space:]]*(server|"server"|\047server\047)[[:space:]]*\][[:space:]]*(#.*)?$/ {
-      in_server = 1
+    function delimiter_count(text, delimiter, count, position) {
+      count = 0
+      while ((position = index(text, delimiter)) != 0) {
+        count++
+        text = substr(text, position + length(delimiter))
+      }
+      return count
+    }
+
+    in_multiline {
+      if (delimiter_count($0, multiline_delimiter) % 2 == 1) {
+        in_multiline = 0
+        multiline_delimiter = ""
+      }
       next
     }
-    /^[[:space:]]*\[/ { in_server = 0 }
-    in_server {
+
+    /^[[:space:]]*\[[[:space:]]*(server|"server"|\047server\047)[[:space:]]*\][[:space:]]*(#.*)?$/ {
+      in_server = 1
+    }
+    {
       entry = $0
-      sub(/^[[:space:]]*/, "", entry)
-      if (entry ~ /^(buffer_ms|chunk_ms|output_prefill_ms|"buffer_ms"|"chunk_ms"|"output_prefill_ms"|\047buffer_ms\047|\047chunk_ms\047|\047output_prefill_ms\047)[[:space:]]*=/) {
-        key = entry
-        sub(/[[:space:]]*=.*/, "", key)
-        gsub(/[[:space:]"\047]/, "", key)
-        print key
-        found = 1
+      sub(/[[:space:]]*#.*/, "", entry)
+
+      if (entry ~ /^[[:space:]]*\[/ && entry !~ /^[[:space:]]*\[[[:space:]]*(server|"server"|\047server\047)[[:space:]]*\][[:space:]]*$/) {
+        in_server = 0
+      }
+      if (in_server) {
+        candidate = entry
+        sub(/^[[:space:]]*/, "", candidate)
+        if (candidate ~ /^(buffer_ms|chunk_ms|output_prefill_ms|"buffer_ms"|"chunk_ms"|"output_prefill_ms"|\047buffer_ms\047|\047chunk_ms\047|\047output_prefill_ms\047)[[:space:]]*=/) {
+          key = candidate
+          sub(/[[:space:]]*=.*/, "", key)
+          gsub(/[[:space:]"\047]/, "", key)
+          print key
+          found = 1
+        }
+      }
+
+      if (delimiter_count(entry, "\"\"\"") % 2 == 1) {
+        in_multiline = 1
+        multiline_delimiter = "\"\"\""
+      } else if (delimiter_count(entry, "\047\047\047") % 2 == 1) {
+        in_multiline = 1
+        multiline_delimiter = "\047\047\047"
       }
     }
     END { exit(found ? 0 : 1) }

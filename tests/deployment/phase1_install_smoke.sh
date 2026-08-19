@@ -8,6 +8,7 @@ quoted_fixture="${root_dir}/tests/fixtures/legacy-server-audio-quoted.toml"
 double_header_fixture="${root_dir}/tests/fixtures/legacy-server-header-double-quoted.toml"
 single_quoted_fixture="${root_dir}/tests/fixtures/legacy-server-audio-single-quoted.toml"
 audio_table_fixture="${root_dir}/tests/fixtures/server-audio-quoted-keys.toml"
+multiline_fixture="${root_dir}/tests/fixtures/multiline-legacy-looking-content.toml"
 installation_doc="${root_dir}/docs/src/getting-started/installation.md"
 configuration_doc="${root_dir}/docs/src/getting-started/configuration.md"
 compose_file="${root_dir}/docker-compose.yml"
@@ -28,6 +29,10 @@ done
 
 if ! output="$(bash "${installer}" --preflight-config "${audio_table_fixture}" 2>&1)"; then
   fail "[server.audio] keys unexpectedly blocked preflight: ${output}"
+fi
+
+if ! output="$(bash "${installer}" --preflight-config "${multiline_fixture}" 2>&1)"; then
+  fail "multiline string content unexpectedly blocked preflight: ${output}"
 fi
 
 # On a non-root test host this invocation stops at the platform/root guard,
