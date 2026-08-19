@@ -9,8 +9,12 @@ use prometheus::{
     IntCounter, IntCounterVec, IntGauge, IntGaugeVec, Opts,
 };
 use sonium_protocol::messages::{AudioHealthState, HealthReport};
+use std::{collections::HashMap, sync::Mutex};
 
 lazy_static! {
+    /// Current session generation for each client ID. Held through metric
+    /// cleanup so an old disconnect cannot delete a replacement's labels.
+    static ref CLIENT_SESSION_GENERATIONS: Mutex<HashMap<String, u64>> = Mutex::new(HashMap::new());
     /// Number of TCP audio clients currently connected.
     pub static ref CONNECTED_CLIENTS: IntGauge =
         register_int_gauge!(Opts::new(
@@ -362,6 +366,14 @@ lazy_static! {
         ).unwrap();
 }
 
+/// Register a newly admitted session before it can create client metric labels.
+pub fn register_client_session(client_id: &str, generation: u64) {
+    CLIENT_SESSION_GENERATIONS
+        .lock()
+        .expect("client metric session registry lock poisoned")
+        .insert(client_id.into(), generation);
+}
+
 pub fn observe_client_health(
     client_id: &str,
     transport: &str,
@@ -470,8 +482,19 @@ pub fn observe_active_transport(client_id: &str, active_transport: &str) {
 }
 
 /// Remove all per-client Prometheus series when a client disconnects or is evicted.
-pub fn forget_client(client_id: &str) {
+pub fn forget_client(client_id: &str, generation: u64) {
     const TRANSPORTS: [&str; 5] = ["tcp", "rtp_udp", "rist", "arq_udp", "quic_dgram"];
+
+    // Keep this mutex through removal. A replacement session must register its
+    // generation before creating labels, so it either wins first (and stale
+    // cleanup is skipped) or starts only after old labels are removed.
+    let mut sessions = CLIENT_SESSION_GENERATIONS
+        .lock()
+        .expect("client metric session registry lock poisoned");
+    if sessions.get(client_id) != Some(&generation) {
+        return;
+    }
+    sessions.remove(client_id);
 
     macro_rules! remove_transport_series {
         ($transport:expr, $($metric:ident),+ $(,)?) => {
@@ -549,12 +572,33 @@ mod tests {
         let id = "metrics-cleanup-client";
         let report = HealthReport::new(0, 0, 0, 100, 0, 0);
 
+        register_client_session(id, 1);
         observe_client_health(id, "tcp", &report, AudioHealthState::Stable);
         observe_active_transport(id, "tcp");
         assert!(gather().contains(&format!("client_id=\"{id}\"")));
 
-        forget_client(id);
+        forget_client(id, 1);
 
         assert!(!gather().contains(&format!("client_id=\"{id}\"")));
+    }
+
+    #[test]
+    fn stale_cleanup_does_not_remove_reconnected_client_labels() {
+        let id = "metrics-reconnect-race-client";
+        let report = HealthReport::new(0, 0, 0, 100, 0, 0);
+
+        register_client_session(id, 1);
+        observe_client_health(id, "tcp", &report, AudioHealthState::Stable);
+        observe_active_transport(id, "tcp");
+        // A reconnect has already created its replacement labels when the old
+        // session cleanup finally runs.
+        register_client_session(id, 2);
+        observe_client_health(id, "tcp", &report, AudioHealthState::Stable);
+        observe_active_transport(id, "tcp");
+
+        forget_client(id, 1);
+
+        assert!(gather().contains(&format!("client_id=\"{id}\"")));
+        forget_client(id, 2);
     }
 }

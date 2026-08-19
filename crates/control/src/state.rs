@@ -13,7 +13,10 @@ use parking_lot::RwLock;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::net::SocketAddr;
-use std::sync::Arc;
+use std::sync::{
+    atomic::{AtomicU64, Ordering},
+    Arc,
+};
 
 use crate::persistence::{PersistedClient, PersistedGroup, PersistedStream, PersistenceStore};
 use crate::ws::EventBus;
@@ -64,6 +67,9 @@ pub struct ClientInfo {
     pub connected_at: DateTime<Utc>,
     /// Protocol version reported in `Hello`.
     pub protocol_version: u32,
+    /// Monotonic connection identity used to ignore stale session cleanup.
+    #[serde(skip)]
+    pub session_generation: u64,
     /// Optional operator-assigned display name (shown instead of hostname).
     #[serde(default)]
     pub display_name: Option<String>,
@@ -159,7 +165,8 @@ struct TransportState {
 pub struct ServerState {
     clients: RwLock<HashMap<String, ClientInfo>>,
     max_known_clients: usize,
-    client_removal_hook: RwLock<Option<Arc<dyn Fn(&str) + Send + Sync>>>,
+    client_removal_hook: RwLock<Option<Arc<dyn Fn(&str, u64) + Send + Sync>>>,
+    next_client_generation: AtomicU64,
     groups: RwLock<HashMap<String, Group>>,
     streams: RwLock<HashMap<String, StreamInfo>>,
     events: Arc<EventBus>,
@@ -274,6 +281,7 @@ impl ServerState {
                                 status: ClientStatus::Disconnected,
                                 connected_at: c.last_seen,
                                 protocol_version: 0,
+                                session_generation: 0,
                                 display_name: c.display_name.clone(),
                                 observability_enabled: c.observability_enabled,
                                 health: None,
@@ -285,6 +293,7 @@ impl ServerState {
             ),
             max_known_clients,
             client_removal_hook: RwLock::new(None),
+            next_client_generation: AtomicU64::new(1),
             groups: RwLock::new(groups),
             streams: RwLock::new(streams),
             events,
@@ -301,13 +310,13 @@ impl ServerState {
     }
 
     /// Register cleanup for client-labelled resources owned by the server binary.
-    pub fn set_client_removal_hook(&self, hook: Arc<dyn Fn(&str) + Send + Sync>) {
+    pub fn set_client_removal_hook(&self, hook: Arc<dyn Fn(&str, u64) + Send + Sync>) {
         *self.client_removal_hook.write() = Some(hook);
     }
 
-    fn notify_client_removed(&self, id: &str) {
+    fn notify_client_removed(&self, id: &str, generation: u64) {
         if let Some(hook) = self.client_removal_hook.read().clone() {
-            hook(id);
+            hook(id, generation);
         }
     }
 
@@ -416,7 +425,7 @@ impl ServerState {
         arch: impl Into<String>,
         addr: SocketAddr,
         protocol_version: u32,
-    ) -> Result<(), SoniumError> {
+    ) -> Result<u64, SoniumError> {
         let id = id.into();
         validate_client_id(&id)?;
         let hostname = hostname.into();
@@ -472,6 +481,7 @@ impl ServerState {
                     (100, false, 0, "default".into(), None, false)
                 };
 
+            let session_generation = self.next_client_generation.fetch_add(1, Ordering::Relaxed);
             let info = ClientInfo {
                 id: id.clone(),
                 hostname: hostname.clone(),
@@ -486,6 +496,7 @@ impl ServerState {
                 status: ClientStatus::Connected,
                 connected_at: Utc::now(),
                 protocol_version,
+                session_generation,
                 display_name,
                 observability_enabled,
                 health: None,
@@ -523,27 +534,53 @@ impl ServerState {
             self.events.emit(crate::ws::Event::ClientDeleted {
                 client_id: evicted.id.clone(),
             });
-            self.notify_client_removed(&evicted.id);
+            self.notify_client_removed(&evicted.id, evicted.session_generation);
         }
+        let session_generation = info.session_generation;
         self.events
             .emit(crate::ws::Event::ClientConnected { client: info });
         self.persist();
-        Ok(())
+        Ok(session_generation)
     }
 
     /// Mark a client as disconnected (keeps history in the registry).
     pub fn client_disconnected(&self, id: &str) {
-        let mut clients = self.clients.write();
-        if let Some(c) = clients.get_mut(id) {
-            c.status = ClientStatus::Disconnected;
-            c.connected_at = Utc::now();
+        let generation = self
+            .clients
+            .read()
+            .get(id)
+            .map(|client| client.session_generation);
+        if let Some(generation) = generation {
+            self.client_disconnected_generation(id, generation);
+        }
+    }
+
+    /// Mark only the matching admitted session as disconnected.
+    ///
+    /// The metric cleanup hook runs after releasing the state lock; its
+    /// generation lets the metric registry ignore stale cleanup after a
+    /// reconnect.
+    pub fn client_disconnected_generation(&self, id: &str, generation: u64) -> bool {
+        let disconnected = {
+            let mut clients = self.clients.write();
+            let Some(client) = clients.get_mut(id) else {
+                return false;
+            };
+            if client.session_generation != generation || !client.is_connected() {
+                return false;
+            }
+            client.status = ClientStatus::Disconnected;
+            client.connected_at = Utc::now();
+            true
+        };
+        if disconnected {
             self.events.emit(crate::ws::Event::ClientDisconnected {
                 client_id: id.into(),
             });
-            drop(clients);
-            self.notify_client_removed(id);
+            self.notify_client_removed(id, generation);
             self.persist();
         }
+        disconnected
     }
 
     /// Permanently remove a disconnected client from the registry.
@@ -563,7 +600,7 @@ impl ServerState {
         self.events.emit(crate::ws::Event::ClientDeleted {
             client_id: client_id.into(),
         });
-        self.notify_client_removed(client_id);
+        self.notify_client_removed(client_id, info.session_generation);
         self.persist();
         true
     }
@@ -1102,11 +1139,44 @@ mod tests {
     }
 
     #[test]
+    fn stale_disconnect_generation_cannot_mark_a_reconnected_client_offline() {
+        let s = state();
+        let first = s
+            .try_client_connected(
+                "generation-client",
+                "first-host",
+                "Sonium",
+                "linux",
+                "aarch64",
+                addr(),
+                2,
+            )
+            .expect("first session admitted");
+        assert!(s.client_disconnected_generation("generation-client", first));
+
+        let second = s
+            .try_client_connected(
+                "generation-client",
+                "second-host",
+                "Sonium",
+                "linux",
+                "aarch64",
+                addr(),
+                2,
+            )
+            .expect("reconnect admitted after the first session exits");
+
+        assert_ne!(first, second);
+        assert!(!s.client_disconnected_generation("generation-client", first));
+        assert!(s.get_client("generation-client").unwrap().is_connected());
+    }
+
+    #[test]
     fn removal_hook_runs_on_disconnect_delete_and_lru_eviction() {
         let s = state_with_known_client_limit(1);
         let removed = Arc::new(Mutex::new(Vec::<String>::new()));
         let observed = removed.clone();
-        s.set_client_removal_hook(Arc::new(move |id| {
+        s.set_client_removal_hook(Arc::new(move |id, _generation| {
             observed.lock().unwrap().push(id.to_owned())
         }));
 

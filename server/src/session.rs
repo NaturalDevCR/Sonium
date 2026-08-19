@@ -483,7 +483,7 @@ pub async fn handle(
 
     validate_client_id(&client_id)?;
     tracing::Span::current().record("client_id", client_id.as_str());
-    state.try_client_connected(
+    let session_generation = state.try_client_connected(
         &client_id,
         &hostname,
         &client_name,
@@ -492,6 +492,7 @@ pub async fn handle(
         peer,
         proto_ver,
     )?;
+    metrics::register_client_session(&client_id, session_generation);
     metrics::TOTAL_CONNECTIONS.inc();
     metrics::CONNECTED_CLIENTS.inc();
 
@@ -511,7 +512,7 @@ pub async fn handle(
         },
     )
     .await;
-    state.client_disconnected(&client_id);
+    state.client_disconnected_generation(&client_id, session_generation);
     metrics::CONNECTED_CLIENTS.dec();
     result
 }
@@ -1218,6 +1219,8 @@ where
 mod tests {
     use super::*;
     use sonium_protocol::messages::HealthReport;
+    use std::sync::Barrier;
+    use std::thread;
     use tokio::sync::Semaphore;
 
     const BUF_MS: u32 = 1200;
@@ -1272,6 +1275,52 @@ mod tests {
             ClientSessionPermit::try_acquire(capacity).is_ok(),
             "dropping a session permit must release capacity for the next client"
         );
+    }
+
+    #[test]
+    fn stale_disconnect_cleanup_after_reconnect_preserves_new_metric_labels() {
+        const ID: &str = "session-generation-race";
+        let state = Arc::new(ServerState::new(
+            Arc::new(sonium_control::EventBus::new()),
+            None,
+            vec![],
+            vec![],
+        ));
+        let addr = "127.0.0.1:50000".parse().unwrap();
+        let old_generation = state
+            .try_client_connected(ID, "old", "Sonium", "linux", "aarch64", addr, 2)
+            .expect("old session admitted");
+        let report = HealthReport::new(0, 0, 0, 100, 0, 0);
+        metrics::register_client_session(ID, old_generation);
+        metrics::observe_client_health(ID, "tcp", &report, AudioHealthState::Stable);
+
+        let cleanup_entered = Arc::new(Barrier::new(2));
+        let allow_cleanup = Arc::new(Barrier::new(2));
+        let hook_entered = cleanup_entered.clone();
+        let hook_release = allow_cleanup.clone();
+        state.set_client_removal_hook(Arc::new(move |client_id, generation| {
+            hook_entered.wait();
+            hook_release.wait();
+            metrics::forget_client(client_id, generation);
+        }));
+
+        let stale_state = state.clone();
+        let stale_disconnect = thread::spawn(move || {
+            assert!(stale_state.client_disconnected_generation(ID, old_generation));
+        });
+        cleanup_entered.wait();
+
+        let new_generation = state
+            .try_client_connected(ID, "new", "Sonium", "linux", "aarch64", addr, 2)
+            .expect("reconnect admitted while old cleanup waits");
+        metrics::register_client_session(ID, new_generation);
+        metrics::observe_client_health(ID, "tcp", &report, AudioHealthState::Stable);
+
+        allow_cleanup.wait();
+        stale_disconnect.join().expect("stale disconnect thread");
+
+        assert!(metrics::gather().contains(&format!("client_id=\"{ID}\"")));
+        metrics::forget_client(ID, new_generation);
     }
 
     #[test]
