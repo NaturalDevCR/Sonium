@@ -430,6 +430,29 @@ async fn ws_does_not_accept_a_long_lived_jwt_from_the_url() {
 }
 
 #[tokio::test]
+async fn websocket_ticket_capacity_is_reported_as_a_retryable_non_auth_error() {
+    let state = Arc::new(ServerState::new(
+        Arc::new(EventBus::new()),
+        None,
+        vec![],
+        vec![],
+    ));
+    let (auth, token) = test_auth();
+    for _ in 0..1024 {
+        auth.issue_ws_ticket(&token)
+            .expect("ticket capacity has not been reached yet");
+    }
+
+    let response = api::router(state)
+        .layer(axum::Extension(auth))
+        .oneshot(post_empty("/events/ticket", &token))
+        .await
+        .expect("ticket endpoint responds");
+
+    assert_eq!(response.status(), StatusCode::TOO_MANY_REQUESTS);
+}
+
+#[tokio::test]
 async fn ws_closes_before_forwarding_events_after_session_revocation() {
     use futures_util::StreamExt;
     use tokio_tungstenite::connect_async;

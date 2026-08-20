@@ -3,7 +3,7 @@
 //! Mount with [`router`] inside the server's `axum` application.
 //! All handlers share [`AppState`] via `axum::extract::State`.
 
-use crate::auth::UserStore;
+use crate::auth::{UserStore, WsTicketIssueError};
 use crate::auth_api::{AuthUser, RawToken};
 use crate::state::ServerState;
 use axum::{
@@ -410,8 +410,15 @@ async fn post_ws_ticket(
     Extension(raw): Extension<RawToken>,
 ) -> Response {
     match auth.issue_ws_ticket(&raw.0) {
-        Some(ticket) => (StatusCode::CREATED, Json(WsTicketResponse { ticket })).into_response(),
-        None => (StatusCode::UNAUTHORIZED, "invalid or expired token").into_response(),
+        Ok(ticket) => (StatusCode::CREATED, Json(WsTicketResponse { ticket })).into_response(),
+        Err(WsTicketIssueError::InvalidToken) => {
+            (StatusCode::UNAUTHORIZED, "invalid or expired token").into_response()
+        }
+        Err(WsTicketIssueError::CapacityExceeded) => (
+            StatusCode::TOO_MANY_REQUESTS,
+            "WebSocket ticket capacity reached; retry shortly",
+        )
+            .into_response(),
     }
 }
 

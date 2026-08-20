@@ -9,7 +9,7 @@
 //! provided) also saves to `sonium-state.json` so the state survives restarts.
 
 use chrono::{DateTime, Utc};
-use parking_lot::RwLock;
+use parking_lot::{Mutex, RwLock};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::net::SocketAddr;
@@ -180,6 +180,9 @@ type ClientRemovalHook = dyn Fn(&str, u64) + Send + Sync + 'static;
 /// control API.
 pub struct ServerState {
     clients: RwLock<HashMap<String, ClientInfo>>,
+    /// Serializes client replacement with deletion without holding either
+    /// state lock across the other, avoiding the clients/groups lock inversion.
+    client_lifecycle: Mutex<()>,
     max_known_clients: usize,
     client_removal_hook: RwLock<Option<Arc<ClientRemovalHook>>>,
     next_client_generation: AtomicU64,
@@ -308,6 +311,7 @@ impl ServerState {
                     })
                     .collect(),
             ),
+            client_lifecycle: Mutex::new(()),
             max_known_clients,
             client_removal_hook: RwLock::new(None),
             next_client_generation: AtomicU64::new(1),
@@ -462,6 +466,7 @@ impl ServerState {
     ) -> Result<u64, SoniumError> {
         let id = id.into();
         validate_client_id(&id)?;
+        let _lifecycle = self.client_lifecycle.lock();
         let hostname = hostname.into();
 
         let (info, evicted) = {
@@ -612,6 +617,7 @@ impl ServerState {
     /// Permanently remove a disconnected client from the registry.
     /// Returns `false` if the client is not found or is still connected.
     pub fn delete_client(&self, client_id: &str) -> bool {
+        let _lifecycle = self.client_lifecycle.lock();
         let info = {
             let mut clients = self.clients.write();
             match clients.get(client_id) {
@@ -625,6 +631,8 @@ impl ServerState {
         if let Some(g) = self.groups.write().get_mut(&info.group_id) {
             g.client_ids.retain(|id| id != client_id);
         }
+        // Emit while reconnects are still excluded so an old ClientDeleted
+        // event can never arrive after the replacement ClientConnected event.
         self.events.emit(crate::ws::Event::ClientDeleted {
             client_id: client_id.into(),
         });
@@ -1224,6 +1232,74 @@ mod tests {
         assert_ne!(first, second);
         assert!(!s.client_disconnected_generation("generation-client", first));
         assert!(s.get_client("generation-client").unwrap().is_connected());
+    }
+
+    #[test]
+    fn delete_and_reconnect_keep_the_replacement_membership_and_event_order() {
+        use std::sync::mpsc;
+        use std::time::Duration;
+
+        let s = state();
+        connect(&s, "generation-client");
+        s.client_disconnected("generation-client");
+        let mut events = s.events().subscribe();
+        let lifecycle = s.client_lifecycle.lock();
+
+        let (delete_started_tx, delete_started_rx) = mpsc::channel();
+        let (delete_done_tx, delete_done_rx) = mpsc::channel();
+        let deleting = s.clone();
+        std::thread::spawn(move || {
+            delete_started_tx.send(()).unwrap();
+            delete_done_tx
+                .send(deleting.delete_client("generation-client"))
+                .unwrap();
+        });
+        delete_started_rx
+            .recv_timeout(Duration::from_secs(1))
+            .unwrap();
+
+        let (reconnect_done_tx, reconnect_done_rx) = mpsc::channel();
+        let reconnecting = s.clone();
+        std::thread::spawn(move || {
+            reconnect_done_tx
+                .send(reconnecting.try_client_connected(
+                    "generation-client",
+                    "replacement-host",
+                    "Sonium",
+                    "linux",
+                    "aarch64",
+                    addr(),
+                    2,
+                ))
+                .unwrap();
+        });
+
+        drop(lifecycle);
+        assert!(delete_done_rx.recv_timeout(Duration::from_secs(1)).unwrap());
+        reconnect_done_rx
+            .recv_timeout(Duration::from_secs(1))
+            .unwrap()
+            .expect("replacement session is admitted");
+
+        let replacement = s.get_client("generation-client").unwrap();
+        assert_eq!(replacement.hostname, "replacement-host");
+        assert!(replacement.is_connected());
+        assert!(s
+            .get_group("default")
+            .unwrap()
+            .client_ids
+            .contains(&"generation-client".to_string()));
+
+        let deleted = events.try_recv().unwrap();
+        let connected = events.try_recv().unwrap();
+        assert!(matches!(
+            deleted,
+            crate::ws::Event::ClientDeleted { ref client_id } if client_id == "generation-client"
+        ));
+        assert!(matches!(
+            connected,
+            crate::ws::Event::ClientConnected { ref client } if client.hostname == "replacement-host"
+        ));
     }
 
     #[test]

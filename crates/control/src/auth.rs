@@ -9,7 +9,7 @@ use std::fs::OpenOptions;
 use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
-use std::time::{Duration, Instant};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 #[cfg(unix)]
 use std::fs::File;
@@ -102,6 +102,13 @@ pub struct WsTicketClaims {
     claims: Claims,
     token_hash: String,
     expires_at: Instant,
+}
+
+/// Failure while issuing a WebSocket admission ticket.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum WsTicketIssueError {
+    InvalidToken,
+    CapacityExceeded,
 }
 
 const WS_TICKET_TTL: Duration = Duration::from_secs(60);
@@ -505,17 +512,23 @@ impl UserStore {
     }
 
     /// Issue a random, short-lived, single-use ticket for a WebSocket upgrade.
-    pub fn issue_ws_ticket(&self, token: &str) -> Option<String> {
+    pub fn issue_ws_ticket(&self, token: &str) -> Result<String, WsTicketIssueError> {
         self.issue_ws_ticket_with_ttl(token, WS_TICKET_TTL)
     }
 
-    fn issue_ws_ticket_with_ttl(&self, token: &str, ttl: Duration) -> Option<String> {
-        let claims = self.verify_token(token)?;
+    fn issue_ws_ticket_with_ttl(
+        &self,
+        token: &str,
+        ttl: Duration,
+    ) -> Result<String, WsTicketIssueError> {
+        let claims = self
+            .verify_token(token)
+            .ok_or(WsTicketIssueError::InvalidToken)?;
         let mut tickets = self.ws_tickets.lock();
         let now = Instant::now();
         tickets.retain(|_, ticket| ticket.expires_at > now);
         if tickets.len() >= MAX_PENDING_WS_TICKETS {
-            return None;
+            return Err(WsTicketIssueError::CapacityExceeded);
         }
 
         for _ in 0..4 {
@@ -531,9 +544,9 @@ impl UserStore {
                     expires_at: now + ttl,
                 },
             );
-            return Some(ticket);
+            return Ok(ticket);
         }
-        None
+        Err(WsTicketIssueError::CapacityExceeded)
     }
 
     /// Atomically consume a WebSocket ticket before accepting an upgrade.
@@ -545,6 +558,12 @@ impl UserStore {
 
     /// Check that a connected WebSocket's admitted session remains valid.
     pub fn verify_ws_ticket_claims(&self, ticket: &WsTicketClaims) -> bool {
+        let now = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .map_or(usize::MAX, |duration| duration.as_secs() as usize);
+        if ticket.claims.exp <= now {
+            return false;
+        }
         if self.revoked.read().contains(&ticket.token_hash) {
             return false;
         }
@@ -1332,6 +1351,31 @@ mod tests {
         assert!(
             store.consume_ws_ticket(&ticket).is_none(),
             "tickets from the previous session version are rejected"
+        );
+    }
+
+    #[test]
+    fn websocket_ticket_claims_reject_an_expired_jwt_after_upgrade() {
+        let dir = tempdir().unwrap();
+        let store =
+            UserStore::load_or_init(dir.path(), Some("admin-password".to_string())).unwrap();
+        let user = store.authenticate("admin", "admin-password").unwrap();
+        let ticket = WsTicketClaims {
+            claims: Claims {
+                sub: user.id,
+                username: user.username,
+                role: user.role.to_string(),
+                must_change_password: user.must_change_password,
+                session_version: user.session_version,
+                exp: 0,
+            },
+            token_hash: "not-revoked".into(),
+            expires_at: Instant::now() + Duration::from_secs(60),
+        };
+
+        assert!(
+            !store.verify_ws_ticket_claims(&ticket),
+            "a connected WebSocket must be rejected when its JWT expires"
         );
     }
 }
