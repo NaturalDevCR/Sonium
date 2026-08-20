@@ -95,6 +95,27 @@ fn delete(uri: &str, token: &str) -> Request<Body> {
         .unwrap()
 }
 
+fn post_empty(uri: &str, token: &str) -> Request<Body> {
+    Request::builder()
+        .method(Method::POST)
+        .uri(uri)
+        .header(header::AUTHORIZATION, format!("Bearer {token}"))
+        .body(Body::empty())
+        .unwrap()
+}
+
+fn ws_request(url: &str, ticket: &str) -> tokio_tungstenite::tungstenite::http::Request<()> {
+    use tokio_tungstenite::tungstenite::client::IntoClientRequest;
+    use tokio_tungstenite::tungstenite::http::{header::SEC_WEBSOCKET_PROTOCOL, HeaderValue};
+
+    let mut request = url.into_client_request().unwrap();
+    request.headers_mut().insert(
+        SEC_WEBSOCKET_PROTOCOL,
+        HeaderValue::from_str(ticket).unwrap(),
+    );
+    request
+}
+
 // ── /status ───────────────────────────────────────────────────────────────
 
 #[tokio::test]
@@ -330,8 +351,8 @@ async fn start_ws_test_server(
 }
 
 #[tokio::test]
-async fn ws_authenticates_with_first_message_and_no_url_credential() {
-    use futures_util::{SinkExt, StreamExt};
+async fn ws_ticket_is_consumed_before_upgrade_and_cannot_be_replayed() {
+    use futures_util::StreamExt;
     use tokio_tungstenite::connect_async;
     use tokio_tungstenite::tungstenite::Message;
 
@@ -342,28 +363,24 @@ async fn ws_authenticates_with_first_message_and_no_url_credential() {
         vec![],
     ));
     let (auth, token) = test_auth();
+    let app = api::router(state.clone()).layer(axum::Extension(auth.clone()));
+    let ticket_response = app
+        .oneshot(post_empty("/events/ticket", &token))
+        .await
+        .expect("ticket endpoint responds");
+    assert_eq!(ticket_response.status(), StatusCode::CREATED);
+    let ticket = json_body(ticket_response.into_body()).await["ticket"]
+        .as_str()
+        .expect("ticket response contains a ticket")
+        .to_owned();
     let (port, _server) = start_ws_test_server(state.clone(), auth).await;
 
     let url = format!("ws://127.0.0.1:{port}/events");
-    let (mut ws, _) = connect_async(&url).await.expect("WS connect failed");
-    ws.send(Message::Text(
-        json!({"type": "authenticate", "token": token}).to_string(),
-    ))
-    .await
-    .unwrap();
-
-    let authenticated = tokio::time::timeout(tokio::time::Duration::from_secs(1), ws.next())
+    let request = ws_request(&url, &ticket);
+    let (mut ws, response) = connect_async(request)
         .await
-        .expect("timeout waiting for WS authentication")
-        .expect("WS closed during authentication")
-        .expect("WS authentication response failed");
-    let Message::Text(authenticated) = authenticated else {
-        panic!("expected text authentication response");
-    };
-    assert_eq!(
-        serde_json::from_str::<Value>(&authenticated).unwrap(),
-        json!({"type": "authenticated"})
-    );
+        .expect("ticketed WS connect failed");
+    assert_eq!(response.headers()["Sec-WebSocket-Protocol"], ticket);
 
     state
         .events()
@@ -380,11 +397,16 @@ async fn ws_authenticates_with_first_message_and_no_url_credential() {
         serde_json::from_str::<Value>(&event).unwrap()["type"],
         "heartbeat"
     );
+
+    let replay = ws_request(&url, &ticket);
+    assert!(
+        connect_async(replay).await.is_err(),
+        "a consumed WebSocket ticket must be rejected before upgrade"
+    );
 }
 
 #[tokio::test]
 async fn ws_does_not_accept_a_long_lived_jwt_from_the_url() {
-    use futures_util::StreamExt;
     use tokio_tungstenite::connect_async;
 
     let state = Arc::new(ServerState::new(
@@ -395,26 +417,21 @@ async fn ws_does_not_accept_a_long_lived_jwt_from_the_url() {
     ));
     let (auth, token) = test_auth();
     let (port, _server) = start_ws_test_server(state.clone(), auth).await;
-
-    let url = format!("ws://127.0.0.1:{port}/events?token={token}");
-    let (mut ws, _) = connect_async(&url)
-        .await
-        .expect("WS upgrade should remain available");
-    state
-        .events()
-        .emit(sonium_control::ws::Event::Heartbeat { uptime_s: 42 });
+    let url = format!("ws://127.0.0.1:{port}/events");
 
     assert!(
-        tokio::time::timeout(tokio::time::Duration::from_millis(100), ws.next())
-            .await
-            .is_err(),
-        "a JWT query parameter must not authenticate the event stream"
+        connect_async(format!("{url}?token={token}")).await.is_err(),
+        "a JWT query parameter must be rejected before WebSocket upgrade"
+    );
+    assert!(
+        connect_async(ws_request(&url, &token)).await.is_err(),
+        "a long-lived JWT offered as a WebSocket subprotocol must be rejected before upgrade"
     );
 }
 
 #[tokio::test]
 async fn ws_closes_before_forwarding_events_after_session_revocation() {
-    use futures_util::{SinkExt, StreamExt};
+    use futures_util::StreamExt;
     use tokio_tungstenite::connect_async;
     use tokio_tungstenite::tungstenite::Message;
 
@@ -425,18 +442,11 @@ async fn ws_closes_before_forwarding_events_after_session_revocation() {
         vec![],
     ));
     let (auth, token) = test_auth();
+    let ticket = auth.issue_ws_ticket(&token).expect("issue a ticket");
     let (port, _server) = start_ws_test_server(state.clone(), auth.clone()).await;
     let url = format!("ws://127.0.0.1:{port}/events");
-    let (mut ws, _) = connect_async(&url).await.expect("WS connect failed");
-    ws.send(Message::Text(
-        json!({"type": "authenticate", "token": token}).to_string(),
-    ))
-    .await
-    .unwrap();
-    let _ = tokio::time::timeout(tokio::time::Duration::from_secs(1), ws.next())
-        .await
-        .expect("timeout waiting for authentication")
-        .expect("WS closed during authentication");
+    let request = ws_request(&url, &ticket);
+    let (mut ws, _) = connect_async(request).await.expect("WS connect failed");
 
     auth.revoke_token(&token);
     state

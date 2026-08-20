@@ -9,6 +9,7 @@ use std::fs::OpenOptions;
 use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
+use std::time::{Duration, Instant};
 
 #[cfg(unix)]
 use std::fs::File;
@@ -93,6 +94,19 @@ pub struct Claims {
     pub exp: usize,
 }
 
+/// Claims admitted by a one-use WebSocket ticket.
+///
+/// The original JWT itself is never retained by the WebSocket connection.
+#[derive(Debug, Clone)]
+pub struct WsTicketClaims {
+    claims: Claims,
+    token_hash: String,
+    expires_at: Instant,
+}
+
+const WS_TICKET_TTL: Duration = Duration::from_secs(60);
+const MAX_PENDING_WS_TICKETS: usize = 1024;
+
 // ── Serialisation shim for the users file ────────────────────────────────
 
 #[derive(Serialize, Deserialize)]
@@ -156,6 +170,7 @@ pub struct UserStore {
     jwt_secret: RwLock<String>,
     file_path: PathBuf,
     revoked: RwLock<HashSet<String>>,
+    ws_tickets: Mutex<HashMap<String, WsTicketClaims>>,
     persistence: Mutex<()>,
     #[cfg(test)]
     persist_fault: Mutex<Option<PersistFault>>,
@@ -192,6 +207,7 @@ impl UserStore {
             jwt_secret: RwLock::new(Self::generate_secret()),
             file_path: file_path.clone(),
             revoked: RwLock::new(HashSet::new()),
+            ws_tickets: Mutex::new(HashMap::new()),
             persistence: Mutex::new(()),
             #[cfg(test)]
             persist_fault: Mutex::new(None),
@@ -486,6 +502,59 @@ impl UserStore {
         let user = self.users.read().get(&claims.sub).cloned()?;
         (user.role.to_string() == claims.role && user.session_version == claims.session_version)
             .then_some(claims)
+    }
+
+    /// Issue a random, short-lived, single-use ticket for a WebSocket upgrade.
+    pub fn issue_ws_ticket(&self, token: &str) -> Option<String> {
+        self.issue_ws_ticket_with_ttl(token, WS_TICKET_TTL)
+    }
+
+    fn issue_ws_ticket_with_ttl(&self, token: &str, ttl: Duration) -> Option<String> {
+        let claims = self.verify_token(token)?;
+        let mut tickets = self.ws_tickets.lock();
+        let now = Instant::now();
+        tickets.retain(|_, ticket| ticket.expires_at > now);
+        if tickets.len() >= MAX_PENDING_WS_TICKETS {
+            return None;
+        }
+
+        for _ in 0..4 {
+            let ticket = Alphanumeric.sample_string(&mut rand::thread_rng(), 48);
+            if tickets.contains_key(&ticket) {
+                continue;
+            }
+            tickets.insert(
+                ticket.clone(),
+                WsTicketClaims {
+                    claims,
+                    token_hash: Self::token_hash(token),
+                    expires_at: now + ttl,
+                },
+            );
+            return Some(ticket);
+        }
+        None
+    }
+
+    /// Atomically consume a WebSocket ticket before accepting an upgrade.
+    pub fn consume_ws_ticket(&self, ticket: &str) -> Option<WsTicketClaims> {
+        let ticket = self.ws_tickets.lock().remove(ticket)?;
+        (ticket.expires_at > Instant::now() && self.verify_ws_ticket_claims(&ticket))
+            .then_some(ticket)
+    }
+
+    /// Check that a connected WebSocket's admitted session remains valid.
+    pub fn verify_ws_ticket_claims(&self, ticket: &WsTicketClaims) -> bool {
+        if self.revoked.read().contains(&ticket.token_hash) {
+            return false;
+        }
+        self.users
+            .read()
+            .get(&ticket.claims.sub)
+            .is_some_and(|user| {
+                user.role.to_string() == ticket.claims.role
+                    && user.session_version == ticket.claims.session_version
+            })
     }
 
     pub fn all_users(&self) -> Vec<UserView> {
@@ -1213,6 +1282,57 @@ mod tests {
 
         let reloaded = UserStore::load_or_init(dir.path(), None).unwrap();
         assert_eq!(reloaded.get_user(&user.id).unwrap().role, Role::Operator);
+    }
+
+    #[test]
+    fn websocket_ticket_expires_and_is_consumed_once() {
+        let dir = tempdir().unwrap();
+        let store =
+            UserStore::load_or_init(dir.path(), Some("admin-password".to_string())).unwrap();
+        let token = store.create_token(&store.authenticate("admin", "admin-password").unwrap(), 1);
+
+        let expired = store
+            .issue_ws_ticket_with_ttl(&token, std::time::Duration::ZERO)
+            .expect("valid token issues a ticket");
+        assert!(
+            store.consume_ws_ticket(&expired).is_none(),
+            "expired ticket is rejected"
+        );
+
+        let ticket = store
+            .issue_ws_ticket(&token)
+            .expect("valid token issues a ticket");
+        assert!(
+            store.consume_ws_ticket(&ticket).is_some(),
+            "fresh ticket is accepted"
+        );
+        assert!(
+            store.consume_ws_ticket(&ticket).is_none(),
+            "ticket replay is rejected"
+        );
+    }
+
+    #[test]
+    fn websocket_ticket_is_invalidated_when_its_session_changes() {
+        let dir = tempdir().unwrap();
+        let store =
+            UserStore::load_or_init(dir.path(), Some("admin-password".to_string())).unwrap();
+        let user = store
+            .create_user("alice", "alice-password", Role::Viewer)
+            .unwrap()
+            .unwrap();
+        let token = store.create_token(&store.authenticate("alice", "alice-password").unwrap(), 1);
+        let ticket = store
+            .issue_ws_ticket(&token)
+            .expect("valid token issues a ticket");
+
+        assert!(store
+            .update_user(&user.id, Some(Role::Operator), None)
+            .unwrap());
+        assert!(
+            store.consume_ws_ticket(&ticket).is_none(),
+            "tickets from the previous session version are rejected"
+        );
     }
 }
 

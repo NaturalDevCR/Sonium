@@ -612,13 +612,15 @@ impl ServerState {
     /// Permanently remove a disconnected client from the registry.
     /// Returns `false` if the client is not found or is still connected.
     pub fn delete_client(&self, client_id: &str) -> bool {
-        let mut clients = self.clients.write();
-        match clients.get(client_id) {
-            None => return false,
-            Some(c) if c.is_connected() => return false,
-            _ => {}
-        }
-        let info = clients.remove(client_id).unwrap();
+        let info = {
+            let mut clients = self.clients.write();
+            match clients.get(client_id) {
+                None => return false,
+                Some(c) if c.is_connected() => return false,
+                _ => {}
+            }
+            clients.remove(client_id).expect("client was checked above")
+        };
         // Remove from its group.
         if let Some(g) = self.groups.write().get_mut(&info.group_id) {
             g.client_ids.retain(|id| id != client_id);
@@ -1402,6 +1404,38 @@ mod tests {
             .unwrap()
             .client_ids
             .contains(&"pi-1".to_string()));
+    }
+
+    #[test]
+    fn delete_client_with_persistence_releases_the_client_lock_before_saving() {
+        use std::sync::mpsc;
+        use std::time::Duration;
+        use tempfile::tempdir;
+
+        let dir = tempdir().unwrap();
+        let persistence = Arc::new(PersistenceStore::new(dir.path()));
+        let s = Arc::new(ServerState::new(
+            Arc::new(EventBus::new()),
+            Some(persistence.clone()),
+            vec![],
+            vec![],
+        ));
+        connect(&s, "pi-1");
+        s.client_disconnected("pi-1");
+
+        let (done_tx, done_rx) = mpsc::channel();
+        let deleting = s.clone();
+        std::thread::spawn(move || done_tx.send(deleting.delete_client("pi-1")).unwrap());
+
+        assert!(
+            done_rx.recv_timeout(Duration::from_secs(1)).unwrap(),
+            "deletion must finish instead of recursively locking clients during persistence"
+        );
+        let (_, clients, _) = persistence.load();
+        assert!(
+            clients.is_empty(),
+            "deleted client must not remain persisted"
+        );
     }
 
     #[test]

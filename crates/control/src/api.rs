@@ -4,11 +4,11 @@
 //! All handlers share [`AppState`] via `axum::extract::State`.
 
 use crate::auth::UserStore;
-use crate::auth_api::AuthUser;
+use crate::auth_api::{AuthUser, RawToken};
 use crate::state::ServerState;
 use axum::{
     extract::{Path, Query, Request, State, WebSocketUpgrade},
-    http::{header, StatusCode},
+    http::{header, HeaderMap, StatusCode},
     middleware::{self, Next},
     response::{IntoResponse, Json, Response},
     routing::{delete, get, patch, post},
@@ -36,11 +36,11 @@ pub fn router(state: AppState) -> Router {
         .route("/clients", get(get_clients))
         .route("/groups", get(get_groups))
         .route("/streams", get(get_streams))
+        .route("/events/ticket", post(post_ws_ticket))
         .layer(middleware::from_fn(require_viewer));
 
-    // Browsers cannot attach Authorization headers to WebSocket upgrades.
-    // Upgrade without credentials, then authenticate with the first protocol
-    // message so no long-lived credential appears in the URL.
+    // Browsers cannot attach Authorization headers to WebSocket upgrades, so
+    // they first exchange the JWT for a short-lived, one-use subprotocol ticket.
     let ws_routes = Router::new().route("/events", get(ws_handler));
 
     // Operator or admin only
@@ -84,11 +84,11 @@ async fn require_viewer(
     mut req: Request,
     next: Next,
 ) -> Response {
-    match extract_token(&req)
-        .as_deref()
-        .and_then(|t| auth.verify_token(t))
-    {
+    let token = extract_token(&req);
+    match token.as_deref().and_then(|t| auth.verify_token(t)) {
         Some(claims) => {
+            req.extensions_mut()
+                .insert(RawToken(token.expect("token just verified")));
             req.extensions_mut().insert(AuthUser(claims));
             next.run(req).await
         }
@@ -400,51 +400,60 @@ async fn get_streams(State(s): State<AppState>) -> impl IntoResponse {
 
 // ── WebSocket events ──────────────────────────────────────────────────────
 
+#[derive(Serialize)]
+struct WsTicketResponse {
+    ticket: String,
+}
+
+async fn post_ws_ticket(
+    Extension(auth): Extension<Arc<UserStore>>,
+    Extension(raw): Extension<RawToken>,
+) -> Response {
+    match auth.issue_ws_ticket(&raw.0) {
+        Some(ticket) => (StatusCode::CREATED, Json(WsTicketResponse { ticket })).into_response(),
+        None => (StatusCode::UNAUTHORIZED, "invalid or expired token").into_response(),
+    }
+}
+
 async fn ws_handler(
     ws: WebSocketUpgrade,
     State(s): State<AppState>,
     Extension(auth): Extension<Arc<UserStore>>,
+    headers: HeaderMap,
 ) -> Response {
-    ws.on_upgrade(move |socket| handle_ws(socket, s, auth))
-}
+    let Some(ticket) = headers
+        .get(header::SEC_WEBSOCKET_PROTOCOL)
+        .and_then(|value| value.to_str().ok())
+        .and_then(|value| {
+            let mut protocols = value.split(',').map(str::trim);
+            let ticket = protocols.next()?;
+            (protocols.next().is_none() && !ticket.is_empty()).then_some(ticket)
+        })
+        .map(str::to_owned)
+    else {
+        return (StatusCode::UNAUTHORIZED, "missing WebSocket ticket").into_response();
+    };
+    let Some(admitted) = auth.consume_ws_ticket(&ticket) else {
+        return (
+            StatusCode::UNAUTHORIZED,
+            "invalid or expired WebSocket ticket",
+        )
+            .into_response();
+    };
 
-#[derive(Deserialize)]
-struct WsAuthMessage {
-    #[serde(rename = "type")]
-    kind: String,
-    token: String,
+    ws.protocols([ticket])
+        .on_upgrade(move |socket| handle_ws(socket, s, auth, admitted))
 }
 
 async fn handle_ws(
     mut socket: axum::extract::ws::WebSocket,
     state: AppState,
     auth: Arc<UserStore>,
+    admitted: crate::auth::WsTicketClaims,
 ) {
     use axum::extract::ws::Message as WsMsg;
-    use tokio::time::{timeout, Duration};
+    use tokio::time::Duration;
 
-    let Ok(Some(Ok(WsMsg::Text(message)))) = timeout(Duration::from_secs(5), socket.recv()).await
-    else {
-        let _ = socket.close().await;
-        return;
-    };
-    let Ok(message) = serde_json::from_str::<WsAuthMessage>(&message) else {
-        let _ = socket.close().await;
-        return;
-    };
-    if message.kind != "authenticate" || auth.verify_token(&message.token).is_none() {
-        let _ = socket.close().await;
-        return;
-    }
-    if socket
-        .send(WsMsg::Text(r#"{"type":"authenticated"}"#.into()))
-        .await
-        .is_err()
-    {
-        return;
-    }
-
-    let token = message.token;
     let mut rx = state.events().subscribe();
     let mut session_check = tokio::time::interval(Duration::from_secs(1));
     session_check.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
@@ -452,7 +461,7 @@ async fn handle_ws(
     loop {
         tokio::select! {
             _ = session_check.tick() => {
-                if auth.verify_token(&token).is_none() {
+                if !auth.verify_ws_ticket_claims(&admitted) {
                     let _ = socket.close().await;
                     break;
                 }
@@ -460,7 +469,7 @@ async fn handle_ws(
             event = rx.recv() => {
                 match event {
                     Ok(ev) => {
-                        if auth.verify_token(&token).is_none() {
+                        if !auth.verify_ws_ticket_claims(&admitted) {
                             let _ = socket.close().await;
                             break;
                         }

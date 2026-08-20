@@ -238,6 +238,10 @@ export type Event =
   | { type: 'client_health';       client_id: string; health: HealthReport }
   | { type: 'transport_mode_changed'; mode: TransportMode; server_udp_port: number };
 
+interface WsTicketResponse {
+  ticket: string;
+}
+
 // ── HTTP helpers ──────────────────────────────────────────────────────────
 
 async function get<T>(path: string): Promise<T> {
@@ -419,27 +423,34 @@ export function subscribeEvents(
   onClose?: () => void,
 ): () => void {
   const protocol = location.protocol === 'https:' ? 'wss' : 'ws';
-  const ws = new WebSocket(`${protocol}://${location.host}/api/events`);
+  let ws: WebSocket | null = null;
+  let cancelled = false;
 
-  ws.onopen = () => {
-    if (!_token) {
-      ws.close();
-      return;
-    }
-    ws.send(JSON.stringify({ type: 'authenticate', token: _token }));
-  };
-
-  ws.onmessage = (msg) => {
+  void (async () => {
     try {
-      const event = JSON.parse(msg.data) as Event | { type: 'authenticated' };
-      if (event.type !== 'authenticated') onEvent(event as Event);
-    } catch {
-      console.warn('Failed to parse event:', msg.data);
+      const { ticket } = await post<WsTicketResponse>('/events/ticket', {});
+      if (cancelled) return;
+
+      ws = new WebSocket(`${protocol}://${location.host}/api/events`, ticket);
+      ws.onmessage = (msg) => {
+        try {
+          onEvent(JSON.parse(msg.data) as Event);
+        } catch {
+          console.warn('Failed to parse event:', msg.data);
+        }
+      };
+      ws.onclose = () => onClose?.();
+      ws.onerror = (e) => console.error('WS error', e);
+    } catch (error) {
+      if (!cancelled) {
+        console.error('WS ticket error', error);
+        onClose?.();
+      }
     }
+  })();
+
+  return () => {
+    cancelled = true;
+    ws?.close();
   };
-
-  ws.onclose = () => onClose?.();
-  ws.onerror = (e) => console.error('WS error', e);
-
-  return () => ws.close();
 }
