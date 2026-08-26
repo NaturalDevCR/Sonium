@@ -1245,18 +1245,13 @@ mod tests {
         let mut events = s.events().subscribe();
         let lifecycle = s.client_lifecycle.lock();
 
-        let (delete_started_tx, delete_started_rx) = mpsc::channel();
         let (delete_done_tx, delete_done_rx) = mpsc::channel();
         let deleting = s.clone();
         std::thread::spawn(move || {
-            delete_started_tx.send(()).unwrap();
             delete_done_tx
                 .send(deleting.delete_client("generation-client"))
                 .unwrap();
         });
-        delete_started_rx
-            .recv_timeout(Duration::from_secs(1))
-            .unwrap();
 
         let (reconnect_done_tx, reconnect_done_rx) = mpsc::channel();
         let reconnecting = s.clone();
@@ -1275,11 +1270,38 @@ mod tests {
         });
 
         drop(lifecycle);
-        assert!(delete_done_rx.recv_timeout(Duration::from_secs(1)).unwrap());
-        reconnect_done_rx
+        let deleted = delete_done_rx.recv_timeout(Duration::from_secs(1)).unwrap();
+        let reconnected = reconnect_done_rx
             .recv_timeout(Duration::from_secs(1))
             .unwrap()
             .expect("replacement session is admitted");
+
+        // Both operations may acquire the lifecycle mutex first. If reconnect
+        // wins, delete observes the replacement and is rejected; if delete
+        // wins, it emits ClientDeleted while still holding the mutex, followed
+        // by reconnect's ClientConnected event. In either case, the mutex
+        // guarantees that the operations cannot interleave.
+        let first = events.try_recv().unwrap();
+        if matches!(
+            first,
+            crate::ws::Event::ClientDeleted { ref client_id }
+                if client_id == "generation-client"
+        ) {
+            assert!(deleted);
+            assert!(matches!(
+                events.try_recv().unwrap(),
+                crate::ws::Event::ClientConnected { ref client }
+                    if client.hostname == "replacement-host"
+            ));
+        } else {
+            assert!(!deleted);
+            assert!(matches!(
+                first,
+                crate::ws::Event::ClientConnected { ref client }
+                    if client.hostname == "replacement-host"
+            ));
+            assert!(events.try_recv().is_err());
+        }
 
         let replacement = s.get_client("generation-client").unwrap();
         assert_eq!(replacement.hostname, "replacement-host");
@@ -1290,16 +1312,7 @@ mod tests {
             .client_ids
             .contains(&"generation-client".to_string()));
 
-        let deleted = events.try_recv().unwrap();
-        let connected = events.try_recv().unwrap();
-        assert!(matches!(
-            deleted,
-            crate::ws::Event::ClientDeleted { ref client_id } if client_id == "generation-client"
-        ));
-        assert!(matches!(
-            connected,
-            crate::ws::Event::ClientConnected { ref client } if client.hostname == "replacement-host"
-        ));
+        assert_eq!(reconnected, replacement.session_generation);
     }
 
     #[test]
