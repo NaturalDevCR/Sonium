@@ -682,6 +682,28 @@ impl UserStore {
 }
 
 #[cfg(test)]
+impl UserStore {
+    fn fail_next_persist(&self, fault: PersistFault) {
+        *self.persist_fault.lock() = Some(fault);
+    }
+
+    fn pause_after_next_mutation(
+        &self,
+        entered: Arc<std::sync::Barrier>,
+        release: Arc<std::sync::Barrier>,
+    ) {
+        *self.mutation_pause.lock() = Some(MutationPause { entered, release });
+    }
+
+    fn pause_after_mutation(&self) {
+        if let Some(pause) = self.mutation_pause.lock().take() {
+            pause.entered.wait();
+            pause.release.wait();
+        }
+    }
+}
+
+#[cfg(test)]
 mod tests {
     use super::*;
     use tempfile::tempdir;
@@ -1377,27 +1399,5 @@ mod tests {
             !store.verify_ws_ticket_claims(&ticket),
             "a connected WebSocket must be rejected when its JWT expires"
         );
-    }
-}
-
-#[cfg(test)]
-impl UserStore {
-    fn fail_next_persist(&self, fault: PersistFault) {
-        *self.persist_fault.lock() = Some(fault);
-    }
-
-    fn pause_after_next_mutation(
-        &self,
-        entered: Arc<std::sync::Barrier>,
-        release: Arc<std::sync::Barrier>,
-    ) {
-        *self.mutation_pause.lock() = Some(MutationPause { entered, release });
-    }
-
-    fn pause_after_mutation(&self) {
-        if let Some(pause) = self.mutation_pause.lock().take() {
-            pause.entered.wait();
-            pause.release.wait();
-        }
     }
 }
