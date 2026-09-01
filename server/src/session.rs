@@ -12,6 +12,7 @@
 //!    to the new broadcaster without dropping the TCP connection.
 //! 6. Marks the client disconnected in [`ServerState`] on exit.
 
+use std::collections::HashMap;
 use std::net::SocketAddr;
 use std::sync::atomic::{AtomicU16, Ordering};
 use std::sync::Arc;
@@ -30,6 +31,10 @@ use tracing::{debug, info, instrument, warn};
 /// (client cannot keep up), the oldest frame is dropped — preventing
 /// backpressure from stalling the session select loop.
 const AUDIO_QUEUE_CAPACITY: usize = 1024;
+/// Control frames are bounded independently from audio.  A session that
+/// cannot drain this many control messages is disconnected so lifecycle
+/// traffic cannot grow memory without bound.
+const CONTROL_QUEUE_CAPACITY: usize = 256;
 
 use sonium_common::{
     config::{validate_client_id, ProtocolError, ServerConfig},
@@ -83,8 +88,8 @@ impl ClientSessionPermit {
 
 /// Dedicated TCP writer task.  Owns the `OwnedWriteHalf` exclusively so the
 /// select loop never blocks on a TCP write.  Audio frames arrive via a bounded
-/// channel (`try_send` — drop oldest on full); control messages use a separate
-/// unbounded channel so they are never lost.
+/// channel (`try_send` — drop on full); control messages use a separate
+/// bounded channel.  Announcement enqueue saturation is connection-fatal.
 ///
 /// Audio is latency-sensitive: the writer always drains the audio queue first
 /// with non-blocking `try_recv` before blocking on either channel.  This
@@ -93,7 +98,7 @@ impl ClientSessionPermit {
 async fn tcp_writer_task(
     mut writer: OwnedWriteHalf,
     mut audio_rx: mpsc::Receiver<bytes::Bytes>,
-    mut ctrl_rx: mpsc::UnboundedReceiver<Vec<u8>>,
+    mut ctrl_rx: mpsc::Receiver<Vec<u8>>,
     peer: SocketAddr,
 ) {
     let mut audio_frames_written: u64 = 0;
@@ -506,6 +511,7 @@ pub async fn handle(
             cfg,
             state: state.clone(),
             client_id: client_id.clone(),
+            session_generation,
             udp_socket,
             hello_udp_port,
             nack_router,
@@ -522,6 +528,7 @@ struct SessionLoopContext {
     cfg: ServerConfig,
     state: Arc<ServerState>,
     client_id: String,
+    session_generation: u64,
     udp_socket: Option<Arc<UdpSocket>>,
     hello_udp_port: u16,
     nack_router: crate::nack_router::NackRouter,
@@ -538,6 +545,7 @@ async fn session_loop(
         cfg,
         state,
         client_id,
+        session_generation,
         udp_socket,
         hello_udp_port,
         nack_router,
@@ -559,7 +567,7 @@ async fn session_loop(
     // All TCP writes go through dedicated channels so the select loop
     // never blocks on write backpressure.
     let (audio_tx, audio_write_rx) = mpsc::channel::<bytes::Bytes>(AUDIO_QUEUE_CAPACITY);
-    let (ctrl_tx, ctrl_rx) = mpsc::unbounded_channel::<Vec<u8>>();
+    let (ctrl_tx, ctrl_rx) = mpsc::channel::<Vec<u8>>(CONTROL_QUEUE_CAPACITY);
 
     // Send CodecHeader if stream is already active (via writer task).
     // We must send these before spawning the writer so they arrive
@@ -567,7 +575,7 @@ async fn session_loop(
     // yet, so we queue them.
     if let Some(b) = &bc {
         if let Some(hdr) = b.codec_header() {
-            let _ = ctrl_tx.send(hdr.to_vec());
+            let _ = ctrl_tx.try_send(hdr.to_vec());
         }
     }
 
@@ -680,7 +688,7 @@ async fn session_loop(
         };
         let mut hdr = MessageHeader::new(MessageType::ServerSettings, 0);
         hdr.id = next_id();
-        let _ = ctrl_tx.send(Message::ServerSettings(settings).encode_with_header(hdr));
+        let _ = ctrl_tx.try_send(Message::ServerSettings(settings).encode_with_header(hdr));
         info!(%peer, buffer_ms = current_buffer_ms, "ServerSettings sent to client");
     }
 
@@ -690,8 +698,11 @@ async fn session_loop(
     let mut audio_rx: Option<broadcast::Receiver<AudioFrame>> = bc.as_ref().map(|b| b.subscribe());
     let mut events_rx = state.events().subscribe();
     let mut announcement_rx = state.subscribe_announcement_controls();
+    let mut announcement_queue = AnnouncementControlQueue::new(ctrl_tx.clone());
     if let Some(control) = state.pending_announcement_control(&group_id) {
-        queue_announcement_control(&ctrl_tx, &group_id, &control);
+        announcement_queue
+            .queue(&group_id, &control)
+            .map_err(|_| anyhow::anyhow!("announcement control queue saturated"))?;
     }
 
     let (incoming_tx, mut incoming_rx) = mpsc::unbounded_channel();
@@ -815,7 +826,7 @@ async fn session_loop(
                                 ctrl_tx: &ctrl_tx,
                                 state: &state,
                                 client_id,
-                                group_id: &group_id,
+                                session_generation,
                                 current_buffer_ms: &mut current_buffer_ms,
                                 auto_buffer_tuner: &mut auto_buffer_tuner,
                                 health_tracker: &mut health_tracker,
@@ -838,7 +849,10 @@ async fn session_loop(
             control = announcement_rx.recv() => {
                 match control {
                     Ok(control) => {
-                        queue_announcement_control(&ctrl_tx, &group_id, &control);
+                        if announcement_queue.queue(&group_id, &control).is_err() {
+                            warn!(%peer, "Announcement control queue saturated; disconnecting slow client");
+                            break Err(anyhow::anyhow!("announcement control queue saturated"));
+                        }
                     }
                     Err(broadcast::error::RecvError::Lagged(dropped)) => {
                         // The scheduler's ACK timeout recovers dropped control
@@ -855,6 +869,19 @@ async fn session_loop(
                     Ok(Event::ClientGroupChanged { client_id: cid, group_id: new_gid })
                         if cid == client_id =>
                     {
+                        let old_group_id = group_id.clone();
+                        let pending = state.pending_announcement_control(&new_gid);
+                        if announcement_queue
+                            .reconcile_group_change(
+                                &old_group_id,
+                                &new_gid,
+                                pending.as_ref(),
+                            )
+                            .is_err()
+                        {
+                            warn!(%peer, "Announcement control queue saturated during group change; disconnecting slow client");
+                            break Err(anyhow::anyhow!("announcement control queue saturated"));
+                        }
                         group_id = new_gid.clone();
                         // Look up the stream assigned to the new group.
                         if let Some(new_sid) = state.get_group(&new_gid)
@@ -970,7 +997,7 @@ async fn session_loop(
                 );
                 let mut hdr = MessageHeader::new(MessageType::GroupSync, 24);
                 hdr.id = next_id();
-                let _ = ctrl_tx.send(Message::GroupSync(gs).encode_with_header(hdr));
+                let _ = ctrl_tx.try_send(Message::GroupSync(gs).encode_with_header(hdr));
                 tracing::trace!(%peer, server_now_us, group_offset_us, "GroupSync broadcast");
             }
         }
@@ -987,7 +1014,7 @@ async fn session_loop(
 
 /// Re-subscribe to a different stream broadcaster and notify the client.
 fn switch_stream(
-    ctrl_tx: &mpsc::UnboundedSender<Vec<u8>>,
+    ctrl_tx: &mpsc::Sender<Vec<u8>>,
     registry: &Arc<BroadcasterRegistry>,
     audio_rx: &mut Option<broadcast::Receiver<AudioFrame>>,
     stream_id: &mut String,
@@ -1005,7 +1032,7 @@ fn switch_stream(
     if let Some(bc) = &new_bc {
         // Send the new stream's CodecHeader so the client re-initialises its decoder.
         if let Some(hdr) = bc.codec_header() {
-            let _ = ctrl_tx.send(hdr.to_vec());
+            let _ = ctrl_tx.try_send(hdr.to_vec());
         }
         *audio_rx = Some(bc.subscribe());
     } else {
@@ -1028,7 +1055,7 @@ async fn recv_audio(
 
 #[allow(clippy::too_many_arguments)]
 fn send_server_settings_via_channel(
-    ctrl_tx: &mpsc::UnboundedSender<Vec<u8>>,
+    ctrl_tx: &mpsc::Sender<Vec<u8>>,
     buffer_ms: u32,
     volume: u8,
     muted: bool,
@@ -1054,14 +1081,14 @@ fn send_server_settings_via_channel(
     };
     let mut hdr = MessageHeader::new(MessageType::ServerSettings, 0);
     hdr.id = next_id();
-    let _ = ctrl_tx.send(Message::ServerSettings(settings).encode_with_header(hdr));
+    let _ = ctrl_tx.try_send(Message::ServerSettings(settings).encode_with_header(hdr));
 }
 
 struct ClientMsgContext<'a> {
-    ctrl_tx: &'a mpsc::UnboundedSender<Vec<u8>>,
+    ctrl_tx: &'a mpsc::Sender<Vec<u8>>,
     state: &'a ServerState,
     client_id: &'a str,
-    group_id: &'a str,
+    session_generation: u64,
     current_buffer_ms: &'a mut u32,
     auto_buffer_tuner: &'a mut AutoBufferTuner,
     health_tracker: &'a mut HealthTransitionTracker,
@@ -1098,7 +1125,7 @@ async fn handle_client_msg(
             reply.received = now;
             let _ = ctx
                 .ctrl_tx
-                .send(Message::Time(TimeMsg { latency: diff }).encode_with_header(reply));
+                .try_send(Message::Time(TimeMsg { latency: diff }).encode_with_header(reply));
         }
         MessageType::ClientInfo => {
             if let Ok(Message::ClientInfo(ci)) = Message::from_payload(&hdr, payload) {
@@ -1165,7 +1192,8 @@ async fn handle_client_msg(
             let control = AnnouncementControlV1::decode(payload)?;
             handle_announcement_ack(
                 ctx.state,
-                ctx.group_id,
+                ctx.client_id,
+                ctx.session_generation,
                 &control,
                 sonium_sync::time_provider::now_us() / 1_000,
             )?;
@@ -1175,28 +1203,117 @@ async fn handle_client_msg(
     Ok(())
 }
 
-fn queue_announcement_control(
-    ctrl_tx: &mpsc::UnboundedSender<Vec<u8>>,
-    session_group_id: &str,
-    control: &AnnouncementControlV1,
-) -> bool {
-    if control.group_id != session_group_id {
-        return false;
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum AnnouncementQueueResult {
+    Ignored,
+    Enqueued,
+    Coalesced,
+}
+
+struct AnnouncementControlQueue {
+    ctrl_tx: mpsc::Sender<Vec<u8>>,
+    last_enqueued: Option<(String, String, u8, i64)>,
+    active_by_group: HashMap<String, AnnouncementControlV1>,
+}
+
+impl AnnouncementControlQueue {
+    fn new(ctrl_tx: mpsc::Sender<Vec<u8>>) -> Self {
+        Self {
+            ctrl_tx,
+            last_enqueued: None,
+            active_by_group: HashMap::new(),
+        }
     }
-    let mut header = MessageHeader::new(MessageType::AnnouncementControl, 0);
-    header.id = next_id();
-    ctrl_tx
-        .send(Message::AnnouncementControl(control.clone()).encode_with_header(header))
-        .is_ok()
+
+    fn queue(
+        &mut self,
+        session_group_id: &str,
+        control: &AnnouncementControlV1,
+    ) -> Result<AnnouncementQueueResult, mpsc::error::TrySendError<Vec<u8>>> {
+        if control.group_id != session_group_id {
+            return Ok(AnnouncementQueueResult::Ignored);
+        }
+        self.enqueue(control)
+    }
+
+    fn reconcile_group_change(
+        &mut self,
+        old_group_id: &str,
+        new_group_id: &str,
+        pending_new_group: Option<&AnnouncementControlV1>,
+    ) -> Result<(), mpsc::error::TrySendError<Vec<u8>>> {
+        if old_group_id == new_group_id {
+            return Ok(());
+        }
+        if let Some(mut old) = self.active_by_group.get(old_group_id).cloned() {
+            old.lifecycle = sonium_protocol::messages::AnnouncementLifecycle::Cancelled;
+            old.intent = None;
+            self.enqueue(&old)?;
+        }
+        if let Some(control) = pending_new_group {
+            self.queue(new_group_id, control)?;
+        }
+        Ok(())
+    }
+
+    fn enqueue(
+        &mut self,
+        control: &AnnouncementControlV1,
+    ) -> Result<AnnouncementQueueResult, mpsc::error::TrySendError<Vec<u8>>> {
+        let fingerprint = (
+            control.announcement_id.clone(),
+            control.group_id.clone(),
+            lifecycle_rank(control.lifecycle),
+            control.scheduled_at_ms,
+        );
+        if self.last_enqueued.as_ref() == Some(&fingerprint) {
+            return Ok(AnnouncementQueueResult::Coalesced);
+        }
+        let mut header = MessageHeader::new(MessageType::AnnouncementControl, 0);
+        header.id = next_id();
+        self.ctrl_tx
+            .try_send(Message::AnnouncementControl(control.clone()).encode_with_header(header))?;
+        self.last_enqueued = Some(fingerprint);
+        match control.lifecycle {
+            sonium_protocol::messages::AnnouncementLifecycle::Scheduled => {
+                self.active_by_group
+                    .insert(control.group_id.clone(), control.clone());
+            }
+            sonium_protocol::messages::AnnouncementLifecycle::Completed
+            | sonium_protocol::messages::AnnouncementLifecycle::Cancelled
+            | sonium_protocol::messages::AnnouncementLifecycle::Failed => {
+                if self
+                    .active_by_group
+                    .get(&control.group_id)
+                    .is_some_and(|active| active.announcement_id == control.announcement_id)
+                {
+                    self.active_by_group.remove(&control.group_id);
+                }
+            }
+            sonium_protocol::messages::AnnouncementLifecycle::Started => {}
+        }
+        Ok(AnnouncementQueueResult::Enqueued)
+    }
+}
+
+fn lifecycle_rank(lifecycle: sonium_protocol::messages::AnnouncementLifecycle) -> u8 {
+    match lifecycle {
+        sonium_protocol::messages::AnnouncementLifecycle::Scheduled => 0,
+        sonium_protocol::messages::AnnouncementLifecycle::Started => 1,
+        sonium_protocol::messages::AnnouncementLifecycle::Completed => 2,
+        sonium_protocol::messages::AnnouncementLifecycle::Cancelled => 3,
+        sonium_protocol::messages::AnnouncementLifecycle::Failed => 4,
+    }
 }
 
 fn handle_announcement_ack(
     state: &ServerState,
-    session_group_id: &str,
+    client_id: &str,
+    session_generation: u64,
     control: &AnnouncementControlV1,
     now_ms: i64,
 ) -> anyhow::Result<()> {
-    if control.group_id != session_group_id || control.intent.is_some() {
+    if control.intent.is_some() {
         return Err(anyhow::anyhow!(
             "announcement acknowledgement does not belong to the client session"
         ));
@@ -1218,14 +1335,17 @@ fn handle_announcement_ack(
             sonium_control::announcements::AnnouncementLifecycle::Failed
         }
     };
-    state
-        .acknowledge_announcement_at(
-            &control.announcement_id,
-            session_group_id,
-            lifecycle,
-            now_ms,
-        )
-        .map_err(Into::into)
+    if let Err(error) = state.acknowledge_announcement_client_at(
+        &control.announcement_id,
+        &control.group_id,
+        client_id,
+        session_generation,
+        lifecycle,
+        now_ms,
+    ) {
+        debug!(%client_id, error = %error, "Ignoring stale or invalid announcement acknowledgement");
+    }
+    Ok(())
 }
 
 async fn socket_reader(mut reader: OwnedReadHalf, tx: mpsc::UnboundedSender<IncomingClientFrame>) {
@@ -1333,7 +1453,8 @@ mod tests {
 
     #[test]
     fn announcement_controls_are_routed_only_to_the_target_group() {
-        let (tx, mut rx) = mpsc::unbounded_channel();
+        let (tx, mut rx) = mpsc::channel(1);
+        let mut announcements = AnnouncementControlQueue::new(tx);
         let control = AnnouncementControlV1 {
             version: 1,
             announcement_id: "doorbell".into(),
@@ -1344,9 +1465,15 @@ mod tests {
             intent: None,
         };
 
-        assert!(!queue_announcement_control(&tx, "bedroom", &control));
+        assert_eq!(
+            announcements.queue("bedroom", &control).unwrap(),
+            AnnouncementQueueResult::Ignored
+        );
         assert!(rx.try_recv().is_err());
-        assert!(queue_announcement_control(&tx, "default", &control));
+        assert_eq!(
+            announcements.queue("default", &control).unwrap(),
+            AnnouncementQueueResult::Enqueued
+        );
 
         let bytes = rx.try_recv().unwrap();
         let header = MessageHeader::from_bytes(&bytes[..HEADER_SIZE]).unwrap();
@@ -1358,13 +1485,104 @@ mod tests {
     }
 
     #[test]
-    fn announcement_ack_cannot_mutate_a_different_session_group() {
+    fn announcement_control_queue_is_bounded_and_coalesces_exact_replays() {
+        let (tx, mut rx) = mpsc::channel(1);
+        let mut announcements = AnnouncementControlQueue::new(tx);
+        let scheduled = AnnouncementControlV1 {
+            version: 1,
+            announcement_id: "doorbell".into(),
+            group_id: "default".into(),
+            lifecycle: AnnouncementLifecycle::Scheduled,
+            scheduled_at_ms: 10_250,
+            max_duration_ms: 1_000,
+            intent: None,
+        };
+
+        assert_eq!(
+            announcements.queue("default", &scheduled).unwrap(),
+            AnnouncementQueueResult::Enqueued
+        );
+        assert_eq!(
+            announcements.queue("default", &scheduled).unwrap(),
+            AnnouncementQueueResult::Coalesced
+        );
+
+        let mut terminal = scheduled.clone();
+        terminal.lifecycle = AnnouncementLifecycle::Cancelled;
+        assert!(matches!(
+            announcements.queue("default", &terminal),
+            Err(mpsc::error::TrySendError::Full(_))
+        ));
+        assert!(rx.try_recv().is_ok());
+    }
+
+    #[test]
+    fn group_change_releases_old_envelope_then_replays_new_group_control_idempotently() {
+        let (tx, mut rx) = mpsc::channel(3);
+        let mut announcements = AnnouncementControlQueue::new(tx);
+        let old = AnnouncementControlV1 {
+            version: 1,
+            announcement_id: "old-group".into(),
+            group_id: "default".into(),
+            lifecycle: AnnouncementLifecycle::Scheduled,
+            scheduled_at_ms: 10_250,
+            max_duration_ms: 1_000,
+            intent: None,
+        };
+        let mut new = old.clone();
+        new.announcement_id = "new-group".into();
+        new.group_id = "bedroom".into();
+
+        announcements.queue("default", &old).unwrap();
+        assert!(rx.try_recv().is_ok());
+        announcements
+            .reconcile_group_change("default", "bedroom", Some(&new))
+            .unwrap();
+
+        let first = rx.try_recv().unwrap();
+        let first_header = MessageHeader::from_bytes(&first[..HEADER_SIZE]).unwrap();
+        let first = Message::from_payload(&first_header, &first[HEADER_SIZE..]).unwrap();
+        assert!(matches!(
+            first,
+            Message::AnnouncementControl(control)
+                if control.announcement_id == "old-group"
+                    && control.lifecycle == AnnouncementLifecycle::Cancelled
+        ));
+        let second = rx.try_recv().unwrap();
+        let second_header = MessageHeader::from_bytes(&second[..HEADER_SIZE]).unwrap();
+        let second = Message::from_payload(&second_header, &second[HEADER_SIZE..]).unwrap();
+        assert!(matches!(
+            second,
+            Message::AnnouncementControl(control)
+                if control.announcement_id == "new-group"
+                    && control.lifecycle == AnnouncementLifecycle::Scheduled
+        ));
+
+        announcements
+            .reconcile_group_change("default", "bedroom", Some(&new))
+            .unwrap();
+        assert!(rx.try_recv().is_err());
+    }
+
+    #[test]
+    fn stale_or_foreign_announcement_ack_cannot_mutate_or_disconnect_the_session() {
         let state = ServerState::new(
             Arc::new(sonium_control::EventBus::new()),
             None,
             vec![],
             vec![],
         );
+        let generation = state
+            .try_client_connected(
+                "speaker",
+                "speaker",
+                "Sonium",
+                "linux",
+                "x86_64",
+                "127.0.0.1:5000".parse().unwrap(),
+                1,
+            )
+            .unwrap();
         let admitted = state
             .admit_announcement(announcement_intent(), 10_000)
             .unwrap();
@@ -1380,20 +1598,62 @@ mod tests {
             max_duration_ms: 1_000,
             intent: None,
         };
-        assert!(handle_announcement_ack(&state, "bedroom", &ack, 10_010).is_err());
+        let mut foreign = ack.clone();
+        foreign.group_id = "bedroom".into();
+        assert!(handle_announcement_ack(&state, "speaker", generation, &foreign, 10_010).is_ok());
         assert_eq!(
             state.all_announcements()[0].lifecycle,
             ControlLifecycle::Scheduled
         );
 
-        handle_announcement_ack(&state, "default", &ack, 10_010).unwrap();
+        handle_announcement_ack(&state, "speaker", generation, &ack, 10_010).unwrap();
         ack.lifecycle = AnnouncementLifecycle::Started;
-        handle_announcement_ack(&state, "default", &ack, 10_250).unwrap();
+        handle_announcement_ack(&state, "speaker", generation, &ack, 10_250).unwrap();
         assert_eq!(
             state.all_announcements()[0].lifecycle,
             ControlLifecycle::Started
         );
         assert!(controls.try_recv().is_err());
+    }
+
+    #[test]
+    fn delayed_old_group_ack_after_membership_change_is_idempotent() {
+        let state = ServerState::new(
+            Arc::new(sonium_control::EventBus::new()),
+            None,
+            vec![],
+            vec![],
+        );
+        let generation = state
+            .try_client_connected(
+                "moving-speaker",
+                "moving-speaker",
+                "Sonium",
+                "linux",
+                "x86_64",
+                "127.0.0.1:5001".parse().unwrap(),
+                1,
+            )
+            .unwrap();
+        let bedroom = state.create_group("Bedroom", "default");
+        let admitted = state
+            .admit_announcement(announcement_intent(), 10_000)
+            .unwrap();
+        let old_ack = AnnouncementControlV1 {
+            version: 1,
+            announcement_id: admitted.id,
+            group_id: "default".into(),
+            lifecycle: AnnouncementLifecycle::Scheduled,
+            scheduled_at_ms: 10_250,
+            max_duration_ms: 1_000,
+            intent: None,
+        };
+
+        assert!(state.set_client_group("moving-speaker", &bedroom));
+        assert!(
+            handle_announcement_ack(&state, "moving-speaker", generation, &old_ack, 10_020,)
+                .is_ok()
+        );
     }
 
     fn stable_report() -> HealthReport {

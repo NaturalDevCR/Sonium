@@ -1,4 +1,6 @@
-use sonium_control::announcement_scheduler::{AnnouncementScheduler, SchedulerConfig};
+use sonium_control::announcement_scheduler::{
+    AnnouncementClient, AnnouncementScheduler, SchedulerConfig,
+};
 use sonium_control::announcements::{
     AnnouncementIntent, AnnouncementLifecycle, AnnouncementLimits, AnnouncementPriority,
     AnnouncementSource, Ducking, ResumePolicy, ANNOUNCEMENT_INTENT_VERSION,
@@ -32,8 +34,16 @@ fn scheduler() -> AnnouncementScheduler {
         SchedulerConfig {
             start_lead_ms: 250,
             ack_timeout_ms: 100,
+            started_skew_tolerance_ms: 50,
         },
     )
+}
+
+fn client(id: &str, generation: u64) -> AnnouncementClient {
+    AnnouncementClient {
+        client_id: id.into(),
+        generation,
+    }
 }
 
 #[test]
@@ -274,4 +284,202 @@ fn pending_control_can_be_replayed_to_a_client_that_connects_during_schedule() {
 
     scheduler.tick(10_100);
     assert_eq!(scheduler.pending_control("default"), None);
+}
+
+#[test]
+fn group_waits_for_every_expected_client_including_an_offline_member() {
+    let mut scheduler = scheduler();
+    scheduler.set_group_clients(
+        "default",
+        [client("online", 7), client("offline", 3)],
+        9_900,
+    );
+    let admission = scheduler
+        .admit(
+            intent("multi-client", AnnouncementPriority::Announcement, 20_000),
+            10_000,
+        )
+        .unwrap();
+    let id = admission.admission.id;
+
+    for lifecycle in [
+        AnnouncementLifecycle::Scheduled,
+        AnnouncementLifecycle::Started,
+    ] {
+        let now_ms = match lifecycle {
+            AnnouncementLifecycle::Scheduled => 10_010,
+            AnnouncementLifecycle::Started => 10_250,
+            _ => unreachable!(),
+        };
+        let first = scheduler
+            .acknowledge_client(&id, "default", &client("online", 7), lifecycle, now_ms)
+            .unwrap();
+        assert!(
+            first.transitions.is_empty(),
+            "one client cannot advance the group to {lifecycle:?}"
+        );
+        scheduler
+            .acknowledge_client(&id, "default", &client("offline", 3), lifecycle, now_ms)
+            .unwrap();
+    }
+
+    let only_online_completed = scheduler
+        .acknowledge_client(
+            &id,
+            "default",
+            &client("online", 7),
+            AnnouncementLifecycle::Completed,
+            11_250,
+        )
+        .unwrap();
+    assert!(only_online_completed.transitions.is_empty());
+    assert_eq!(
+        scheduler.record(&id).unwrap().lifecycle,
+        AnnouncementLifecycle::Started
+    );
+    let timeout = scheduler.tick(11_350);
+    assert_eq!(timeout.transitions.len(), 1);
+    assert_eq!(
+        timeout.transitions[0].lifecycle,
+        AnnouncementLifecycle::Failed
+    );
+}
+
+#[test]
+fn acknowledgements_are_scoped_to_the_expected_session_generation() {
+    let mut scheduler = scheduler();
+    scheduler.set_group_clients("default", [client("speaker", 8)], 9_900);
+    let admission = scheduler
+        .admit(
+            intent("generation", AnnouncementPriority::Announcement, 20_000),
+            10_000,
+        )
+        .unwrap();
+    let id = admission.admission.id;
+
+    let stale = scheduler
+        .acknowledge_client(
+            &id,
+            "default",
+            &client("speaker", 7),
+            AnnouncementLifecycle::Started,
+            10_250,
+        )
+        .unwrap();
+    assert!(stale.transitions.is_empty());
+    assert_eq!(
+        scheduler.record(&id).unwrap().lifecycle,
+        AnnouncementLifecycle::Scheduled
+    );
+
+    let current = scheduler
+        .acknowledge_client(
+            &id,
+            "default",
+            &client("speaker", 8),
+            AnnouncementLifecycle::Started,
+            10_250,
+        )
+        .unwrap();
+    assert_eq!(
+        current.transitions[0].lifecycle,
+        AnnouncementLifecycle::Started
+    );
+}
+
+#[test]
+fn started_ack_has_a_small_recoverable_skew_window() {
+    let mut scheduler1 = scheduler();
+    scheduler1.set_group_clients("default", [client("speaker", 1)], 9_900);
+    let accepted = scheduler1
+        .admit(
+            intent("within-skew", AnnouncementPriority::Announcement, 20_000),
+            10_000,
+        )
+        .unwrap();
+    let accepted = scheduler1
+        .acknowledge_client(
+            &accepted.admission.id,
+            "default",
+            &client("speaker", 1),
+            AnnouncementLifecycle::Started,
+            10_200,
+        )
+        .unwrap();
+    assert_eq!(
+        accepted.transitions[0].lifecycle,
+        AnnouncementLifecycle::Started
+    );
+
+    let mut scheduler2 = scheduler();
+    scheduler2.set_group_clients("default", [client("speaker", 1)], 9_900);
+    let rejected = scheduler2
+        .admit(
+            intent("outside-skew", AnnouncementPriority::Announcement, 20_000),
+            10_000,
+        )
+        .unwrap();
+    assert!(scheduler2
+        .acknowledge_client(
+            &rejected.admission.id,
+            "default",
+            &client("speaker", 1),
+            AnnouncementLifecycle::Started,
+            10_199,
+        )
+        .is_err());
+}
+
+#[test]
+fn configured_started_skew_tolerance_is_hard_bounded() {
+    let mut scheduler = AnnouncementScheduler::new(
+        AnnouncementLimits::default(),
+        ["default"],
+        SchedulerConfig {
+            start_lead_ms: 1_000,
+            ack_timeout_ms: 100,
+            started_skew_tolerance_ms: 10_000,
+        },
+    );
+    scheduler.set_group_clients("default", [client("speaker", 1)], 9_000);
+    let admission = scheduler
+        .admit(
+            intent("bounded-skew", AnnouncementPriority::Announcement, 20_000),
+            10_000,
+        )
+        .unwrap();
+
+    assert!(scheduler
+        .acknowledge_client(
+            &admission.admission.id,
+            "default",
+            &client("speaker", 1),
+            AnnouncementLifecycle::Started,
+            10_500,
+        )
+        .is_err());
+}
+
+#[test]
+fn identical_membership_reconciliation_cannot_extend_ack_timeout() {
+    let mut scheduler = scheduler();
+    scheduler.set_group_clients("default", [client("offline", 1)], 9_900);
+    let admission = scheduler
+        .admit(
+            intent("fixed-deadline", AnnouncementPriority::Announcement, 20_000),
+            10_000,
+        )
+        .unwrap();
+
+    scheduler.set_group_clients("default", [client("offline", 1)], 10_050);
+    let timeout = scheduler.tick(10_100);
+    assert_eq!(timeout.transitions.len(), 1);
+    assert_eq!(
+        timeout.transitions[0].announcement_id,
+        admission.admission.id
+    );
+    assert_eq!(
+        timeout.transitions[0].lifecycle,
+        AnnouncementLifecycle::Failed
+    );
 }

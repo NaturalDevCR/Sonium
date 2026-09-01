@@ -19,7 +19,7 @@ use std::sync::{
 };
 
 use crate::announcement_scheduler::{
-    AnnouncementScheduler, SchedulerAdmission, SchedulerConfig, SchedulerEvents,
+    AnnouncementClient, AnnouncementScheduler, SchedulerAdmission, SchedulerConfig, SchedulerEvents,
 };
 use crate::announcements::{
     AnnouncementAdmission, AnnouncementError, AnnouncementIntent, AnnouncementLifecycle,
@@ -290,10 +290,21 @@ impl ServerState {
             );
         }
 
-        let announcements = AnnouncementScheduler::new(
+        let mut announcements = AnnouncementScheduler::new(
             AnnouncementLimits::default(),
             groups.keys().cloned(),
             SchedulerConfig::default(),
+        );
+        announcements.set_group_clients(
+            "default",
+            saved_clients
+                .iter()
+                .filter(|client| client.group_id == "default")
+                .map(|client| AnnouncementClient {
+                    client_id: client.id.clone(),
+                    generation: 0,
+                }),
+            Utc::now().timestamp_millis(),
         );
         let (announcement_controls, _) = broadcast::channel(256);
 
@@ -406,6 +417,12 @@ impl ServerState {
                 }
             }
         }
+        let group_ids: Vec<String> = groups.keys().cloned().collect();
+        drop(groups);
+        let now_ms = Utc::now().timestamp_millis();
+        for group_id in group_ids {
+            self.reconcile_announcement_group(&group_id, now_ms);
+        }
     }
 
     // ── Internal helpers ──────────────────────────────────────────────────
@@ -452,6 +469,27 @@ impl ServerState {
             .collect();
 
         store.save(&groups, &clients, &streams);
+    }
+
+    fn announcement_clients_in_group(&self, group_id: &str) -> Vec<AnnouncementClient> {
+        self.clients
+            .read()
+            .values()
+            .filter(|client| client.group_id == group_id)
+            .map(|client| AnnouncementClient {
+                client_id: client.id.clone(),
+                generation: client.session_generation,
+            })
+            .collect()
+    }
+
+    fn reconcile_announcement_group(&self, group_id: &str, now_ms: i64) {
+        let clients = self.announcement_clients_in_group(group_id);
+        let events = self
+            .announcements
+            .lock()
+            .set_group_clients(group_id, clients, now_ms);
+        self.emit_announcement_events(events);
     }
 
     // ── Client CRUD ───────────────────────────────────────────────────────
@@ -581,6 +619,14 @@ impl ServerState {
             }
         }
 
+        let now_ms = Utc::now().timestamp_millis();
+        self.reconcile_announcement_group(&info.group_id, now_ms);
+        if let Some(evicted) = &evicted {
+            if evicted.group_id != info.group_id {
+                self.reconcile_announcement_group(&evicted.group_id, now_ms);
+            }
+        }
+
         if let Some(evicted) = evicted {
             self.events.emit(crate::ws::Event::ClientDeleted {
                 client_id: evicted.id.clone(),
@@ -651,6 +697,7 @@ impl ServerState {
         if let Some(g) = self.groups.write().get_mut(&info.group_id) {
             g.client_ids.retain(|id| id != client_id);
         }
+        self.reconcile_announcement_group(&info.group_id, Utc::now().timestamp_millis());
         // Emit while reconnects are still excluded so an old ClientDeleted
         // event can never arrive after the replacement ClientConnected event.
         self.events.emit(crate::ws::Event::ClientDeleted {
@@ -828,6 +875,10 @@ impl ServerState {
         if !groups.contains_key(group_id) {
             return false;
         }
+        if client.group_id == group_id {
+            return true;
+        }
+        let old_group_id = client.group_id.clone();
 
         // Remove from old group
         if let Some(old_grp) = groups.get_mut(&client.group_id) {
@@ -840,12 +891,15 @@ impl ServerState {
             }
         }
         client.group_id = group_id.into();
+        drop(clients);
+        drop(groups);
+        let now_ms = Utc::now().timestamp_millis();
+        self.reconcile_announcement_group(&old_group_id, now_ms);
+        self.reconcile_announcement_group(group_id, now_ms);
         self.events.emit(crate::ws::Event::ClientGroupChanged {
             client_id: client_id.into(),
             group_id: group_id.into(),
         });
-        drop(clients);
-        drop(groups);
         self.persist();
         true
     }
@@ -896,6 +950,7 @@ impl ServerState {
             self.emit_announcement_events(events);
             drop(groups);
             drop(clients);
+            self.reconcile_announcement_group("default", Utc::now().timestamp_millis());
             self.persist();
             true
         } else {
@@ -1018,6 +1073,9 @@ impl ServerState {
         intent: AnnouncementIntent,
         now_ms: i64,
     ) -> Result<AnnouncementAdmission, AnnouncementError> {
+        for group_id in &intent.target_groups {
+            self.reconcile_announcement_group(group_id, now_ms);
+        }
         let SchedulerAdmission { admission, events } =
             self.announcements.lock().admit(intent, now_ms)?;
         self.emit_announcement_events(events);
@@ -1044,6 +1102,29 @@ impl ServerState {
             .announcements
             .lock()
             .acknowledge(id, group_id, lifecycle, now_ms)?;
+        self.emit_announcement_events(events);
+        Ok(())
+    }
+
+    pub fn acknowledge_announcement_client_at(
+        &self,
+        id: &str,
+        group_id: &str,
+        client_id: &str,
+        generation: u64,
+        lifecycle: AnnouncementLifecycle,
+        now_ms: i64,
+    ) -> Result<(), AnnouncementError> {
+        let events = self.announcements.lock().acknowledge_client(
+            id,
+            group_id,
+            &AnnouncementClient {
+                client_id: client_id.into(),
+                generation,
+            },
+            lifecycle,
+            now_ms,
+        )?;
         self.emit_announcement_events(events);
         Ok(())
     }

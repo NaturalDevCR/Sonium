@@ -104,6 +104,26 @@ fn cancellation_during_attack_releases_from_current_gain_once() {
 }
 
 #[test]
+fn terminal_between_ticks_releases_from_the_last_published_gain() {
+    let gain = DuckGain::default();
+    let mut envelope = DuckEnvelope::new(gain.clone());
+    let control = scheduled("between-ticks", AnnouncementPriorityV1::Announcement, 1_000);
+    envelope.handle_control(control.clone(), 900);
+    envelope.tick(1_000);
+    envelope.tick(1_050);
+    approx(gain.load(), 0.55);
+
+    let mut completed = control;
+    completed.lifecycle = AnnouncementLifecycle::Completed;
+    completed.intent = None;
+    envelope.handle_control(completed, 1_075);
+
+    approx(gain.load(), 0.55);
+    envelope.tick(1_175);
+    approx(gain.load(), 0.775);
+}
+
+#[test]
 fn terminal_before_started_does_not_publish_an_unobserved_attack_gain() {
     let gain = DuckGain::default();
     let mut envelope = DuckEnvelope::new(gain.clone());

@@ -222,11 +222,11 @@ impl DuckEnvelope {
             return Vec::new();
         }
 
-        let current_gain = if active.started {
-            active.gain_before_release(now_ms)
-        } else {
-            self.gain.load()
-        };
+        // Release from the scalar the audio callback can actually have
+        // observed.  A terminal control may arrive between envelope ticks;
+        // recomputing the attack at `now_ms` would publish an instantaneous
+        // jump before beginning the release.
+        let current_gain = self.gain.load();
         self.gain.store(current_gain);
         active.release = Some(Release {
             started_at_ms: now_ms,

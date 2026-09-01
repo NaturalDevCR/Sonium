@@ -46,6 +46,7 @@ const MAX_CONCEALMENT_PACKETS_PER_GAP: u16 = 10;
 
 const READ_TIMEOUT: Duration = Duration::from_secs(20);
 const WRITE_TIMEOUT: Duration = Duration::from_secs(5);
+const CONTROL_QUEUE_CAPACITY: usize = 64;
 
 /// Derive a stable protocol-safe ID from an arbitrary local hostname.
 fn client_id_from_hostname(hostname: &str, instance: u32) -> String {
@@ -82,12 +83,9 @@ fn stable_hostname_hash(hostname: &str) -> u32 {
 
 /// Dedicated TCP writer task — owns the write half exclusively so the
 /// main select! loop never blocks on a TCP write.  Control messages
-/// (time-sync requests, health reports) arrive via an unbounded channel
-/// and are written to the socket sequentially.
-async fn tcp_writer_task(
-    mut writer: OwnedWriteHalf,
-    mut ctrl_rx: mpsc::UnboundedReceiver<Vec<u8>>,
-) {
+/// (time-sync requests, health reports, announcement ACKs) arrive via a
+/// bounded channel and are written to the socket sequentially.
+async fn tcp_writer_task(mut writer: OwnedWriteHalf, mut ctrl_rx: mpsc::Receiver<Vec<u8>>) {
     loop {
         let Some(buf) = ctrl_rx.recv().await else {
             break;
@@ -209,8 +207,9 @@ async fn connect_and_run(
 
     // Channel and writer task: all subsequent writes go through the channel
     // so the main select! loop never blocks on TCP backpressure.
-    let (ctrl_tx, ctrl_rx) = mpsc::unbounded_channel::<Vec<u8>>();
+    let (ctrl_tx, ctrl_rx) = mpsc::channel::<Vec<u8>>(CONTROL_QUEUE_CAPACITY);
     let writer_task = tokio::spawn(tcp_writer_task(writer, ctrl_rx));
+    let mut announcement_acks = AnnouncementAckQueue::new(ctrl_tx.clone());
 
     // 2. Wait for CodecHeader, then ServerSettings
     let mut decoder: Option<ActiveDecoder> = None;
@@ -268,8 +267,8 @@ async fn connect_and_run(
             // jitter; underruns are handled by the CPAL callback fade-to-silence.
             _ = audio_tick.tick() => {
                 let now_server_ms = time_provider.to_server_time(now_us()) / 1_000;
-                if !send_announcement_acks(&ctrl_tx, duck_envelope.tick(now_server_ms)) {
-                    warn!("Writer task died — cannot send announcement acknowledgement");
+                if !announcement_acks.send(duck_envelope.tick(now_server_ms)) {
+                    warn!("Control queue saturated — disconnecting before announcement ACKs can grow unbounded");
                     break Ok(());
                 }
                 if playback_handle.is_some() {
@@ -410,8 +409,8 @@ async fn connect_and_run(
                 }
 
                 let msg = Message::HealthReport(report_msg).encode();
-                if ctrl_tx.send(msg).is_err() {
-                    warn!("Writer task died — cannot send health report");
+                if ctrl_tx.try_send(msg).is_err() {
+                    warn!("Control queue saturated — disconnecting slow server connection");
                     break Ok(());
                 }
             }
@@ -636,8 +635,8 @@ async fn connect_and_run(
                         let now_server_ms = time_provider.to_server_time(now_us()) / 1_000;
                         let acknowledgements =
                             duck_envelope.handle_control(control, now_server_ms);
-                        if !send_announcement_acks(&ctrl_tx, acknowledgements) {
-                            warn!("Writer task died — cannot send announcement acknowledgement");
+                        if !announcement_acks.send(acknowledgements) {
+                            warn!("Control queue saturated — disconnecting before announcement ACKs can grow unbounded");
                             break Ok(());
                         }
                     }
@@ -857,19 +856,54 @@ async fn connect_and_run(
     result
 }
 
-fn send_announcement_acks(
-    ctrl_tx: &mpsc::UnboundedSender<Vec<u8>>,
-    acknowledgements: Vec<sonium_protocol::messages::AnnouncementControlV1>,
-) -> bool {
-    for acknowledgement in acknowledgements {
-        if ctrl_tx
-            .send(Message::AnnouncementControl(acknowledgement).encode())
-            .is_err()
-        {
-            return false;
+struct AnnouncementAckQueue {
+    ctrl_tx: mpsc::Sender<Vec<u8>>,
+    last_enqueued: Option<(String, String, u8, i64)>,
+}
+
+impl AnnouncementAckQueue {
+    fn new(ctrl_tx: mpsc::Sender<Vec<u8>>) -> Self {
+        Self {
+            ctrl_tx,
+            last_enqueued: None,
         }
     }
-    true
+
+    fn send(
+        &mut self,
+        acknowledgements: Vec<sonium_protocol::messages::AnnouncementControlV1>,
+    ) -> bool {
+        for acknowledgement in acknowledgements {
+            let fingerprint = (
+                acknowledgement.announcement_id.clone(),
+                acknowledgement.group_id.clone(),
+                announcement_lifecycle_rank(acknowledgement.lifecycle),
+                acknowledgement.scheduled_at_ms,
+            );
+            if self.last_enqueued.as_ref() == Some(&fingerprint) {
+                continue;
+            }
+            if self
+                .ctrl_tx
+                .try_send(Message::AnnouncementControl(acknowledgement).encode())
+                .is_err()
+            {
+                return false;
+            }
+            self.last_enqueued = Some(fingerprint);
+        }
+        true
+    }
+}
+
+fn announcement_lifecycle_rank(lifecycle: sonium_protocol::messages::AnnouncementLifecycle) -> u8 {
+    match lifecycle {
+        sonium_protocol::messages::AnnouncementLifecycle::Scheduled => 0,
+        sonium_protocol::messages::AnnouncementLifecycle::Started => 1,
+        sonium_protocol::messages::AnnouncementLifecycle::Completed => 2,
+        sonium_protocol::messages::AnnouncementLifecycle::Cancelled => 3,
+        sonium_protocol::messages::AnnouncementLifecycle::Failed => 4,
+    }
 }
 
 fn configure_tcp_stream(stream: &TcpStream) {
@@ -906,7 +940,7 @@ fn configure_tcp_stream(stream: &TcpStream) {
 /// clock-sync algorithm measures client→server→client transit, which starts
 /// when we create the message, not when the kernel puts it on the wire.
 fn queue_time_request(
-    ctrl_tx: &mpsc::UnboundedSender<Vec<u8>>,
+    ctrl_tx: &mpsc::Sender<Vec<u8>>,
     sync_seq: &mut u16,
     pending_time: &mut Option<(u16, i64)>,
 ) {
@@ -915,8 +949,9 @@ fn queue_time_request(
     hdr.id = *sync_seq;
     let sent_us = hdr.sent.to_micros();
     let msg = Message::Time(TimeMsg::zero()).encode_with_header(hdr);
-    let _ = ctrl_tx.send(msg);
-    *pending_time = Some((*sync_seq, sent_us));
+    if ctrl_tx.try_send(msg).is_ok() {
+        *pending_time = Some((*sync_seq, sent_us));
+    }
 }
 
 async fn read_exact_with_timeout(reader: &mut OwnedReadHalf, buf: &mut [u8]) -> anyhow::Result<()> {
@@ -1086,7 +1121,8 @@ mod tests {
     fn announcement_ack_batch_is_encoded_on_the_existing_control_writer() {
         use sonium_protocol::messages::{AnnouncementControlV1, AnnouncementLifecycle};
 
-        let (tx, mut rx) = mpsc::unbounded_channel();
+        let (tx, mut rx) = mpsc::channel(2);
+        let mut acknowledgements = AnnouncementAckQueue::new(tx);
         let acknowledgement = AnnouncementControlV1 {
             version: 1,
             announcement_id: "doorbell".into(),
@@ -1097,7 +1133,7 @@ mod tests {
             intent: None,
         };
 
-        assert!(send_announcement_acks(&tx, vec![acknowledgement.clone()]));
+        assert!(acknowledgements.send(vec![acknowledgement.clone()]));
         let bytes = rx.try_recv().unwrap();
         let header = MessageHeader::from_bytes(&bytes[..HEADER_SIZE]).unwrap();
         let decoded = Message::from_payload(&header, &bytes[HEADER_SIZE..]).unwrap();
@@ -1105,5 +1141,30 @@ mod tests {
             decoded,
             Message::AnnouncementControl(message) if message == acknowledgement
         ));
+    }
+
+    #[test]
+    fn announcement_ack_queue_is_bounded_and_coalesces_exact_replays() {
+        use sonium_protocol::messages::{AnnouncementControlV1, AnnouncementLifecycle};
+
+        let (tx, mut rx) = mpsc::channel(1);
+        let mut queue = AnnouncementAckQueue::new(tx);
+        let scheduled = AnnouncementControlV1 {
+            version: 1,
+            announcement_id: "doorbell".into(),
+            group_id: "default".into(),
+            lifecycle: AnnouncementLifecycle::Scheduled,
+            scheduled_at_ms: 10_250,
+            max_duration_ms: 1_000,
+            intent: None,
+        };
+
+        assert!(queue.send(vec![scheduled.clone()]));
+        assert!(queue.send(vec![scheduled.clone()]));
+
+        let mut started = scheduled;
+        started.lifecycle = AnnouncementLifecycle::Started;
+        assert!(!queue.send(vec![started]));
+        assert!(rx.try_recv().is_ok());
     }
 }
