@@ -55,9 +55,10 @@ music source -> sonium-server -> LAN -> sonium-client -> speaker
 - **Observability** through HealthReport sync metrics, Prometheus `/metrics`,
   Sync Monitor UI, and Home Assistant entities for groups, clients, streams, and
   client health.
-- **Announcements with ducking** — authenticated, idempotent announcement
+- **Announcement control plane and ducking** — authenticated, idempotent
   intents (priority `music < chime < announcement < emergency`) with bounded
-  per-group queues and synchronized client-side duck envelopes. See the
+  per-group queues and synchronized client-side duck envelopes. Direct URI
+  fetch/decode remains a follow-up; see the
   [announcement design](https://naturaldevcr.github.io/Sonium/architecture/announcement-ducking-design)
   and [Music Assistant / Announcements](https://naturaldevcr.github.io/Sonium/integrations/music-assistant).
 
@@ -244,7 +245,7 @@ changes between releases.
 
 ### Roadmap Toward Sonos-Class Reliability
 
-**Recently Completed (through v0.1.90):**
+**Recently Completed (through v0.1.91):**
 - Stability Phase 1: fail-closed strict configuration and account storage,
   session-version invalidation, bounded client admission, loopback-by-default
   control listener, and supervised file/FIFO recovery.
