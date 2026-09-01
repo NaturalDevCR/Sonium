@@ -11,6 +11,13 @@ This page describes the announcement capability as it exists in the control
 API and client. It is written from the perspective of a Music Assistant-style
 caller that wants to play a chime or message over music.
 
+Current release note: the server/client path guarantees authenticated intent
+admission, synchronized lifecycle control, and ducking envelopes. The client
+does not yet fetch and decode `source_uri` itself; announcement audio must be
+provided through an existing Sonium stream/source. Direct URI playback is a
+tracked follow-up and this integration must not be treated as a complete
+text-to-speech player until that path is implemented.
+
 ## Authenticated announcement service
 
 Announcements are submitted through the control-plane REST API and require an

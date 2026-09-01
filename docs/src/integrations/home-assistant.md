@@ -86,5 +86,8 @@ generated when omitted, so automations that need retry-safe behaviour should
 provide one explicitly.
 
 Sonium schedules the request and expires it after `max_duration_ms`; it does
-not implement or depend on the Sendspin protocol. Cancellation is available as
-`sonium.cancel_announcement` with the server announcement ID.
+not implement or depend on the Sendspin protocol. In this release the control
+plane and synchronized ducking are implemented, but clients do not yet fetch
+and decode `source` directly; provide announcement audio through an existing
+Sonium stream/source. Direct URI playback remains a follow-up. Cancellation is
+available as `sonium.cancel_announcement` with the server announcement ID.
