@@ -32,7 +32,8 @@ music source -> sonium-server -> LAN -> sonium-client -> speaker
 - **Built-in web UI** with control view, admin dashboard, and **real-time sync
   monitor**, refreshed responsive styling, and role-aware routes.
 - **Users, roles, JWT auth**, first-run/admin setup, and role-aware UI.
-- **Groups, per-client volume/mute/latency, EQ**, and live stream switching.
+- **Groups, per-client volume/mute/latency, group mute, EQ**, and live stream
+  switching.
 - **Multiple configured streams**, including FIFO/files, TCP, `pipe://` external
   processes, ffmpeg-style radio sources, virtual AirPlay/Spotify templates in
   the UI, and meta streams.
@@ -245,7 +246,7 @@ changes between releases.
 
 ### Roadmap Toward Sonos-Class Reliability
 
-**Recently Completed (through v0.1.91):**
+**Recently Completed (through v0.1.92):**
 - Stability Phase 1: fail-closed strict configuration and account storage,
   session-version invalidation, bounded client admission, loopback-by-default
   control listener, and supervised file/FIFO recovery.
@@ -259,7 +260,9 @@ changes between releases.
   timing, drift/drop/dup counters, Prometheus metrics, and Sync Monitor updates.
 - Web/admin redesign, first-run auth flow hardening, stream templates for
   AirPlay and Spotify Connect helpers, Home Assistant integration, and
-  announcement intents with synchronized ducking.
+  announcement intents with synchronized ducking. Home Assistant group
+  entities now support coordinated mute/unmute while retaining per-client
+  volume levels.
 - Release packaging polish for Linux plus macOS/Windows Desktop Agent builds.
 
 **Next focus:**

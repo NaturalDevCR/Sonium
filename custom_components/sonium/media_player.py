@@ -24,6 +24,7 @@ from .announcement import (
 from .const import DOMAIN
 from .coordinator import SoniumCoordinator
 from .entity import SoniumEntity
+from .group_mute import GroupMuteError, aggregate_group_mute, async_set_group_mute
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -89,6 +90,7 @@ class SoniumGroupMediaPlayer(SoniumEntity, MediaPlayerEntity):
 
     _attr_supported_features = (
         MediaPlayerEntityFeature.PLAY_MEDIA
+        | MediaPlayerEntityFeature.VOLUME_MUTE
         | MediaPlayerEntityFeature.SELECT_SOURCE
         | MediaPlayerEntityFeature.GROUPING
     )
@@ -135,6 +137,13 @@ class SoniumGroupMediaPlayer(SoniumEntity, MediaPlayerEntity):
         return [s.name for s in self.coordinator.data.streams.values()]
 
     @property
+    def is_volume_muted(self) -> bool | None:
+        g = self._group
+        if g is None:
+            return None
+        return aggregate_group_mute(g.client_ids, self.coordinator.data.clients)
+
+    @property
     def group_members(self) -> list[str]:
         g = self._group
         if g is None:
@@ -167,6 +176,23 @@ class SoniumGroupMediaPlayer(SoniumEntity, MediaPlayerEntity):
         ):
             return
         await super().async_play_media(media_type, media_id, **kwargs)
+
+    async def async_mute_volume(self, mute: bool) -> None:
+        g = self._group
+        if g is None:
+            return
+        try:
+            await async_set_group_mute(
+                g.client_ids,
+                self.coordinator.data.clients,
+                self.coordinator.api.set_volume,
+                mute,
+            )
+        except GroupMuteError as err:
+            _LOGGER.error("Group %s mute update failed: %s", self._group_id, err)
+            raise HomeAssistantError(str(err)) from err
+        finally:
+            await self.coordinator.async_request_refresh()
 
     async def async_join_players(self, group_members: list[str]) -> None:
         """Move listed client entities to this group."""

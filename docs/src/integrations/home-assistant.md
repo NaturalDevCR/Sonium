@@ -13,8 +13,10 @@ still change between releases.
 
 ## Features
 
-- Group/zone `media_player` entities with source selection.
-- Per-client speaker `media_player` entities for volume, mute, and group moves.
+- Group/zone `media_player` entities with source selection and group mute/unmute.
+- Per-client speaker `media_player` entities for individual volume, mute, and
+  group moves. Group mute fans out to members while preserving each client's
+  independent volume.
 - Stream status sensors for `playing`, `idle`, and `error`.
 - Client connected binary sensors.
 - Client health sensors for jitter, buffer depth, underruns, and related
