@@ -10,6 +10,7 @@ use thiserror::Error;
 
 pub const ANNOUNCEMENT_INTENT_VERSION: u8 = 1;
 pub const MAX_ANNOUNCEMENT_SOURCE_BYTES: usize = 2_048;
+pub const MAX_RETAINED_ANNOUNCEMENT_RECORDS: usize = 1_024;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -104,6 +105,10 @@ pub struct AnnouncementAdmission {
     pub id: String,
     pub lifecycle: AnnouncementLifecycle,
     pub duplicate: bool,
+    /// Internal transitions are emitted after coordinator state is unlocked,
+    /// never serialized as part of the REST admission response.
+    #[serde(skip)]
+    pub transitions: Vec<AnnouncementTransition>,
 }
 
 #[derive(Debug, Clone)]
@@ -113,6 +118,9 @@ pub struct AnnouncementLimits {
     pub max_queued_duration_ms_per_group: u64,
     pub max_duration_ms: u32,
     pub max_expiry_ahead_ms: i64,
+    /// Maximum global number of active, queued, and retained terminal records.
+    /// Terminal records retain their idempotency keys until evicted oldest-first.
+    pub max_retained_records: usize,
 }
 
 impl Default for AnnouncementLimits {
@@ -123,6 +131,7 @@ impl Default for AnnouncementLimits {
             max_queued_duration_ms_per_group: 10 * 60 * 1_000,
             max_duration_ms: 120_000,
             max_expiry_ahead_ms: 24 * 60 * 60 * 1_000,
+            max_retained_records: MAX_RETAINED_ANNOUNCEMENT_RECORDS,
         }
     }
 }
@@ -149,6 +158,8 @@ pub enum AnnouncementError {
     QueueDepthExceeded(String),
     #[error("announcement duration budget for group {0:?} is exhausted")]
     QueueDurationExceeded(String),
+    #[error("announcement record capacity is exhausted")]
+    RecordCapacityExceeded,
     #[error("idempotency key was reused with a different intent")]
     IdempotencyConflict,
     #[error("announcement {0:?} was not found")]
@@ -171,6 +182,7 @@ pub struct AnnouncementCoordinator {
     by_key: HashMap<String, String>,
     records: HashMap<String, AnnouncementRecord>,
     queues: HashMap<String, GroupQueue>,
+    terminal_records: VecDeque<String>,
 }
 
 impl AnnouncementCoordinator {
@@ -190,6 +202,7 @@ impl AnnouncementCoordinator {
             by_key: HashMap::new(),
             records: HashMap::new(),
             queues,
+            terminal_records: VecDeque::new(),
         }
     }
 
@@ -199,9 +212,25 @@ impl AnnouncementCoordinator {
         self.queues.entry(group_id).or_default();
     }
 
-    pub fn remove_group(&mut self, group_id: &str) {
+    pub fn remove_group(&mut self, group_id: &str) -> Vec<AnnouncementTransition> {
+        let affected: Vec<String> = self
+            .records
+            .values()
+            .filter(|record| {
+                record
+                    .groups
+                    .iter()
+                    .any(|state| state.group_id == group_id && !state.lifecycle.terminal())
+            })
+            .map(|record| record.id.clone())
+            .collect();
+        let transitions = affected
+            .into_iter()
+            .map(|id| self.finish_group(&id, group_id, AnnouncementLifecycle::Cancelled))
+            .collect();
         self.known_groups.remove(group_id);
         self.queues.remove(group_id);
+        transitions
     }
 
     pub fn records(&self) -> Vec<AnnouncementRecord> {
@@ -229,6 +258,7 @@ impl AnnouncementCoordinator {
                     id: id.clone(),
                     lifecycle: existing.lifecycle,
                     duplicate: true,
+                    transitions: Vec::new(),
                 });
             }
             return Err(AnnouncementError::IdempotencyConflict);
@@ -254,6 +284,8 @@ impl AnnouncementCoordinator {
             }
         }
 
+        self.make_room_for_record()?;
+
         let id = uuid::Uuid::new_v4().to_string();
         let record = AnnouncementRecord {
             id: id.clone(),
@@ -273,13 +305,18 @@ impl AnnouncementCoordinator {
             .insert(intent.idempotency_key.clone(), id.clone());
         self.records.insert(id.clone(), record);
 
+        let mut transitions = Vec::new();
         for group_id in &intent.target_groups {
             let active = self.queues[group_id].active.clone();
             let interrupts = active
                 .as_ref()
                 .is_some_and(|active_id| self.records[active_id].intent.priority < intent.priority);
             if let Some(active_id) = active.filter(|_| interrupts) {
-                self.finish_group(&active_id, group_id, AnnouncementLifecycle::Cancelled);
+                transitions.push(self.finish_group(
+                    &active_id,
+                    group_id,
+                    AnnouncementLifecycle::Cancelled,
+                ));
                 self.queues.get_mut(group_id).expect("known group").active = Some(id.clone());
             } else if self.queues[group_id].active.is_none() {
                 self.queues.get_mut(group_id).expect("known group").active = Some(id.clone());
@@ -289,10 +326,22 @@ impl AnnouncementCoordinator {
                 queue.queued_duration_ms += u64::from(intent.max_duration_ms);
             }
         }
+        transitions.extend(
+            intent
+                .target_groups
+                .iter()
+                .map(|group_id| AnnouncementTransition {
+                    announcement_id: id.clone(),
+                    group_id: group_id.clone(),
+                    lifecycle: AnnouncementLifecycle::Scheduled,
+                    resume: false,
+                }),
+        );
         Ok(AnnouncementAdmission {
             id,
             lifecycle: AnnouncementLifecycle::Scheduled,
             duplicate: false,
+            transitions,
         })
     }
 
@@ -313,7 +362,10 @@ impl AnnouncementCoordinator {
             return Err(AnnouncementError::InvalidTargetGroup(group_id.into()));
         }
         if lifecycle == AnnouncementLifecycle::Started {
-            let queue = self.queues.get(group_id).expect("record target is known");
+            let queue = self
+                .queues
+                .get(group_id)
+                .ok_or_else(|| AnnouncementError::InvalidTargetGroup(group_id.into()))?;
             if queue.active.as_deref() != Some(id) {
                 return Err(AnnouncementError::InvalidLifecycle);
             }
@@ -336,8 +388,14 @@ impl AnnouncementCoordinator {
         if self.group_state(id, group_id)?.lifecycle.terminal() {
             return Ok(vec![]);
         }
+        let was_active = self.is_active(id, group_id);
+        if !was_active {
+            self.remove_from_queue(id, group_id);
+        }
         let transition = self.finish_group(id, group_id, lifecycle);
-        self.advance_group(group_id);
+        if was_active {
+            self.advance_group(group_id);
+        }
         Ok(vec![transition])
     }
 
@@ -353,24 +411,13 @@ impl AnnouncementCoordinator {
             .collect();
         let mut transitions = Vec::new();
         for group_id in targets {
-            if let Some(position) = self.queues[&group_id]
-                .queued
-                .iter()
-                .position(|queued| queued == id)
-            {
-                self.queues
-                    .get_mut(&group_id)
-                    .unwrap()
-                    .queued
-                    .remove(position);
-                self.queues.get_mut(&group_id).unwrap().queued_duration_ms = self.queues[&group_id]
-                    .queued
-                    .iter()
-                    .map(|queued| u64::from(self.records[queued].intent.max_duration_ms))
-                    .sum();
-            }
+            self.remove_from_queue(id, &group_id);
             let transition = self.finish_group(id, &group_id, AnnouncementLifecycle::Cancelled);
-            if self.queues[&group_id].active.is_none() {
+            if self
+                .queues
+                .get(&group_id)
+                .is_some_and(|queue| queue.active.is_none())
+            {
                 self.advance_group(&group_id);
             }
             transitions.push(transition);
@@ -419,12 +466,7 @@ impl AnnouncementCoordinator {
             }
         }
         let AnnouncementSource::Uri(uri) = &intent.source;
-        if uri.is_empty()
-            || uri.len() > MAX_ANNOUNCEMENT_SOURCE_BYTES
-            || !(uri.starts_with("https://")
-                || uri.starts_with("http://")
-                || uri.starts_with("media://"))
-        {
+        if !valid_source_uri(uri) {
             return Err(AnnouncementError::InvalidSource);
         }
         if !(-60.0..=0.0).contains(&intent.duck.attenuation_db)
@@ -485,7 +527,7 @@ impl AnnouncementCoordinator {
         group_id: &str,
         lifecycle: AnnouncementLifecycle,
     ) -> AnnouncementTransition {
-        let was_active = self.queues[group_id].active.as_deref() == Some(id);
+        let was_active = self.is_active(id, group_id);
         let resume = {
             let record = self.records.get_mut(id).expect("known announcement");
             let state = record
@@ -501,9 +543,13 @@ impl AnnouncementCoordinator {
             resume
         };
         if was_active {
-            self.queues.get_mut(group_id).unwrap().active = None;
+            if let Some(queue) = self.queues.get_mut(group_id) {
+                queue.active = None;
+            }
         }
-        self.refresh_lifecycle(id);
+        if self.refresh_lifecycle(id) {
+            self.terminal_records.push_back(id.into());
+        }
         AnnouncementTransition {
             announcement_id: id.into(),
             group_id: group_id.into(),
@@ -513,16 +559,24 @@ impl AnnouncementCoordinator {
     }
 
     fn advance_group(&mut self, group_id: &str) {
-        let next = self.queues.get_mut(group_id).unwrap().queued.pop_front();
-        if let Some(id) = next {
-            let duration = u64::from(self.records[&id].intent.max_duration_ms);
-            let queue = self.queues.get_mut(group_id).unwrap();
-            queue.queued_duration_ms = queue.queued_duration_ms.saturating_sub(duration);
-            queue.active = Some(id);
-        }
+        let Some(next) = self
+            .queues
+            .get_mut(group_id)
+            .and_then(|queue| queue.queued.pop_front())
+        else {
+            return;
+        };
+        let duration = u64::from(self.records[&next].intent.max_duration_ms);
+        let queue = self.queues.get_mut(group_id).expect("known group");
+        queue.queued_duration_ms = queue.queued_duration_ms.saturating_sub(duration);
+        queue.active = Some(next);
     }
 
-    fn refresh_lifecycle(&mut self, id: &str) {
+    fn refresh_lifecycle(&mut self, id: &str) -> bool {
+        let was_terminal = self
+            .records
+            .get(id)
+            .is_some_and(|record| record.lifecycle.terminal());
         let record = self.records.get_mut(id).expect("known announcement");
         record.lifecycle = if record
             .groups
@@ -547,5 +601,64 @@ impl AnnouncementCoordinator {
         } else {
             AnnouncementLifecycle::Scheduled
         };
+        !was_terminal && record.lifecycle.terminal()
     }
+
+    fn is_active(&self, id: &str, group_id: &str) -> bool {
+        self.queues
+            .get(group_id)
+            .is_some_and(|queue| queue.active.as_deref() == Some(id))
+    }
+
+    fn remove_from_queue(&mut self, id: &str, group_id: &str) {
+        let Some(queue) = self.queues.get_mut(group_id) else {
+            return;
+        };
+        let Some(position) = queue.queued.iter().position(|queued| queued == id) else {
+            return;
+        };
+        queue.queued.remove(position);
+        queue.queued_duration_ms = queue
+            .queued
+            .iter()
+            .filter_map(|queued| self.records.get(queued))
+            .map(|record| u64::from(record.intent.max_duration_ms))
+            .sum();
+    }
+
+    fn make_room_for_record(&mut self) -> Result<(), AnnouncementError> {
+        while self.records.len() >= self.limits.max_retained_records {
+            let Some(id) = self.terminal_records.pop_front() else {
+                return Err(AnnouncementError::RecordCapacityExceeded);
+            };
+            let Some(record) = self.records.remove(&id) else {
+                continue;
+            };
+            if self.by_key.get(&record.intent.idempotency_key) == Some(&id) {
+                self.by_key.remove(&record.intent.idempotency_key);
+            }
+        }
+        Ok(())
+    }
+}
+
+fn valid_source_uri(uri: &str) -> bool {
+    if uri.is_empty()
+        || uri.len() > MAX_ANNOUNCEMENT_SOURCE_BYTES
+        || uri
+            .bytes()
+            .any(|byte| byte.is_ascii_control() || byte.is_ascii_whitespace())
+    {
+        return false;
+    }
+    let Some((scheme, remainder)) = uri.split_once("://") else {
+        return false;
+    };
+    let Ok(parsed) = uri.parse::<axum::http::Uri>() else {
+        return false;
+    };
+    matches!(scheme, "https" | "http" | "media")
+        && !remainder.is_empty()
+        && !remainder.starts_with(['/', '?', '#'])
+        && parsed.authority().is_some()
 }

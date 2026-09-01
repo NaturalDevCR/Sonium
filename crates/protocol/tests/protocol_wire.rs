@@ -31,6 +31,23 @@ fn versioned_announcement_control_message_round_trips_on_its_own_wire_type() {
     assert!(matches!(decoded, Message::AnnouncementControl(message) if message == original));
 }
 
+#[test]
+fn announcement_control_rejects_invalid_semantics_on_encode_and_decode() {
+    use sonium_protocol::messages::{AnnouncementControlV1, AnnouncementLifecycle};
+
+    let invalid = AnnouncementControlV1 {
+        version: 1,
+        announcement_id: "announcement".into(),
+        group_id: "default".into(),
+        lifecycle: AnnouncementLifecycle::Scheduled,
+        scheduled_at_ms: -1,
+        max_duration_ms: 0,
+    };
+
+    assert!(invalid.try_encode().is_err());
+    assert!(AnnouncementControlV1::decode(&serde_json::to_vec(&invalid).unwrap()).is_err());
+}
+
 // ── Helpers ───────────────────────────────────────────────────────────────
 
 /// Build the full wire bytes for a message: header + payload.

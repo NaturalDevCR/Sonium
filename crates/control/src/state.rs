@@ -879,7 +879,8 @@ impl ServerState {
             self.events.emit(crate::ws::Event::GroupDeleted {
                 group_id: group_id.into(),
             });
-            self.announcements.lock().remove_group(group_id);
+            let transitions = self.announcements.lock().remove_group(group_id);
+            self.emit_announcement_transitions(transitions);
             drop(groups);
             drop(clients);
             self.persist();
@@ -1007,22 +1008,7 @@ impl ServerState {
         let (admission, transitions) = {
             let mut announcements = self.announcements.lock();
             let admission = announcements.admit(intent, now_ms)?;
-            let transitions = if admission.duplicate {
-                Vec::new()
-            } else {
-                announcements
-                    .record(&admission.id)
-                    .expect("admitted announcement exists")
-                    .groups
-                    .iter()
-                    .map(|group| AnnouncementTransition {
-                        announcement_id: admission.id.clone(),
-                        group_id: group.group_id.clone(),
-                        lifecycle: AnnouncementLifecycle::Scheduled,
-                        resume: false,
-                    })
-                    .collect()
-            };
+            let transitions = admission.transitions.clone();
             (admission, transitions)
         };
         self.emit_announcement_transitions(transitions);

@@ -208,6 +208,12 @@ async fn authenticated_websocket_receives_announcement_lifecycle_events() {
     ));
     let (auth, token) = test_auth();
     let app = api::router(state.clone()).layer(axum::Extension(auth.clone()));
+    let mut low_body = announcement_body("ws-low");
+    low_body["priority"] = json!("chime");
+    let intent = serde_json::from_value(low_body).unwrap();
+    state
+        .admit_announcement(intent, test_expiry_ms() - 60_000)
+        .unwrap();
     let ticket_response = app
         .oneshot(post_empty("/events/ticket", &token))
         .await
@@ -224,22 +230,34 @@ async fn authenticated_websocket_receives_announcement_lifecycle_events() {
     .await
     .unwrap();
 
-    let intent = serde_json::from_value(announcement_body("ws-announcement")).unwrap();
+    let mut high_body = announcement_body("ws-high");
+    high_body["priority"] = json!("emergency");
+    let intent = serde_json::from_value(high_body).unwrap();
     state
         .admit_announcement(intent, test_expiry_ms() - 60_000)
         .unwrap();
 
-    let event = tokio::time::timeout(tokio::time::Duration::from_secs(1), ws.next())
-        .await
-        .unwrap()
-        .unwrap()
-        .unwrap();
-    let Message::Text(event) = event else {
-        panic!("expected text event")
-    };
-    let event: Value = serde_json::from_str(&event).unwrap();
-    assert_eq!(event["type"], "announcement_lifecycle");
-    assert_eq!(event["lifecycle"], "scheduled");
+    let mut lifecycles = Vec::new();
+    for _ in 0..2 {
+        let event = tokio::time::timeout(tokio::time::Duration::from_secs(1), ws.next())
+            .await
+            .unwrap()
+            .unwrap()
+            .unwrap();
+        let Message::Text(event) = event else {
+            panic!("expected text event")
+        };
+        let event: Value = serde_json::from_str(&event).unwrap();
+        assert_eq!(event["type"], "announcement_lifecycle");
+        lifecycles.push((
+            event["lifecycle"].as_str().unwrap().to_owned(),
+            event["resume"].as_bool().unwrap(),
+        ));
+    }
+    assert_eq!(
+        lifecycles,
+        vec![("cancelled".into(), true), ("scheduled".into(), false)]
+    );
 }
 
 // ── /status ───────────────────────────────────────────────────────────────

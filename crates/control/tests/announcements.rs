@@ -149,3 +149,128 @@ fn rejects_a_group_queue_that_exceeds_its_bounded_depth() {
 
     assert!(error.to_string().contains("queue depth"));
 }
+
+#[test]
+fn terminal_ack_for_a_queued_announcement_removes_it_without_advancing_the_active_one() {
+    let mut coordinator = AnnouncementCoordinator::new(AnnouncementLimits::default(), ["default"]);
+    let active = coordinator
+        .admit(intent("active", AnnouncementPriority::Announcement), 1)
+        .unwrap();
+    let queued = coordinator
+        .admit(intent("queued", AnnouncementPriority::Announcement), 2)
+        .unwrap();
+    let next = coordinator
+        .admit(intent("next", AnnouncementPriority::Announcement), 3)
+        .unwrap();
+
+    let terminal = coordinator
+        .acknowledge(&queued.id, "default", AnnouncementLifecycle::Completed)
+        .unwrap();
+    coordinator
+        .acknowledge(&active.id, "default", AnnouncementLifecycle::Completed)
+        .unwrap();
+
+    assert_eq!(terminal.len(), 1);
+    assert_eq!(
+        coordinator.record(&queued.id).unwrap().lifecycle,
+        AnnouncementLifecycle::Completed
+    );
+    assert!(coordinator
+        .acknowledge(&next.id, "default", AnnouncementLifecycle::Started)
+        .is_ok());
+}
+
+#[test]
+fn removing_a_group_terminalizes_its_announcements_and_leaves_no_stale_queue_references() {
+    let mut coordinator =
+        AnnouncementCoordinator::new(AnnouncementLimits::default(), ["default", "removed"]);
+    let mut target = intent("removed-group", AnnouncementPriority::Announcement);
+    target.target_groups = vec!["removed".into()];
+    let announcement = coordinator.admit(target, 1).unwrap();
+
+    coordinator.remove_group("removed");
+
+    assert_eq!(
+        coordinator.record(&announcement.id).unwrap().lifecycle,
+        AnnouncementLifecycle::Cancelled
+    );
+    assert!(coordinator.expire(10_000).is_empty());
+    assert!(coordinator.cancel(&announcement.id).unwrap().is_empty());
+}
+
+#[test]
+fn terminal_history_and_idempotency_index_are_globally_bounded() {
+    let mut coordinator = AnnouncementCoordinator::new(
+        AnnouncementLimits {
+            max_retained_records: 2,
+            ..AnnouncementLimits::default()
+        },
+        ["default"],
+    );
+
+    let first = coordinator
+        .admit(
+            intent("retained-first", AnnouncementPriority::Announcement),
+            1,
+        )
+        .unwrap();
+    coordinator
+        .acknowledge(&first.id, "default", AnnouncementLifecycle::Completed)
+        .unwrap();
+    let second = coordinator
+        .admit(
+            intent("retained-second", AnnouncementPriority::Announcement),
+            2,
+        )
+        .unwrap();
+    coordinator
+        .acknowledge(&second.id, "default", AnnouncementLifecycle::Completed)
+        .unwrap();
+    let third = coordinator
+        .admit(
+            intent("retained-third", AnnouncementPriority::Announcement),
+            3,
+        )
+        .unwrap();
+
+    assert_eq!(coordinator.records().len(), 2);
+    assert!(coordinator.record(&first.id).is_none());
+    assert_eq!(
+        coordinator
+            .admit(
+                intent("retained-second", AnnouncementPriority::Announcement),
+                4
+            )
+            .unwrap()
+            .id,
+        second.id
+    );
+    let reused = coordinator
+        .admit(
+            intent("retained-first", AnnouncementPriority::Announcement),
+            4,
+        )
+        .unwrap();
+    assert!(
+        !reused.duplicate,
+        "an evicted idempotency key is a new admission"
+    );
+    assert_ne!(reused.id, first.id);
+    assert_ne!(reused.id, third.id);
+}
+
+#[test]
+fn rejects_uri_without_an_authority_or_with_control_characters() {
+    let mut coordinator = AnnouncementCoordinator::new(AnnouncementLimits::default(), ["default"]);
+    let mut media = intent("media-uri", AnnouncementPriority::Announcement);
+    media.source = AnnouncementSource::Uri("media://library/doorbell.ogg".into());
+    assert!(coordinator.admit(media, 1).is_ok());
+
+    let mut no_authority = intent("no-authority", AnnouncementPriority::Announcement);
+    no_authority.source = AnnouncementSource::Uri("https://".into());
+    assert!(coordinator.admit(no_authority, 1).is_err());
+
+    let mut controls = intent("control-char", AnnouncementPriority::Announcement);
+    controls.source = AnnouncementSource::Uri("https://media.example.test/a.ogg\n".into());
+    assert!(coordinator.admit(controls, 1).is_err());
+}
