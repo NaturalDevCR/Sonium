@@ -75,6 +75,12 @@ Registers an announcement with `custom_components/sonium/__init__.py`
 `build_announcement_intent` (`custom_components/sonium/announcement.py`) and
 submits it via `POST /api/announcements`.
 
+The service uses Home Assistant's optional service-response contract. Automation
+callers that request a response receive `announcement_id`, the current
+`lifecycle`, and `duplicate`; the ID can be passed to
+`sonium.cancel_announcement`. This makes retries observable and keeps Music
+Assistant-style announcement workflows idempotent.
+
 Service data:
 
 | Field | Notes |
@@ -88,11 +94,16 @@ Service data:
 | `release_ms` | Default `100`, `0..=5000` |
 | `max_duration_ms` | Default `30_000`, `1..=120_000` |
 | `resume` | Default `true` (restore previous program after completion) |
+| `config_entry_id` | Optional when more than one Sonium server is configured |
 
 Targets are resolved through the entity registry: a group entity maps to its
 group, a client entity maps to its current group. Invalid, unknown, or
 duplicate targets raise a Home Assistant error. Validation errors from the
 adapter surface as `HomeAssistantError` before any request is sent.
+When multiple Sonium config entries are loaded, an entity target or explicit
+`config_entry_id` selects the server. Calls that could otherwise be routed to
+more than one server fail with a clear ambiguity error instead of silently
+using the first entry.
 
 ### `sonium.cancel_announcement`
 

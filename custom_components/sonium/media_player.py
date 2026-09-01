@@ -88,7 +88,9 @@ class SoniumGroupMediaPlayer(SoniumEntity, MediaPlayerEntity):
     """Represents a Sonium group (zone) as a media player."""
 
     _attr_supported_features = (
-        MediaPlayerEntityFeature.SELECT_SOURCE | MediaPlayerEntityFeature.GROUPING
+        MediaPlayerEntityFeature.PLAY_MEDIA
+        | MediaPlayerEntityFeature.SELECT_SOURCE
+        | MediaPlayerEntityFeature.GROUPING
     )
 
     def __init__(self, coordinator: SoniumCoordinator, group_id: str) -> None:
@@ -186,7 +188,8 @@ class SoniumClientMediaPlayer(SoniumEntity, MediaPlayerEntity):
     """Represents a Sonium client (speaker) as a media player."""
 
     _attr_supported_features = (
-        MediaPlayerEntityFeature.VOLUME_SET
+        MediaPlayerEntityFeature.PLAY_MEDIA
+        | MediaPlayerEntityFeature.VOLUME_SET
         | MediaPlayerEntityFeature.VOLUME_MUTE
         | MediaPlayerEntityFeature.SELECT_SOURCE
         | MediaPlayerEntityFeature.GROUPING
