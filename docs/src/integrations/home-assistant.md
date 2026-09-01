@@ -21,6 +21,8 @@ still change between releases.
   telemetry when health reporting is enabled.
 - Zone selector and latency offset controls per speaker.
 - Domain services to rename clients/groups and create/delete groups.
+- Bounded announcement and ducking support for automations and Music Assistant
+  media-player calls.
 - Real-time updates from `/api/events`.
 
 ## Installation
@@ -52,3 +54,37 @@ search for **Sonium**, and enter:
 
 Viewer accounts can read state, but write operations such as volume, group
 changes, renames, and group creation require an operator/admin-capable account.
+
+## Announcements and ducking
+
+`sonium.play_announcement` schedules an authenticated, bounded announcement
+through the Sonium control API. Target a zone by its Sonium `group_ids`, or by
+using `target_entity_ids` containing Sonium group/client `media_player`
+entities. The service requires an `idempotency_key`: preserve it when retrying
+the same automation action so a network retry cannot replay audio.
+
+```yaml
+action: sonium.play_announcement
+data:
+  source: "https://home.example/local/doorbell.ogg"
+  group_ids: ["living_room"]
+  idempotency_key: "doorbell-{{ trigger.id }}-{{ trigger.to_state.last_changed.timestamp() }}"
+  priority: announcement
+  attenuation_db: -18
+  attack_ms: 25
+  release_ms: 150
+  max_duration_ms: 15000
+  resume: true
+```
+
+Sonium also accepts the Home Assistant/Music Assistant announcement convention
+on its group and client entities: invoke `media_player.play_media` with
+`announce: true`, a `media_content_id` that is an `http`, `https`, or `media`
+URI, and optional `extra` metadata (`priority`, `duck`, `release_ms`,
+`max_duration_ms`, `resume`, and `idempotency_key`). An idempotency key is
+generated when omitted, so automations that need retry-safe behaviour should
+provide one explicitly.
+
+Sonium schedules the request and expires it after `max_duration_ms`; it does
+not implement or depend on the Sendspin protocol. Cancellation is available as
+`sonium.cancel_announcement` with the server announcement ID.

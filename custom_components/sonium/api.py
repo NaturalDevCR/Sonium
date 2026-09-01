@@ -138,6 +138,16 @@ class SoniumApiClient:
     async def delete_group(self, group_id: str) -> None:
         await self._request("DELETE", f"/api/groups/{group_id}")
 
+    async def create_announcement(self, intent: dict[str, Any]) -> dict[str, Any]:
+        """Submit a locally validated, idempotent announcement intent."""
+        response = await self._request("POST", "/api/announcements", json=intent)
+        if not isinstance(response, dict):
+            raise RuntimeError("Sonium returned an invalid announcement response")
+        return response
+
+    async def cancel_announcement(self, announcement_id: str) -> None:
+        await self._request("DELETE", f"/api/announcements/{announcement_id}")
+
     async def subscribe_events(self) -> AsyncGenerator[dict, None]:
         ws_url = (
             f"{self._ws_scheme}://{self._host}:{self._port}"

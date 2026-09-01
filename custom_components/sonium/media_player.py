@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import logging
+from typing import Any
+from uuid import uuid4
 
 from homeassistant.components.media_player import (
     MediaPlayerEntity,
@@ -9,15 +11,50 @@ from homeassistant.components.media_player import (
 )
 from homeassistant.config_entries import ConfigEntry
 from homeassistant.core import HomeAssistant, callback
+from homeassistant.exceptions import HomeAssistantError
 from homeassistant.helpers import entity_registry as er
 from homeassistant.helpers.device_registry import DeviceInfo
 from homeassistant.helpers.entity_platform import AddEntitiesCallback
 
+from .announcement import (
+    AnnouncementValidationError,
+    announcement_options_from_media_kwargs,
+    build_announcement_intent,
+)
 from .const import DOMAIN
 from .coordinator import SoniumCoordinator
 from .entity import SoniumEntity
 
 _LOGGER = logging.getLogger(__name__)
+
+
+async def _async_submit_media_announcement(
+    coordinator: SoniumCoordinator,
+    target_group_id: str,
+    media_id: str,
+    kwargs: dict[str, Any],
+) -> bool:
+    """Submit standard HA/Music Assistant announcement metadata to Sonium.
+
+    Returning ``False`` lets callers preserve the platform's normal
+    ``play_media`` behaviour when the request was not marked as an
+    announcement.
+    """
+    options = announcement_options_from_media_kwargs(kwargs)
+    if options is None:
+        return False
+    idempotency_key = options.pop("idempotency_key") or f"ha-{uuid4()}"
+    try:
+        intent = build_announcement_intent(
+            source=media_id,
+            target_groups=[target_group_id],
+            idempotency_key=idempotency_key,
+            **options,
+        )
+    except AnnouncementValidationError as err:
+        raise HomeAssistantError(str(err)) from err
+    await coordinator.api.create_announcement(intent)
+    return True
 
 
 async def async_setup_entry(
@@ -119,6 +156,15 @@ class SoniumGroupMediaPlayer(SoniumEntity, MediaPlayerEntity):
             return
         await self.coordinator.api.set_group_stream(self._group_id, stream.id)
         await self.coordinator.async_request_refresh()
+
+    async def async_play_media(
+        self, media_type: str, media_id: str, **kwargs: Any
+    ) -> None:
+        if await _async_submit_media_announcement(
+            self.coordinator, self._group_id, media_id, kwargs
+        ):
+            return
+        await super().async_play_media(media_type, media_id, **kwargs)
 
     async def async_join_players(self, group_members: list[str]) -> None:
         """Move listed client entities to this group."""
@@ -248,6 +294,16 @@ class SoniumClientMediaPlayer(SoniumEntity, MediaPlayerEntity):
             return
         await self.coordinator.api.set_client_group(self._client_id, group.id)
         await self.coordinator.async_request_refresh()
+
+    async def async_play_media(
+        self, media_type: str, media_id: str, **kwargs: Any
+    ) -> None:
+        client = self._client
+        if client is not None and await _async_submit_media_announcement(
+            self.coordinator, client.group_id, media_id, kwargs
+        ):
+            return
+        await super().async_play_media(media_type, media_id, **kwargs)
 
     async def async_join_players(self, group_members: list[str]) -> None:
         """Move this client to the same group as the first member."""
