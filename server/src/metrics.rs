@@ -8,9 +8,14 @@ use prometheus::{
     register_int_counter, register_int_counter_vec, register_int_gauge, register_int_gauge_vec,
     IntCounter, IntCounterVec, IntGauge, IntGaugeVec, Opts,
 };
+use sonium_control::state::{StreamRecovery, StreamStatus};
 use sonium_protocol::messages::{AudioHealthState, HealthReport};
+use std::{collections::HashMap, sync::Mutex};
 
 lazy_static! {
+    /// Current session generation for each client ID. Held through metric
+    /// cleanup so an old disconnect cannot delete a replacement's labels.
+    static ref CLIENT_SESSION_GENERATIONS: Mutex<HashMap<String, u64>> = Mutex::new(HashMap::new());
     /// Number of TCP audio clients currently connected.
     pub static ref CONNECTED_CLIENTS: IntGauge =
         register_int_gauge!(Opts::new(
@@ -32,10 +37,30 @@ lazy_static! {
             "Number of active WebSocket event-stream connections"
         )).unwrap();
 
-    /// Stream status: 1=playing, 0=idle, -1=error, per stream_id label.
+    /// Stream status: 2=recovering, 1=playing, 0=idle, -1=error.
     pub static ref STREAM_STATUS: IntGaugeVec =
         register_int_gauge_vec!(
-            Opts::new("sonium_stream_status", "Stream status (1=playing, 0=idle, -1=error)"),
+            Opts::new("sonium_stream_status", "Stream status (2=recovering, 1=playing, 0=idle, -1=error)"),
+            &["stream_id"]
+        ).unwrap();
+
+    /// Current consecutive reopen attempt, or zero outside recovery.
+    pub static ref STREAM_RECOVERY_ATTEMPT: IntGaugeVec =
+        register_int_gauge_vec!(
+            Opts::new(
+                "sonium_stream_recovery_attempt",
+                "Current consecutive source reopen attempt (zero outside recovery)"
+            ),
+            &["stream_id"]
+        ).unwrap();
+
+    /// Delay before the next source reopen attempt, or zero outside recovery.
+    pub static ref STREAM_RECOVERY_RETRY_MS: IntGaugeVec =
+        register_int_gauge_vec!(
+            Opts::new(
+                "sonium_stream_recovery_retry_ms",
+                "Milliseconds before the next source reopen attempt (zero outside recovery)"
+            ),
             &["stream_id"]
         ).unwrap();
 
@@ -362,6 +387,46 @@ lazy_static! {
         ).unwrap();
 }
 
+/// Keep Prometheus synchronized with the canonical stream status stored by
+/// `ServerState` and emitted through REST/WebSocket.
+pub fn update_stream_status(
+    stream_id: &str,
+    status: StreamStatus,
+    recovery: Option<StreamRecovery>,
+) {
+    let status_value = match status {
+        StreamStatus::Playing => 1,
+        StreamStatus::Idle => 0,
+        StreamStatus::Recovering => 2,
+        StreamStatus::Error => -1,
+    };
+    STREAM_STATUS
+        .with_label_values(&[stream_id])
+        .set(status_value);
+    let (attempt, retry_in_ms) = recovery
+        .map(|recovery| {
+            (
+                i64::from(recovery.attempt),
+                i64::try_from(recovery.retry_in_ms).unwrap_or(i64::MAX),
+            )
+        })
+        .unwrap_or((0, 0));
+    STREAM_RECOVERY_ATTEMPT
+        .with_label_values(&[stream_id])
+        .set(attempt);
+    STREAM_RECOVERY_RETRY_MS
+        .with_label_values(&[stream_id])
+        .set(retry_in_ms);
+}
+
+/// Register a newly admitted session before it can create client metric labels.
+pub fn register_client_session(client_id: &str, generation: u64) {
+    CLIENT_SESSION_GENERATIONS
+        .lock()
+        .expect("client metric session registry lock poisoned")
+        .insert(client_id.into(), generation);
+}
+
 pub fn observe_client_health(
     client_id: &str,
     transport: &str,
@@ -469,6 +534,66 @@ pub fn observe_active_transport(client_id: &str, active_transport: &str) {
     }
 }
 
+/// Remove all per-client Prometheus series when a client disconnects or is evicted.
+pub fn forget_client(client_id: &str, generation: u64) {
+    const TRANSPORTS: [&str; 5] = ["tcp", "rtp_udp", "rist", "arq_udp", "quic_dgram"];
+
+    // Keep this mutex through removal. A replacement session must register its
+    // generation before creating labels, so it either wins first (and stale
+    // cleanup is skipped) or starts only after old labels are removed.
+    let mut sessions = CLIENT_SESSION_GENERATIONS
+        .lock()
+        .expect("client metric session registry lock poisoned");
+    if sessions.get(client_id) != Some(&generation) {
+        return;
+    }
+    sessions.remove(client_id);
+
+    macro_rules! remove_transport_series {
+        ($transport:expr, $($metric:ident),+ $(,)?) => {
+            $(let _ = $metric.remove_label_values(&[client_id, $transport]);)+
+        };
+    }
+
+    for transport in TRANSPORTS {
+        remove_transport_series!(
+            transport,
+            CLIENT_BUFFER_DEPTH_MS,
+            CLIENT_OUTPUT_BUFFER_MS,
+            CLIENT_JITTER_BUFFER_CHUNKS,
+            CLIENT_TARGET_PLAYOUT_LATENCY_MS,
+            CLIENT_CALLBACK_STARVATIONS,
+            CLIENT_AUDIO_CALLBACK_XRUNS,
+            CLIENT_JITTER_MS,
+            CLIENT_UNDERRUNS,
+            CLIENT_STALE_DROPS,
+            CLIENT_OVERRUNS,
+            CLIENT_CLOCK_OFFSET_MS,
+            CLIENT_RTP_PACKETS_RECEIVED,
+            CLIENT_RTP_SEQUENCE_GAPS,
+            CLIENT_RTP_DECODE_ERRORS,
+            CLIENT_RTP_CONCEALED_PACKETS,
+            CLIENT_ARQ_NACKS_SENT,
+            CLIENT_ARQ_RETRANSMIT_RECEIVED,
+            CLIENT_ARQ_FEC_RECOVERED,
+            CLIENT_CLOCK_OFFSET_US,
+            CLIENT_GROUP_OFFSET_US,
+            CLIENT_SYNC_ERROR_US,
+            CLIENT_PLAYOUT_ERROR_P50_US,
+            CLIENT_PLAYOUT_ERROR_P95_US,
+            CLIENT_PLAYOUT_ERROR_P99_US,
+            CLIENT_CALLBACK_DURATION_P99_US,
+            CLIENT_OUTPUT_LATENCY_US,
+            CLIENT_ARQ_FEC_RECOVERY_PCT_BP,
+            CLIENT_TRANSPORT_ACTIVE,
+        );
+        for state in AudioHealthState::ALL {
+            let _ =
+                CLIENT_HEALTH_STATE.remove_label_values(&[client_id, transport, state.as_str()]);
+        }
+    }
+}
+
 /// Update the per-group max absolute sync error in microseconds.
 ///
 /// Wired into the adaptive engine in Phase E; for Phase A the gauge is
@@ -489,4 +614,64 @@ pub fn gather() -> String {
         .encode(&prometheus::gather(), &mut buf)
         .unwrap_or(());
     String::from_utf8(buf).unwrap_or_default()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use sonium_control::state::{StreamRecovery, StreamStatus};
+
+    #[test]
+    fn recovering_metric_has_distinct_state_and_retry_context() {
+        update_stream_status(
+            "metric-recovery-test",
+            StreamStatus::Recovering,
+            Some(StreamRecovery {
+                attempt: 4,
+                retry_in_ms: 400,
+            }),
+        );
+
+        let metrics = gather();
+        assert!(metrics.contains("sonium_stream_status{stream_id=\"metric-recovery-test\"} 2"));
+        assert!(metrics
+            .contains("sonium_stream_recovery_attempt{stream_id=\"metric-recovery-test\"} 4"));
+        assert!(metrics
+            .contains("sonium_stream_recovery_retry_ms{stream_id=\"metric-recovery-test\"} 400"));
+    }
+
+    #[test]
+    fn forget_client_removes_client_labelled_series() {
+        let id = "metrics-cleanup-client";
+        let report = HealthReport::new(0, 0, 0, 100, 0, 0);
+
+        register_client_session(id, 1);
+        observe_client_health(id, "tcp", &report, AudioHealthState::Stable);
+        observe_active_transport(id, "tcp");
+        assert!(gather().contains(&format!("client_id=\"{id}\"")));
+
+        forget_client(id, 1);
+
+        assert!(!gather().contains(&format!("client_id=\"{id}\"")));
+    }
+
+    #[test]
+    fn stale_cleanup_does_not_remove_reconnected_client_labels() {
+        let id = "metrics-reconnect-race-client";
+        let report = HealthReport::new(0, 0, 0, 100, 0, 0);
+
+        register_client_session(id, 1);
+        observe_client_health(id, "tcp", &report, AudioHealthState::Stable);
+        observe_active_transport(id, "tcp");
+        // A reconnect has already created its replacement labels when the old
+        // session cleanup finally runs.
+        register_client_session(id, 2);
+        observe_client_health(id, "tcp", &report, AudioHealthState::Stable);
+        observe_active_transport(id, "tcp");
+
+        forget_client(id, 1);
+
+        assert!(gather().contains(&format!("client_id=\"{id}\"")));
+        forget_client(id, 2);
+    }
 }

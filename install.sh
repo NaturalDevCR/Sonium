@@ -15,6 +15,7 @@ FIFO_PATH="${SONIUM_FIFO:-/tmp/sonium.fifo}"
 STREAM_PORT="${SONIUM_STREAM_PORT:-1710}"
 CONTROL_PORT="${SONIUM_CONTROL_PORT:-1711}"
 SUDOERS_FILE="/etc/sudoers.d/sonium-server-restart"
+PREFLIGHT_CONFIG=""
 
 # Detect if we can be interactive
 if [[ -t 0 ]]; then
@@ -38,6 +39,7 @@ while [[ $# -gt 0 ]]; do
     --no-service) INSTALL_SERVICE=false; shift ;;
     --server-only) INSTALL_CLIENT=false; shift ;;
     --client-only) INSTALL_SERVER=false; shift ;;
+    --preflight-config) PREFLIGHT_CONFIG="$2"; shift 2 ;;
     --uninstall) UNINSTALL=true; shift ;;
     -h|--help)
       cat <<EOF
@@ -54,6 +56,8 @@ Options:
   --no-service    Install binaries and config only
   --server-only   Install only sonium-server
   --client-only   Install only sonium-client
+  --preflight-config FILE
+                 Check FILE for the legacy [server] audio keys and exit
   --uninstall     Remove Sonium from this system
 EOF
       exit 0
@@ -86,6 +90,82 @@ run_as_user() {
     return 1
   fi
 }
+
+preflight_server_config() {
+  local config_path="$1"
+  local checker_binary="${2:-}"
+  local legacy_keys
+  local preflight_status
+
+  [[ -e "${config_path}" ]] || return 0
+  [[ -r "${config_path}" ]] || die "Cannot read existing configuration ${config_path}; fix its permissions before rerunning the installer."
+
+  if ! command -v python3 >/dev/null 2>&1; then
+    die "Cannot preflight existing configuration ${config_path}: Python 3.11+ with tomllib is required. Install or enable Python 3.11+, then fix TOML syntax and move buffer_ms, chunk_ms, and output_prefill_ms to [server.audio] if present before rerunning. No binaries, services, account files, or configuration were changed."
+  fi
+
+  if legacy_keys="$(python3 - "${config_path}" <<'PY'
+import sys
+
+if sys.version_info < (3, 11):
+    raise SystemExit(12)
+
+try:
+    import tomllib
+except ModuleNotFoundError:
+    raise SystemExit(12)
+
+try:
+    with open(sys.argv[1], "rb") as config_file:
+        config = tomllib.load(config_file)
+except (OSError, tomllib.TOMLDecodeError):
+    raise SystemExit(11)
+
+server = config.get("server")
+if isinstance(server, dict):
+    legacy_keys = [
+        key
+        for key in ("buffer_ms", "chunk_ms", "output_prefill_ms")
+        if key in server
+    ]
+    if legacy_keys:
+        print("\n".join(legacy_keys))
+        raise SystemExit(10)
+PY
+  )"; then
+    :
+  else
+    preflight_status=$?
+    case "${preflight_status}" in
+      10)
+        die "Legacy [server] audio keys detected in ${config_path}: ${legacy_keys//$'\n'/, }. Move buffer_ms, chunk_ms, and output_prefill_ms to [server.audio] (keeping their values) and rerun the installer. No binaries, services, account files, or configuration were changed."
+        ;;
+      11)
+        die "Could not parse existing configuration ${config_path} with Python tomllib. Fix its TOML syntax and move buffer_ms, chunk_ms, and output_prefill_ms to [server.audio] if present before rerunning. No binaries, services, account files, or configuration were changed."
+        ;;
+      12)
+        die "Cannot preflight existing configuration ${config_path}: Python 3.11+ with tomllib is required. Install or enable Python 3.11+, then fix TOML syntax and move buffer_ms, chunk_ms, and output_prefill_ms to [server.audio] if present before rerunning. No binaries, services, account files, or configuration were changed."
+        ;;
+      *)
+        die "Could not preflight existing configuration ${config_path} with Python tomllib. Ensure Python 3.11+ is available, fix TOML syntax, and move buffer_ms, chunk_ms, and output_prefill_ms to [server.audio] if present before rerunning. No binaries, services, account files, or configuration were changed."
+        ;;
+    esac
+  fi
+
+  if [[ -n "${checker_binary}" ]]; then
+    [[ -x "${checker_binary}" ]] \
+      || die "Downloaded sonium-server is not executable; no binaries or services were changed."
+    if ! "${checker_binary}" --config "${config_path}" --check-config >/dev/null 2>&1; then
+      die "The downloaded sonium-server rejected existing configuration ${config_path}. Run '${checker_binary} --config ${config_path} --check-config' for details, fix every reported semantic error, and rerun the installer. No binaries, services, account files, or configuration were changed."
+    fi
+  fi
+}
+
+if [[ -n "${PREFLIGHT_CONFIG}" && "${UNINSTALL}" == "false" ]]; then
+  preflight_server_config "${PREFLIGHT_CONFIG}" "${SONIUM_SERVER_CHECK_BIN:-}"
+  ok "Configuration preflight passed: ${PREFLIGHT_CONFIG}"
+  exit 0
+fi
 
 if [[ "$(uname)" == "Darwin" && "${UNINSTALL}" == "false" ]]; then
   warn "You are running this on macOS. We recommend using the native Sonium Desktop Agent instead."
@@ -226,6 +306,13 @@ if [[ "${EUID}" -ne 0 ]]; then
   die "Run as root, for example: curl ... | sudo bash"
 fi
 
+# Run this before downloading, replacing binaries, or touching systemd. Strict
+# Phase 1 config rejects the legacy keys, so continuing would risk a failed
+# restart of an otherwise healthy service.
+if [[ "${INSTALL_SERVER}" == "true" && "${UNINSTALL}" == "false" ]]; then
+  preflight_server_config "${CONF_DIR}/sonium.toml"
+fi
+
 BIN_DIR="${PREFIX}/bin"
 
 if [[ "${UNINSTALL}" == "true" ]]; then
@@ -290,6 +377,12 @@ tar -xzf "${TMP_DIR}/sonium.tar.gz" -C "${TMP_DIR}"
 PACKAGE_DIR="$(find "${TMP_DIR}" -maxdepth 1 -type d -name 'sonium-*' | head -n 1)"
 [[ -n "${PACKAGE_DIR}" ]] || die "Release archive did not contain a sonium package directory"
 
+# The downloaded version is authoritative for the configuration it will run.
+# Check it before replacing the active binary or touching service state.
+if [[ "${INSTALL_SERVER}" == "true" ]]; then
+  preflight_server_config "${CONF_DIR}/sonium.toml" "${PACKAGE_DIR}/sonium-server"
+fi
+
 install -d "${BIN_DIR}"
 if [[ "${INSTALL_SERVER}" == "true" ]]; then
   install -m 0755 "${PACKAGE_DIR}/sonium-server" "${BIN_DIR}/sonium-server"
@@ -307,7 +400,9 @@ if [[ "${INSTALL_SERVER}" == "true" ]]; then
 
   mkdir -p "${CONF_DIR}"
   chown "${SONIUM_USER}" "${CONF_DIR}"
-  chmod 0755 "${CONF_DIR}"
+  # users.json includes password hashes and the durable JWT signing secret.
+  # Keep the whole state directory private even if initialisation later fails.
+  chmod 0700 "${CONF_DIR}"
 
   # Pre-initialize admin account if users.json doesn't exist
   if [[ ! -f "${CONF_DIR}/users.json" ]]; then
@@ -329,10 +424,15 @@ if [[ "${INSTALL_SERVER}" == "true" ]]; then
     cat > "${CONF_DIR}/sonium.toml" <<EOF
 [server]
 bind = "0.0.0.0"
+# Keep the authenticated control plane local by default. Operators that
+# deliberately expose it on a trusted LAN must change this and their firewall.
+control_bind = "127.0.0.1"
 stream_port = ${STREAM_PORT}
 control_port = ${CONTROL_PORT}
 mdns = true
 snapcast_compat = false
+
+[server.audio]
 buffer_ms = 1000
 chunk_ms = 20
 output_prefill_ms = 0
@@ -354,10 +454,11 @@ EOF
   fi
 
   if [[ -n "${GEN_PASS:-}" ]]; then
-    if run_as_user "${SONIUM_USER}" "${BIN_DIR}/sonium-server" --config "${CONF_DIR}/sonium.toml" --init-admin "${GEN_PASS}" >/dev/null 2>&1; then
+    if printf '%s' "${GEN_PASS}" | run_as_user "${SONIUM_USER}" "${BIN_DIR}/sonium-server" --config "${CONF_DIR}/sonium.toml" --init-admin >/dev/null 2>&1; then
       ok "Initialized default admin credentials"
     else
-      warn "Could not initialize default admin credentials automatically"
+      unset GEN_PASS
+      die "Could not initialize the initial admin account. Sonium was not enabled or restarted; inspect ${CONF_DIR}/sonium.toml and rerun the installer."
     fi
   fi
 
@@ -429,7 +530,12 @@ if [[ "${INSTALL_SERVER}" == "true" ]]; then
   cat <<EOF
 
 Server UI:
-  http://${HOST_IP}:${CONTROL_PORT}
+  http://127.0.0.1:${CONTROL_PORT} (local machine only)
+
+To administer the server from another trusted LAN host, explicitly set
+server.control_bind to the server's LAN address (or 0.0.0.0) in
+${CONF_DIR}/sonium.toml and restrict the port with a host firewall. Sonium does
+not provide TLS or authenticated media transport in this release.
 EOF
 
   if [[ -n "${GEN_PASS:-}" ]]; then

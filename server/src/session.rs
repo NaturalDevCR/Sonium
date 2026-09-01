@@ -12,6 +12,7 @@
 //!    to the new broadcaster without dropping the TCP connection.
 //! 6. Marks the client disconnected in [`ServerState`] on exit.
 
+use std::collections::HashMap;
 use std::net::SocketAddr;
 use std::sync::atomic::{AtomicU16, Ordering};
 use std::sync::Arc;
@@ -19,8 +20,8 @@ use std::time::{Duration, Instant};
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
 use tokio::net::tcp::{OwnedReadHalf, OwnedWriteHalf};
 use tokio::net::{TcpStream, UdpSocket};
-use tokio::sync::broadcast;
 use tokio::sync::mpsc;
+use tokio::sync::{broadcast, OwnedSemaphorePermit, Semaphore};
 use tokio::time::timeout;
 use tracing::{debug, info, instrument, warn};
 
@@ -30,14 +31,21 @@ use tracing::{debug, info, instrument, warn};
 /// (client cannot keep up), the oldest frame is dropped — preventing
 /// backpressure from stalling the session select loop.
 const AUDIO_QUEUE_CAPACITY: usize = 1024;
+/// Control frames are bounded independently from audio.  A session that
+/// cannot drain this many control messages is disconnected so lifecycle
+/// traffic cannot grow memory without bound.
+const CONTROL_QUEUE_CAPACITY: usize = 256;
 
-use sonium_common::config::ServerConfig;
+use sonium_common::{
+    config::{validate_client_id, ProtocolError, ServerConfig},
+    SoniumError,
+};
 use sonium_control::{ws::Event, ServerState};
 use sonium_protocol::{
     header::{validate_payload_size, HEADER_SIZE},
     messages::{
-        jitter_warning_ms, low_buffer_warning_ms, AudioHealthState, HealthReport, Message,
-        ServerSettings, TimeMsg,
+        jitter_warning_ms, low_buffer_warning_ms, AnnouncementControlV1, AudioHealthState,
+        HealthReport, Message, ServerSettings, TimeMsg,
     },
     MessageHeader, MessageType, Timestamp,
 };
@@ -63,10 +71,69 @@ const AUTO_BUFFER_CLEAN_INTERVALS_BEFORE_STEP_DOWN: u32 = 8;
 const AUTO_BUFFER_RTP_BURST_THRESHOLD: u32 = 6;
 const AUTO_BUFFER_STALE_BURST_THRESHOLD: u32 = 4;
 
+/// A global admission slot held for the complete lifetime of one TCP session.
+/// Dropping it releases capacity on every normal, error, or cancellation path.
+pub struct ClientSessionPermit {
+    _permit: OwnedSemaphorePermit,
+}
+
+impl ClientSessionPermit {
+    pub fn try_acquire(capacity: Arc<Semaphore>) -> Result<Self, ProtocolError> {
+        capacity
+            .try_acquire_owned()
+            .map(|permit| Self { _permit: permit })
+            .map_err(|_| SoniumError::Protocol("maximum concurrent client sessions reached".into()))
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ControlQueuePolicy {
+    Critical,
+    Repeatable,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ControlQueueResult {
+    Enqueued,
+    Coalesced,
+}
+
+fn queue_control_frame(
+    ctrl_tx: &mpsc::Sender<Vec<u8>>,
+    frame: Vec<u8>,
+) -> anyhow::Result<ControlQueueResult> {
+    let header = MessageHeader::from_bytes(&frame)?;
+    let expected_len = HEADER_SIZE.saturating_add(header.payload_size as usize);
+    if frame.len() != expected_len {
+        return Err(anyhow::anyhow!(
+            "control frame length mismatch: header declares {}, got {}",
+            header.payload_size,
+            frame.len().saturating_sub(HEADER_SIZE),
+        ));
+    }
+    let policy = match header.msg_type {
+        MessageType::Time | MessageType::GroupSync => ControlQueuePolicy::Repeatable,
+        _ => ControlQueuePolicy::Critical,
+    };
+    match ctrl_tx.try_send(frame) {
+        Ok(()) => Ok(ControlQueueResult::Enqueued),
+        Err(mpsc::error::TrySendError::Full(_)) if policy == ControlQueuePolicy::Repeatable => {
+            Ok(ControlQueueResult::Coalesced)
+        }
+        Err(mpsc::error::TrySendError::Full(_)) => {
+            Err(anyhow::anyhow!("critical control queue saturated"))
+        }
+        Err(mpsc::error::TrySendError::Closed(_)) => {
+            Err(anyhow::anyhow!("control writer channel closed"))
+        }
+    }
+}
+
 /// Dedicated TCP writer task.  Owns the `OwnedWriteHalf` exclusively so the
 /// select loop never blocks on a TCP write.  Audio frames arrive via a bounded
-/// channel (`try_send` — drop oldest on full); control messages use a separate
-/// unbounded channel so they are never lost.
+/// channel (`try_send` — drop on full); control messages use a separate
+/// bounded channel.  Critical-control and announcement saturation is
+/// connection-fatal; repeatable timing updates coalesce explicitly on full.
 ///
 /// Audio is latency-sensitive: the writer always drains the audio queue first
 /// with non-blocking `try_recv` before blocking on either channel.  This
@@ -75,7 +142,7 @@ const AUTO_BUFFER_STALE_BURST_THRESHOLD: u32 = 4;
 async fn tcp_writer_task(
     mut writer: OwnedWriteHalf,
     mut audio_rx: mpsc::Receiver<bytes::Bytes>,
-    mut ctrl_rx: mpsc::UnboundedReceiver<Vec<u8>>,
+    mut ctrl_rx: mpsc::Receiver<Vec<u8>>,
     peer: SocketAddr,
 ) {
     let mut audio_frames_written: u64 = 0;
@@ -255,7 +322,7 @@ impl AutoBufferTuner {
             } else {
                 self.step_up_ms
             };
-            return Some((current_buffer_ms + step).min(self.max_ms));
+            return Some(current_buffer_ms.saturating_add(step).min(self.max_ms));
         }
 
         if self.clean_intervals >= AUTO_BUFFER_CLEAN_INTERVALS_BEFORE_STEP_DOWN
@@ -423,6 +490,7 @@ fn next_id() -> u16 {
 }
 
 #[instrument(skip_all, fields(%peer, client_id = tracing::field::Empty))]
+#[allow(clippy::too_many_arguments)] // Session dependencies are passed independently for testability.
 pub async fn handle(
     mut stream: TcpStream,
     peer: SocketAddr,
@@ -431,6 +499,7 @@ pub async fn handle(
     state: Arc<ServerState>,
     udp_socket: Option<Arc<UdpSocket>>,
     nack_router: crate::nack_router::NackRouter,
+    _permit: ClientSessionPermit,
 ) -> anyhow::Result<()> {
     // ── TCP tuning ────────────────────────────────────────────────────────
     // Ensure TCP_NODELAY is set (main.rs sets it too, but belt-and-braces).
@@ -461,10 +530,9 @@ pub async fn handle(
             ));
         };
 
+    validate_client_id(&client_id)?;
     tracing::Span::current().record("client_id", client_id.as_str());
-    metrics::TOTAL_CONNECTIONS.inc();
-    metrics::CONNECTED_CLIENTS.inc();
-    state.client_connected(
+    let session_generation = state.try_client_connected(
         &client_id,
         &hostname,
         &client_name,
@@ -472,7 +540,10 @@ pub async fn handle(
         &arch,
         peer,
         proto_ver,
-    );
+    )?;
+    metrics::register_client_session(&client_id, session_generation);
+    metrics::TOTAL_CONNECTIONS.inc();
+    metrics::CONNECTED_CLIENTS.inc();
 
     let (reader, writer) = stream.into_split();
     let result = session_loop(
@@ -484,13 +555,14 @@ pub async fn handle(
             cfg,
             state: state.clone(),
             client_id: client_id.clone(),
+            session_generation,
             udp_socket,
             hello_udp_port,
             nack_router,
         },
     )
     .await;
-    state.client_disconnected(&client_id);
+    state.client_disconnected_generation(&client_id, session_generation);
     metrics::CONNECTED_CLIENTS.dec();
     result
 }
@@ -500,6 +572,7 @@ struct SessionLoopContext {
     cfg: ServerConfig,
     state: Arc<ServerState>,
     client_id: String,
+    session_generation: u64,
     udp_socket: Option<Arc<UdpSocket>>,
     hello_udp_port: u16,
     nack_router: crate::nack_router::NackRouter,
@@ -516,6 +589,7 @@ async fn session_loop(
         cfg,
         state,
         client_id,
+        session_generation,
         udp_socket,
         hello_udp_port,
         nack_router,
@@ -537,7 +611,7 @@ async fn session_loop(
     // All TCP writes go through dedicated channels so the select loop
     // never blocks on write backpressure.
     let (audio_tx, audio_write_rx) = mpsc::channel::<bytes::Bytes>(AUDIO_QUEUE_CAPACITY);
-    let (ctrl_tx, ctrl_rx) = mpsc::unbounded_channel::<Vec<u8>>();
+    let (ctrl_tx, ctrl_rx) = mpsc::channel::<Vec<u8>>(CONTROL_QUEUE_CAPACITY);
 
     // Send CodecHeader if stream is already active (via writer task).
     // We must send these before spawning the writer so they arrive
@@ -545,7 +619,7 @@ async fn session_loop(
     // yet, so we queue them.
     if let Some(b) = &bc {
         if let Some(hdr) = b.codec_header() {
-            let _ = ctrl_tx.send(hdr.to_vec());
+            queue_control_frame(&ctrl_tx, hdr.to_vec())?;
         }
     }
 
@@ -618,8 +692,6 @@ async fn session_loop(
                         peer.hash(&mut h);
                         h.finish() as u32
                     };
-                    // Register with the NACK router to receive client NACKs.
-                    nack_rx = Some(nack_router.register(ssrc, client_udp_addr).await);
                     arq_ssrc = Some(ssrc);
                     udp_media = Some(UdpMedia::Arq(ArqSender::new(
                         sock.clone(),
@@ -658,7 +730,10 @@ async fn session_loop(
         };
         let mut hdr = MessageHeader::new(MessageType::ServerSettings, 0);
         hdr.id = next_id();
-        let _ = ctrl_tx.send(Message::ServerSettings(settings).encode_with_header(hdr));
+        queue_control_frame(
+            &ctrl_tx,
+            Message::ServerSettings(settings).encode_with_header(hdr),
+        )?;
         info!(%peer, buffer_ms = current_buffer_ms, "ServerSettings sent to client");
     }
 
@@ -667,6 +742,20 @@ async fn session_loop(
 
     let mut audio_rx: Option<broadcast::Receiver<AudioFrame>> = bc.as_ref().map(|b| b.subscribe());
     let mut events_rx = state.events().subscribe();
+    let mut announcement_rx = state.subscribe_announcement_controls();
+    let mut announcement_queue = AnnouncementControlQueue::new(ctrl_tx.clone());
+    if let Some(control) = state.pending_announcement_control(&group_id) {
+        announcement_queue
+            .queue(&group_id, &control)
+            .map_err(|_| anyhow::anyhow!("announcement control queue saturated"))?;
+    }
+
+    // Register with the NACK router only after all fallible session setup is
+    // complete, so setup errors cannot leave a stale route behind.
+    if let Some(ssrc) = arq_ssrc {
+        let client_udp_addr = SocketAddr::new(peer.ip(), hello_udp_port);
+        nack_rx = Some(nack_router.register(ssrc, client_udp_addr).await);
+    }
 
     let (incoming_tx, mut incoming_rx) = mpsc::unbounded_channel();
     let read_task = tokio::spawn(socket_reader(reader, incoming_tx));
@@ -700,11 +789,11 @@ async fn session_loop(
                 // Keep the dummy sender alive inside the task so tcp_writer_task
                 // sees Empty (not Disconnected) and only exits when ctrl_rx closes.
                 let (dummy_tx, dummy_rx) = mpsc::channel::<bytes::Bytes>(1);
-                let _tcp_ctrl_task = tokio::spawn(async move {
+                let tcp_ctrl_task = tokio::spawn(async move {
                     let _keep = dummy_tx;
                     tcp_writer_task(writer, dummy_rx, ctrl_rx, peer).await;
                 });
-                udp_task
+                (udp_task, Some(tcp_ctrl_task))
             }
             UdpMedia::Arq(mut arq) => {
                 // ARQ: audio send loop + NACK handling from the NackRouter.
@@ -744,17 +833,21 @@ async fn session_loop(
                 // Same fix: keep dummy sender alive so the TCP control task only
                 // exits when ctrl_rx closes (session end), not on Disconnected.
                 let (dummy_tx, dummy_rx) = mpsc::channel::<bytes::Bytes>(1);
-                let _tcp_ctrl_task = tokio::spawn(async move {
+                let tcp_ctrl_task = tokio::spawn(async move {
                     let _keep = dummy_tx;
                     tcp_writer_task(writer, dummy_rx, ctrl_rx, peer).await;
                 });
-                udp_task
+                (udp_task, Some(tcp_ctrl_task))
             }
         }
     } else {
         // For TCP: both audio AND control go through the unified writer task.
-        tokio::spawn(tcp_writer_task(writer, audio_write_rx, ctrl_rx, peer))
+        (
+            tokio::spawn(tcp_writer_task(writer, audio_write_rx, ctrl_rx, peer)),
+            None,
+        )
     };
+    let (audio_write_task, control_write_task) = audio_write_task;
 
     let result = loop {
         tokio::select! {
@@ -784,11 +877,12 @@ async fn session_loop(
                 };
                 match incoming {
                     IncomingClientFrame::Message(hdr, payload) => {
-                        handle_client_msg(
+                        if let Err(error) = handle_client_msg(
                             ClientMsgContext {
                                 ctrl_tx: &ctrl_tx,
                                 state: &state,
                                 client_id,
+                                session_generation,
                                 current_buffer_ms: &mut current_buffer_ms,
                                 auto_buffer_tuner: &mut auto_buffer_tuner,
                                 health_tracker: &mut health_tracker,
@@ -798,12 +892,32 @@ async fn session_loop(
                             },
                             hdr,
                             &payload,
-                        ).await?;
+                        ).await {
+                            break Err(error);
+                        }
                     }
                     IncomingClientFrame::Closed(reason) => {
                         info!(%peer, %reason, "Client reader closed");
                         break Ok(());
                     }
+                }
+            }
+
+            // ── Timestamped announcement controls for this group ──────────
+            control = announcement_rx.recv() => {
+                match control {
+                    Ok(control) => {
+                        if announcement_queue.queue(&group_id, &control).is_err() {
+                            warn!(%peer, "Announcement control queue saturated; disconnecting slow client");
+                            break Err(anyhow::anyhow!("announcement control queue saturated"));
+                        }
+                    }
+                    Err(broadcast::error::RecvError::Lagged(dropped)) => {
+                        // The scheduler's ACK timeout recovers dropped control
+                        // messages without blocking or replaying audio here.
+                        warn!(%peer, dropped, "Announcement control receiver lagged");
+                    }
+                    Err(broadcast::error::RecvError::Closed) => break Ok(()),
                 }
             }
 
@@ -813,16 +927,31 @@ async fn session_loop(
                     Ok(Event::ClientGroupChanged { client_id: cid, group_id: new_gid })
                         if cid == client_id =>
                     {
+                        let old_group_id = group_id.clone();
+                        let pending = state.pending_announcement_control(&new_gid);
+                        if announcement_queue
+                            .reconcile_group_change(
+                                &old_group_id,
+                                &new_gid,
+                                pending.as_ref(),
+                            )
+                            .is_err()
+                        {
+                            warn!(%peer, "Announcement control queue saturated during group change; disconnecting slow client");
+                            break Err(anyhow::anyhow!("announcement control queue saturated"));
+                        }
                         group_id = new_gid.clone();
                         // Look up the stream assigned to the new group.
                         if let Some(new_sid) = state.get_group(&new_gid)
                             .map(|g| g.stream_id.clone())
                         {
-                            switch_stream(
+                            if let Err(error) = switch_stream(
                                 &ctrl_tx, &registry,
                                 &mut audio_rx, &mut stream_id, &mut bc,
                                 &new_sid,
-                            )?;
+                            ) {
+                                break Err(error);
+                            }
                             current_buffer_ms =
                                 bc.as_ref().map(|x| x.buffer_ms).unwrap_or(cfg.server.audio.buffer_ms);
                         }
@@ -831,11 +960,13 @@ async fn session_loop(
                     Ok(Event::GroupStreamChanged { group_id: gid, stream_id: new_sid })
                         if gid == group_id =>
                     {
-                        switch_stream(
+                        if let Err(error) = switch_stream(
                             &ctrl_tx, &registry,
                             &mut audio_rx, &mut stream_id, &mut bc,
                             &new_sid,
-                        )?;
+                        ) {
+                            break Err(error);
+                        }
                         current_buffer_ms =
                             bc.as_ref().map(|x| x.buffer_ms).unwrap_or(cfg.server.audio.buffer_ms);
                     }
@@ -848,11 +979,13 @@ async fn session_loop(
                         // clearing our current stream_id.
                         let current_sid = stream_id.clone();
                         stream_id.clear();
-                        switch_stream(
+                        if let Err(error) = switch_stream(
                             &ctrl_tx, &registry,
                             &mut audio_rx, &mut stream_id, &mut bc,
                             &current_sid,
-                        )?;
+                        ) {
+                            break Err(error);
+                        }
                         current_buffer_ms =
                             bc.as_ref().map(|x| x.buffer_ms).unwrap_or(cfg.server.audio.buffer_ms);
                     }
@@ -873,7 +1006,9 @@ async fn session_loop(
                         let lat = c.as_ref().map(|c| c.latency_ms).unwrap_or(0);
                         let obs = c.as_ref().map(|c| c.observability_enabled).unwrap_or(false);
                         let (eq, en) = state.get_stream_eq(&stream_id).unwrap_or_default();
-                        send_server_settings_via_channel(&ctrl_tx, current_buffer_ms, volume, muted, lat, eq, en, obs, effective_mode.to_string(), server_udp_port, cfg.server.audio.output_prefill_ms);
+                        if let Err(error) = send_server_settings_via_channel(&ctrl_tx, current_buffer_ms, volume, muted, lat, eq, en, obs, effective_mode.to_string(), server_udp_port, cfg.server.audio.output_prefill_ms) {
+                            break Err(error);
+                        }
                         debug!(%peer, volume, muted, "Volume settings pushed to client");
                     }
 
@@ -883,7 +1018,9 @@ async fn session_loop(
                         let (vol, muted) = state.get_volume(client_id).unwrap_or((100, false));
                         let obs = state.get_client(client_id).map(|c| c.observability_enabled).unwrap_or(false);
                         let (eq, en) = state.get_stream_eq(&stream_id).unwrap_or_default();
-                        send_server_settings_via_channel(&ctrl_tx, current_buffer_ms, vol, muted, latency_ms, eq, en, obs, effective_mode.to_string(), server_udp_port, cfg.server.audio.output_prefill_ms);
+                        if let Err(error) = send_server_settings_via_channel(&ctrl_tx, current_buffer_ms, vol, muted, latency_ms, eq, en, obs, effective_mode.to_string(), server_udp_port, cfg.server.audio.output_prefill_ms) {
+                            break Err(error);
+                        }
                         debug!(%peer, latency_ms, "Latency settings pushed to client");
                     }
 
@@ -900,7 +1037,9 @@ async fn session_loop(
                         let c = state.get_client(client_id);
                         let lat = c.as_ref().map(|c| c.latency_ms).unwrap_or(0);
                         let obs = c.as_ref().map(|c| c.observability_enabled).unwrap_or(false);
-                        send_server_settings_via_channel(&ctrl_tx, current_buffer_ms, vol, muted, lat, eq_bands, enabled, obs, effective_mode.to_string(), server_udp_port, cfg.server.audio.output_prefill_ms);
+                        if let Err(error) = send_server_settings_via_channel(&ctrl_tx, current_buffer_ms, vol, muted, lat, eq_bands, enabled, obs, effective_mode.to_string(), server_udp_port, cfg.server.audio.output_prefill_ms) {
+                            break Err(error);
+                        }
                         debug!(%peer, stream_id, "Stream EQ settings pushed to client");
                     }
 
@@ -928,14 +1067,27 @@ async fn session_loop(
                 );
                 let mut hdr = MessageHeader::new(MessageType::GroupSync, 24);
                 hdr.id = next_id();
-                let _ = ctrl_tx.send(Message::GroupSync(gs).encode_with_header(hdr));
-                tracing::trace!(%peer, server_now_us, group_offset_us, "GroupSync broadcast");
+                match queue_control_frame(
+                    &ctrl_tx,
+                    Message::GroupSync(gs).encode_with_header(hdr),
+                ) {
+                    Ok(ControlQueueResult::Enqueued) => {
+                        tracing::trace!(%peer, server_now_us, group_offset_us, "GroupSync broadcast");
+                    }
+                    Ok(ControlQueueResult::Coalesced) => {
+                        tracing::trace!(%peer, "GroupSync coalesced while control queue is full");
+                    }
+                    Err(error) => break Err(error),
+                }
             }
         }
     };
 
     read_task.abort();
     audio_write_task.abort();
+    if let Some(control_write_task) = control_write_task {
+        control_write_task.abort();
+    }
     // Unregister from the NACK router if we were in ARQ mode.
     if let Some(ssrc) = arq_ssrc {
         nack_router.unregister(ssrc).await;
@@ -945,7 +1097,7 @@ async fn session_loop(
 
 /// Re-subscribe to a different stream broadcaster and notify the client.
 fn switch_stream(
-    ctrl_tx: &mpsc::UnboundedSender<Vec<u8>>,
+    ctrl_tx: &mpsc::Sender<Vec<u8>>,
     registry: &Arc<BroadcasterRegistry>,
     audio_rx: &mut Option<broadcast::Receiver<AudioFrame>>,
     stream_id: &mut String,
@@ -963,7 +1115,7 @@ fn switch_stream(
     if let Some(bc) = &new_bc {
         // Send the new stream's CodecHeader so the client re-initialises its decoder.
         if let Some(hdr) = bc.codec_header() {
-            let _ = ctrl_tx.send(hdr.to_vec());
+            queue_control_frame(ctrl_tx, hdr.to_vec())?;
         }
         *audio_rx = Some(bc.subscribe());
     } else {
@@ -986,7 +1138,7 @@ async fn recv_audio(
 
 #[allow(clippy::too_many_arguments)]
 fn send_server_settings_via_channel(
-    ctrl_tx: &mpsc::UnboundedSender<Vec<u8>>,
+    ctrl_tx: &mpsc::Sender<Vec<u8>>,
     buffer_ms: u32,
     volume: u8,
     muted: bool,
@@ -997,7 +1149,7 @@ fn send_server_settings_via_channel(
     transport_mode: String,
     server_udp_port: u16,
     output_prefill_ms: u32,
-) {
+) -> anyhow::Result<()> {
     let settings = ServerSettings {
         buffer_ms: buffer_ms as i32,
         output_prefill_ms,
@@ -1012,13 +1164,18 @@ fn send_server_settings_via_channel(
     };
     let mut hdr = MessageHeader::new(MessageType::ServerSettings, 0);
     hdr.id = next_id();
-    let _ = ctrl_tx.send(Message::ServerSettings(settings).encode_with_header(hdr));
+    queue_control_frame(
+        ctrl_tx,
+        Message::ServerSettings(settings).encode_with_header(hdr),
+    )?;
+    Ok(())
 }
 
 struct ClientMsgContext<'a> {
-    ctrl_tx: &'a mpsc::UnboundedSender<Vec<u8>>,
+    ctrl_tx: &'a mpsc::Sender<Vec<u8>>,
     state: &'a ServerState,
     client_id: &'a str,
+    session_generation: u64,
     current_buffer_ms: &'a mut u32,
     auto_buffer_tuner: &'a mut AutoBufferTuner,
     health_tracker: &'a mut HealthTransitionTracker,
@@ -1053,9 +1210,13 @@ async fn handle_client_msg(
             reply.id = next_id();
             reply.refers_to = hdr.id;
             reply.received = now;
-            let _ = ctx
-                .ctrl_tx
-                .send(Message::Time(TimeMsg { latency: diff }).encode_with_header(reply));
+            if queue_control_frame(
+                ctx.ctrl_tx,
+                Message::Time(TimeMsg { latency: diff }).encode_with_header(reply),
+            )? == ControlQueueResult::Coalesced
+            {
+                tracing::trace!(client_id = %ctx.client_id, "Time reply coalesced while control queue is full");
+            }
         }
         MessageType::ClientInfo => {
             if let Ok(Message::ClientInfo(ci)) = Message::from_payload(&hdr, payload) {
@@ -1109,7 +1270,7 @@ async fn handle_client_msg(
                         ctx.transport_mode.clone(),
                         ctx.server_udp_port,
                         ctx.output_prefill_ms,
-                    );
+                    )?;
                     *ctx.current_buffer_ms = next_buffer_ms;
                     debug!(client_id = %ctx.client_id, buffer_ms = next_buffer_ms, "Auto buffer adjusted");
                 }
@@ -1118,7 +1279,162 @@ async fn handle_client_msg(
                 ctx.state.set_client_health(ctx.client_id, health);
             }
         }
+        MessageType::AnnouncementControl => {
+            let control = AnnouncementControlV1::decode(payload)?;
+            handle_announcement_ack(
+                ctx.state,
+                ctx.client_id,
+                ctx.session_generation,
+                &control,
+                sonium_sync::time_provider::now_us() / 1_000,
+            )?;
+        }
         other => debug!("Ignoring message: {other:?}"),
+    }
+    Ok(())
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum AnnouncementQueueResult {
+    Ignored,
+    Enqueued,
+    Coalesced,
+}
+
+struct AnnouncementControlQueue {
+    ctrl_tx: mpsc::Sender<Vec<u8>>,
+    last_enqueued: Option<(String, String, u8, i64)>,
+    active_by_group: HashMap<String, AnnouncementControlV1>,
+}
+
+impl AnnouncementControlQueue {
+    fn new(ctrl_tx: mpsc::Sender<Vec<u8>>) -> Self {
+        Self {
+            ctrl_tx,
+            last_enqueued: None,
+            active_by_group: HashMap::new(),
+        }
+    }
+
+    fn queue(
+        &mut self,
+        session_group_id: &str,
+        control: &AnnouncementControlV1,
+    ) -> Result<AnnouncementQueueResult, mpsc::error::TrySendError<Vec<u8>>> {
+        if control.group_id != session_group_id {
+            return Ok(AnnouncementQueueResult::Ignored);
+        }
+        self.enqueue(control)
+    }
+
+    fn reconcile_group_change(
+        &mut self,
+        old_group_id: &str,
+        new_group_id: &str,
+        pending_new_group: Option<&AnnouncementControlV1>,
+    ) -> Result<(), mpsc::error::TrySendError<Vec<u8>>> {
+        if old_group_id == new_group_id {
+            return Ok(());
+        }
+        if let Some(mut old) = self.active_by_group.get(old_group_id).cloned() {
+            old.lifecycle = sonium_protocol::messages::AnnouncementLifecycle::Cancelled;
+            old.intent = None;
+            self.enqueue(&old)?;
+        }
+        if let Some(control) = pending_new_group {
+            self.queue(new_group_id, control)?;
+        }
+        Ok(())
+    }
+
+    fn enqueue(
+        &mut self,
+        control: &AnnouncementControlV1,
+    ) -> Result<AnnouncementQueueResult, mpsc::error::TrySendError<Vec<u8>>> {
+        let fingerprint = (
+            control.announcement_id.clone(),
+            control.group_id.clone(),
+            lifecycle_rank(control.lifecycle),
+            control.scheduled_at_ms,
+        );
+        if self.last_enqueued.as_ref() == Some(&fingerprint) {
+            return Ok(AnnouncementQueueResult::Coalesced);
+        }
+        let mut header = MessageHeader::new(MessageType::AnnouncementControl, 0);
+        header.id = next_id();
+        self.ctrl_tx
+            .try_send(Message::AnnouncementControl(control.clone()).encode_with_header(header))?;
+        self.last_enqueued = Some(fingerprint);
+        match control.lifecycle {
+            sonium_protocol::messages::AnnouncementLifecycle::Scheduled => {
+                self.active_by_group
+                    .insert(control.group_id.clone(), control.clone());
+            }
+            sonium_protocol::messages::AnnouncementLifecycle::Completed
+            | sonium_protocol::messages::AnnouncementLifecycle::Cancelled
+            | sonium_protocol::messages::AnnouncementLifecycle::Failed => {
+                if self
+                    .active_by_group
+                    .get(&control.group_id)
+                    .is_some_and(|active| active.announcement_id == control.announcement_id)
+                {
+                    self.active_by_group.remove(&control.group_id);
+                }
+            }
+            sonium_protocol::messages::AnnouncementLifecycle::Started => {}
+        }
+        Ok(AnnouncementQueueResult::Enqueued)
+    }
+}
+
+fn lifecycle_rank(lifecycle: sonium_protocol::messages::AnnouncementLifecycle) -> u8 {
+    match lifecycle {
+        sonium_protocol::messages::AnnouncementLifecycle::Scheduled => 0,
+        sonium_protocol::messages::AnnouncementLifecycle::Started => 1,
+        sonium_protocol::messages::AnnouncementLifecycle::Completed => 2,
+        sonium_protocol::messages::AnnouncementLifecycle::Cancelled => 3,
+        sonium_protocol::messages::AnnouncementLifecycle::Failed => 4,
+    }
+}
+
+fn handle_announcement_ack(
+    state: &ServerState,
+    client_id: &str,
+    session_generation: u64,
+    control: &AnnouncementControlV1,
+    now_ms: i64,
+) -> anyhow::Result<()> {
+    if control.intent.is_some() {
+        return Err(anyhow::anyhow!(
+            "announcement acknowledgement does not belong to the client session"
+        ));
+    }
+    let lifecycle = match control.lifecycle {
+        sonium_protocol::messages::AnnouncementLifecycle::Scheduled => {
+            sonium_control::announcements::AnnouncementLifecycle::Scheduled
+        }
+        sonium_protocol::messages::AnnouncementLifecycle::Started => {
+            sonium_control::announcements::AnnouncementLifecycle::Started
+        }
+        sonium_protocol::messages::AnnouncementLifecycle::Completed => {
+            sonium_control::announcements::AnnouncementLifecycle::Completed
+        }
+        sonium_protocol::messages::AnnouncementLifecycle::Cancelled => {
+            sonium_control::announcements::AnnouncementLifecycle::Cancelled
+        }
+        sonium_protocol::messages::AnnouncementLifecycle::Failed => {
+            sonium_control::announcements::AnnouncementLifecycle::Failed
+        }
+    };
+    if let Err(error) = state.acknowledge_announcement_client_at(
+        &control.announcement_id,
+        &control.group_id,
+        client_id,
+        session_generation,
+        lifecycle,
+        now_ms,
+    ) {
+        debug!(%client_id, error = %error, "Ignoring stale or invalid announcement acknowledgement");
     }
     Ok(())
 }
@@ -1196,9 +1512,317 @@ where
 #[cfg(test)]
 mod tests {
     use super::*;
+    use sonium_control::announcements::{
+        AnnouncementIntent, AnnouncementLifecycle as ControlLifecycle, AnnouncementPriority,
+        AnnouncementSource, Ducking, ResumePolicy, ANNOUNCEMENT_INTENT_VERSION,
+    };
     use sonium_protocol::messages::HealthReport;
+    use sonium_protocol::messages::{AnnouncementControlV1, AnnouncementLifecycle};
+    use std::sync::Barrier;
+    use std::thread;
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    use tokio::net::TcpListener;
+    use tokio::sync::Semaphore;
+    use tokio::time::timeout;
 
     const BUF_MS: u32 = 1200;
+
+    fn announcement_intent() -> AnnouncementIntent {
+        AnnouncementIntent {
+            version: ANNOUNCEMENT_INTENT_VERSION,
+            idempotency_key: "session-route".into(),
+            target_groups: vec!["default".into()],
+            priority: AnnouncementPriority::Announcement,
+            source: AnnouncementSource::Uri("https://media.example.test/a.ogg".into()),
+            duck: Ducking {
+                attenuation_db: -18.0,
+                attack_ms: 25,
+                release_ms: 100,
+            },
+            max_duration_ms: 1_000,
+            expires_at_ms: 20_000,
+            resume: ResumePolicy::ResumePrevious,
+        }
+    }
+
+    #[test]
+    fn announcement_controls_are_routed_only_to_the_target_group() {
+        let (tx, mut rx) = mpsc::channel(1);
+        let mut announcements = AnnouncementControlQueue::new(tx);
+        let control = AnnouncementControlV1 {
+            version: 1,
+            announcement_id: "doorbell".into(),
+            group_id: "default".into(),
+            lifecycle: AnnouncementLifecycle::Cancelled,
+            scheduled_at_ms: 10_250,
+            max_duration_ms: 1_000,
+            intent: None,
+        };
+
+        assert_eq!(
+            announcements.queue("bedroom", &control).unwrap(),
+            AnnouncementQueueResult::Ignored
+        );
+        assert!(rx.try_recv().is_err());
+        assert_eq!(
+            announcements.queue("default", &control).unwrap(),
+            AnnouncementQueueResult::Enqueued
+        );
+
+        let bytes = rx.try_recv().unwrap();
+        let header = MessageHeader::from_bytes(&bytes[..HEADER_SIZE]).unwrap();
+        let decoded = Message::from_payload(&header, &bytes[HEADER_SIZE..]).unwrap();
+        assert!(matches!(
+            decoded,
+            Message::AnnouncementControl(message) if message == control
+        ));
+    }
+
+    #[test]
+    fn announcement_control_queue_is_bounded_and_coalesces_exact_replays() {
+        let (tx, mut rx) = mpsc::channel(1);
+        let mut announcements = AnnouncementControlQueue::new(tx);
+        let scheduled = AnnouncementControlV1 {
+            version: 1,
+            announcement_id: "doorbell".into(),
+            group_id: "default".into(),
+            lifecycle: AnnouncementLifecycle::Scheduled,
+            scheduled_at_ms: 10_250,
+            max_duration_ms: 1_000,
+            intent: None,
+        };
+
+        assert_eq!(
+            announcements.queue("default", &scheduled).unwrap(),
+            AnnouncementQueueResult::Enqueued
+        );
+        assert_eq!(
+            announcements.queue("default", &scheduled).unwrap(),
+            AnnouncementQueueResult::Coalesced
+        );
+
+        let mut terminal = scheduled.clone();
+        terminal.lifecycle = AnnouncementLifecycle::Cancelled;
+        assert!(matches!(
+            announcements.queue("default", &terminal),
+            Err(mpsc::error::TrySendError::Full(_))
+        ));
+        assert!(rx.try_recv().is_ok());
+    }
+
+    #[test]
+    fn bounded_control_critical_frames_fail_when_queue_is_full_or_closed() {
+        let critical_frames = [
+            Message::CodecHeader(sonium_protocol::messages::CodecHeader::new(
+                "opus",
+                vec![1, 2, 3],
+            ))
+            .encode(),
+            Message::ServerSettings(ServerSettings::default()).encode(),
+        ];
+
+        for frame in critical_frames {
+            let (full_tx, _full_rx) = mpsc::channel(1);
+            full_tx.try_send(vec![0]).unwrap();
+            assert!(queue_control_frame(&full_tx, frame.clone()).is_err());
+
+            let (closed_tx, closed_rx) = mpsc::channel(1);
+            drop(closed_rx);
+            assert!(queue_control_frame(&closed_tx, frame).is_err());
+        }
+    }
+
+    #[test]
+    fn bounded_control_repeatable_frames_coalesce_only_when_queue_is_full() {
+        let repeatable_frames = [
+            Message::Time(TimeMsg::zero()).encode(),
+            Message::GroupSync(sonium_protocol::messages::GroupSync::new(10, -2, 0, 0.5)).encode(),
+        ];
+
+        for frame in repeatable_frames {
+            let (full_tx, _full_rx) = mpsc::channel(1);
+            full_tx.try_send(vec![0]).unwrap();
+            assert_eq!(
+                queue_control_frame(&full_tx, frame.clone()).unwrap(),
+                ControlQueueResult::Coalesced,
+            );
+
+            let (closed_tx, closed_rx) = mpsc::channel(1);
+            drop(closed_rx);
+            assert!(queue_control_frame(&closed_tx, frame).is_err());
+        }
+    }
+
+    #[test]
+    fn bounded_control_enqueued_frames_preserve_protocol_format() {
+        let messages = [
+            Message::CodecHeader(sonium_protocol::messages::CodecHeader::new(
+                "opus",
+                vec![1, 2, 3],
+            )),
+            Message::ServerSettings(ServerSettings::default()),
+            Message::Time(TimeMsg::zero()),
+            Message::GroupSync(sonium_protocol::messages::GroupSync::new(10, -2, 0, 0.5)),
+        ];
+
+        for message in messages {
+            let expected_type = message.message_type();
+            let (tx, mut rx) = mpsc::channel(1);
+            let result = queue_control_frame(&tx, message.encode()).unwrap();
+
+            assert_eq!(result, ControlQueueResult::Enqueued);
+            let bytes = rx.try_recv().unwrap();
+            let header = MessageHeader::from_bytes(&bytes[..HEADER_SIZE]).unwrap();
+            assert_eq!(header.msg_type, expected_type);
+            assert_eq!(header.payload_size as usize, bytes.len() - HEADER_SIZE);
+            assert_eq!(
+                Message::from_payload(&header, &bytes[HEADER_SIZE..])
+                    .unwrap()
+                    .message_type(),
+                expected_type,
+            );
+        }
+    }
+
+    #[test]
+    fn group_change_releases_old_envelope_then_replays_new_group_control_idempotently() {
+        let (tx, mut rx) = mpsc::channel(3);
+        let mut announcements = AnnouncementControlQueue::new(tx);
+        let old = AnnouncementControlV1 {
+            version: 1,
+            announcement_id: "old-group".into(),
+            group_id: "default".into(),
+            lifecycle: AnnouncementLifecycle::Scheduled,
+            scheduled_at_ms: 10_250,
+            max_duration_ms: 1_000,
+            intent: None,
+        };
+        let mut new = old.clone();
+        new.announcement_id = "new-group".into();
+        new.group_id = "bedroom".into();
+
+        announcements.queue("default", &old).unwrap();
+        assert!(rx.try_recv().is_ok());
+        announcements
+            .reconcile_group_change("default", "bedroom", Some(&new))
+            .unwrap();
+
+        let first = rx.try_recv().unwrap();
+        let first_header = MessageHeader::from_bytes(&first[..HEADER_SIZE]).unwrap();
+        let first = Message::from_payload(&first_header, &first[HEADER_SIZE..]).unwrap();
+        assert!(matches!(
+            first,
+            Message::AnnouncementControl(control)
+                if control.announcement_id == "old-group"
+                    && control.lifecycle == AnnouncementLifecycle::Cancelled
+        ));
+        let second = rx.try_recv().unwrap();
+        let second_header = MessageHeader::from_bytes(&second[..HEADER_SIZE]).unwrap();
+        let second = Message::from_payload(&second_header, &second[HEADER_SIZE..]).unwrap();
+        assert!(matches!(
+            second,
+            Message::AnnouncementControl(control)
+                if control.announcement_id == "new-group"
+                    && control.lifecycle == AnnouncementLifecycle::Scheduled
+        ));
+
+        announcements
+            .reconcile_group_change("default", "bedroom", Some(&new))
+            .unwrap();
+        assert!(rx.try_recv().is_err());
+    }
+
+    #[test]
+    fn stale_or_foreign_announcement_ack_cannot_mutate_or_disconnect_the_session() {
+        let state = ServerState::new(
+            Arc::new(sonium_control::EventBus::new()),
+            None,
+            vec![],
+            vec![],
+        );
+        let generation = state
+            .try_client_connected(
+                "speaker",
+                "speaker",
+                "Sonium",
+                "linux",
+                "x86_64",
+                "127.0.0.1:5000".parse().unwrap(),
+                1,
+            )
+            .unwrap();
+        let admitted = state
+            .admit_announcement(announcement_intent(), 10_000)
+            .unwrap();
+        let mut controls = state.subscribe_announcement_controls();
+        // The receiver subscribed after admission in this unit fixture; use the
+        // timestamp assigned by the deterministic default scheduler.
+        let mut ack = AnnouncementControlV1 {
+            version: 1,
+            announcement_id: admitted.id.clone(),
+            group_id: "default".into(),
+            lifecycle: AnnouncementLifecycle::Scheduled,
+            scheduled_at_ms: 10_250,
+            max_duration_ms: 1_000,
+            intent: None,
+        };
+        let mut foreign = ack.clone();
+        foreign.group_id = "bedroom".into();
+        assert!(handle_announcement_ack(&state, "speaker", generation, &foreign, 10_010).is_ok());
+        assert_eq!(
+            state.all_announcements()[0].lifecycle,
+            ControlLifecycle::Scheduled
+        );
+
+        handle_announcement_ack(&state, "speaker", generation, &ack, 10_010).unwrap();
+        ack.lifecycle = AnnouncementLifecycle::Started;
+        handle_announcement_ack(&state, "speaker", generation, &ack, 10_250).unwrap();
+        assert_eq!(
+            state.all_announcements()[0].lifecycle,
+            ControlLifecycle::Started
+        );
+        assert!(controls.try_recv().is_err());
+    }
+
+    #[test]
+    fn delayed_old_group_ack_after_membership_change_is_idempotent() {
+        let state = ServerState::new(
+            Arc::new(sonium_control::EventBus::new()),
+            None,
+            vec![],
+            vec![],
+        );
+        let generation = state
+            .try_client_connected(
+                "moving-speaker",
+                "moving-speaker",
+                "Sonium",
+                "linux",
+                "x86_64",
+                "127.0.0.1:5001".parse().unwrap(),
+                1,
+            )
+            .unwrap();
+        let bedroom = state.create_group("Bedroom", "default");
+        let admitted = state
+            .admit_announcement(announcement_intent(), 10_000)
+            .unwrap();
+        let old_ack = AnnouncementControlV1 {
+            version: 1,
+            announcement_id: admitted.id,
+            group_id: "default".into(),
+            lifecycle: AnnouncementLifecycle::Scheduled,
+            scheduled_at_ms: 10_250,
+            max_duration_ms: 1_000,
+            intent: None,
+        };
+
+        assert!(state.set_client_group("moving-speaker", &bedroom));
+        assert!(
+            handle_announcement_ack(&state, "moving-speaker", generation, &old_ack, 10_020,)
+                .is_ok()
+        );
+    }
 
     fn stable_report() -> HealthReport {
         HealthReport::new(0, 0, 0, 800, 0, 0)
@@ -1214,6 +1838,142 @@ mod tests {
 
     fn feed(tracker: &mut HealthTransitionTracker, report: &HealthReport) -> AudioHealthState {
         tracker.observe("test-client", "tcp", report, BUF_MS)
+    }
+
+    #[test]
+    fn client_id_validation_rejects_unsafe_or_oversized_ids() {
+        assert!(validate_client_id("bedroom-pi-1").is_ok());
+
+        for invalid in [
+            "",
+            "living room",
+            "living/room",
+            "living.room",
+            &"a".repeat(97),
+        ] {
+            assert!(
+                validate_client_id(invalid).is_err(),
+                "{invalid:?} must not become a state or metric label"
+            );
+        }
+    }
+
+    #[test]
+    fn global_session_capacity_releases_after_disconnect_or_error() {
+        let capacity = Arc::new(Semaphore::new(1));
+        let first =
+            ClientSessionPermit::try_acquire(capacity.clone()).expect("first session admitted");
+
+        assert!(
+            ClientSessionPermit::try_acquire(capacity.clone()).is_err(),
+            "a session over the configured global cap must be rejected"
+        );
+
+        drop(first);
+        assert!(
+            ClientSessionPermit::try_acquire(capacity).is_ok(),
+            "dropping a session permit must release capacity for the next client"
+        );
+    }
+
+    #[tokio::test]
+    async fn fatal_client_message_aborts_arq_reader_and_writers() {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let listener_addr = listener.local_addr().unwrap();
+        let client = tokio::spawn(async move { TcpStream::connect(listener_addr).await.unwrap() });
+        let (server_stream, peer) = listener.accept().await.unwrap();
+        let mut client = client.await.unwrap();
+
+        let state = Arc::new(ServerState::new(
+            Arc::new(sonium_control::EventBus::new()),
+            None,
+            vec![],
+            vec![],
+        ));
+        let udp_socket = Arc::new(UdpSocket::bind("127.0.0.1:0").await.unwrap());
+        state.set_transport_config(TransportMode::Rist, udp_socket.local_addr().unwrap().port());
+        let nack_router = crate::nack_router::NackRouter::new();
+        let cfg = ServerConfig::default();
+        let registry = crate::broadcaster::new_registry();
+        let (reader, writer) = server_stream.into_split();
+
+        let session = tokio::spawn(session_loop(
+            reader,
+            writer,
+            peer,
+            SessionLoopContext {
+                registry,
+                cfg,
+                state,
+                client_id: "fatal-client".into(),
+                session_generation: 1,
+                udp_socket: Some(udp_socket),
+                hello_udp_port: 45_678,
+                nack_router,
+            },
+        ));
+
+        let header = MessageHeader::new(MessageType::AnnouncementControl, 1);
+        client.write_all(&header.to_bytes()).await.unwrap();
+        client.write_all(&[0]).await.unwrap();
+
+        assert!(session.await.unwrap().is_err());
+        let mut bytes = [0u8; 4096];
+        loop {
+            let read = timeout(Duration::from_secs(1), client.read(&mut bytes))
+                .await
+                .unwrap()
+                .unwrap();
+            if read == 0 {
+                break;
+            }
+        }
+    }
+
+    #[test]
+    fn stale_disconnect_cleanup_after_reconnect_preserves_new_metric_labels() {
+        const ID: &str = "session-generation-race";
+        let state = Arc::new(ServerState::new(
+            Arc::new(sonium_control::EventBus::new()),
+            None,
+            vec![],
+            vec![],
+        ));
+        let addr = "127.0.0.1:50000".parse().unwrap();
+        let old_generation = state
+            .try_client_connected(ID, "old", "Sonium", "linux", "aarch64", addr, 2)
+            .expect("old session admitted");
+        let report = HealthReport::new(0, 0, 0, 100, 0, 0);
+        metrics::register_client_session(ID, old_generation);
+        metrics::observe_client_health(ID, "tcp", &report, AudioHealthState::Stable);
+
+        let cleanup_entered = Arc::new(Barrier::new(2));
+        let allow_cleanup = Arc::new(Barrier::new(2));
+        let hook_entered = cleanup_entered.clone();
+        let hook_release = allow_cleanup.clone();
+        state.set_client_removal_hook(Arc::new(move |client_id, generation| {
+            hook_entered.wait();
+            hook_release.wait();
+            metrics::forget_client(client_id, generation);
+        }));
+
+        let stale_state = state.clone();
+        let stale_disconnect = thread::spawn(move || {
+            assert!(stale_state.client_disconnected_generation(ID, old_generation));
+        });
+        cleanup_entered.wait();
+
+        let new_generation = state
+            .try_client_connected(ID, "new", "Sonium", "linux", "aarch64", addr, 2)
+            .expect("reconnect admitted while old cleanup waits");
+        metrics::register_client_session(ID, new_generation);
+        metrics::observe_client_health(ID, "tcp", &report, AudioHealthState::Stable);
+
+        allow_cleanup.wait();
+        stale_disconnect.join().expect("stale disconnect thread");
+
+        assert!(metrics::gather().contains(&format!("client_id=\"{ID}\"")));
+        metrics::forget_client(ID, new_generation);
     }
 
     #[test]
@@ -1336,6 +2096,16 @@ mod tests {
         let report = rtp_report(0, AUTO_BUFFER_RTP_BURST_THRESHOLD + 1, 0, 0);
 
         assert_eq!(t.on_health(&report, 1200), Some(1600));
+    }
+
+    #[test]
+    fn auto_buffer_step_up_saturates_at_the_configured_maximum() {
+        let mut t = auto_tuner();
+        t.max_ms = u32::MAX;
+        t.step_up_ms = u32::MAX;
+        let report = rtp_report(1, 0, 0, 0);
+
+        assert_eq!(t.on_health(&report, u32::MAX - 1), Some(u32::MAX));
     }
 
     #[test]

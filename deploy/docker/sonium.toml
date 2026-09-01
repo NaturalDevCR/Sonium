@@ -1,0 +1,31 @@
+# Compose deployment profile: trusted-LAN audio plus host-local administration.
+# docker-compose.yml publishes the control port only on the Docker host's
+# loopback address. Do not publish it broadly unless a host firewall restricts
+# access to trusted administrators.
+[server]
+bind = "0.0.0.0"
+# Docker's published-port forwarding reaches the container over its network
+# interface, so the Compose file—not this bind—limits control exposure.
+control_bind = "0.0.0.0"
+stream_port = 1710
+control_port = 1711
+max_clients = 64
+max_known_clients = 256
+mdns = false
+snapcast_compat = false
+
+[server.audio]
+buffer_ms = 200
+chunk_ms = 10
+output_prefill_ms = 0
+
+[[streams]]
+id = "default"
+display_name = "Main"
+# Replace with a file/FIFO path and mount it into the container for production.
+source = "-"
+codec = "opus"
+silence_on_idle = true
+
+[log]
+level = "info"

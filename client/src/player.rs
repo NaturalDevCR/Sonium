@@ -12,6 +12,8 @@ use sonium_common::{SampleFormat, SoniumError};
 use sonium_sync::time_provider::now_us;
 use sonium_sync::{PcmChunk, SyncBuffer};
 
+use crate::ducking::DuckGain;
+
 use rubato::{
     Resampler, SincFixedIn, SincInterpolationParameters, SincInterpolationType, WindowFunction,
 };
@@ -75,6 +77,7 @@ struct AudioState {
     health: Arc<HealthState>,
     playback: Option<PlaybackHandle>,
     latest_output_latency_us: Arc<AtomicI64>,
+    duck_gain: DuckGain,
 }
 
 #[derive(Clone)]
@@ -648,6 +651,7 @@ impl Player {
         fmt: SampleFormat,
         device_name: Option<&str>,
         playback: Option<PlaybackHandle>,
+        duck_gain: DuckGain,
     ) -> Result<Self, SoniumError> {
         let capacity = fmt.rate as usize * fmt.channels as usize * 2; // ~2 s headroom
         let ring = Arc::new(Mutex::new(VecDeque::<i16>::with_capacity(capacity)));
@@ -669,6 +673,7 @@ impl Player {
             health: health.clone(),
             playback: playback.clone(),
             latest_output_latency_us: latest_output_latency_us.clone(),
+            duck_gain,
         };
         thread::Builder::new()
             .name("sonium-audio".into())
@@ -941,6 +946,7 @@ fn build_stream_for_format(
             let ring = audio_state.ring.clone();
             let playback = audio_state.playback.clone();
             let latest_output_latency_us = audio_state.latest_output_latency_us.clone();
+            let duck_gain = audio_state.duck_gain.clone();
             device.build_output_stream(
                 config,
                 move |data: &mut [i16], info: &cpal::OutputCallbackInfo| {
@@ -958,19 +964,20 @@ fn build_stream_for_format(
                             .drift_dup_count
                             .fetch_add(dups, Ordering::Relaxed);
                         playback.fill_i16(data, info, &data_health, &mut fade);
-                        return;
-                    }
-                    let mut ring = ring.lock().unwrap();
-                    for sample in data.iter_mut() {
-                        if let Some(s) = ring.pop_front() {
-                            *sample = fade.feed(s);
-                        } else {
-                            if fade.phase == FadePhase::Playing {
-                                data_health.underrun_count.fetch_add(1, Ordering::Relaxed);
+                    } else {
+                        let mut ring = ring.lock().unwrap();
+                        for sample in data.iter_mut() {
+                            if let Some(s) = ring.pop_front() {
+                                *sample = fade.feed(s);
+                            } else {
+                                if fade.phase == FadePhase::Playing {
+                                    data_health.underrun_count.fetch_add(1, Ordering::Relaxed);
+                                }
+                                *sample = fade.drain();
                             }
-                            *sample = fade.drain();
                         }
                     }
+                    apply_duck_i16(data, duck_gain.load());
                 },
                 move |err| {
                     err_health
@@ -989,6 +996,7 @@ fn build_stream_for_format(
             let ring = audio_state.ring.clone();
             let playback = audio_state.playback.clone();
             let latest_output_latency_us = audio_state.latest_output_latency_us.clone();
+            let duck_gain = audio_state.duck_gain.clone();
             let mut scratch = Vec::<i16>::new();
             device.build_output_stream(
                 config,
@@ -1008,14 +1016,16 @@ fn build_stream_for_format(
                             .fetch_add(dups, Ordering::Relaxed);
                         scratch.resize(data.len(), 0);
                         playback.fill_i16(&mut scratch, info, &data_health, &mut fade);
+                        apply_duck_i16(&mut scratch, duck_gain.load());
                         for (dst, src) in data.iter_mut().zip(scratch.iter()) {
                             *dst = (*src as i32 + 32768) as u16;
                         }
                         return;
                     }
+                    let gain = duck_gain.load();
                     let mut ring = ring.lock().unwrap();
                     for sample in data.iter_mut() {
-                        let s16 = if let Some(s) = ring.pop_front() {
+                        let mut s16 = if let Some(s) = ring.pop_front() {
                             fade.feed(s)
                         } else {
                             if fade.phase == FadePhase::Playing {
@@ -1023,6 +1033,7 @@ fn build_stream_for_format(
                             }
                             fade.drain()
                         };
+                        s16 = scale_i16(s16, gain);
                         *sample = (s16 as i32 + 32768) as u16;
                     }
                 },
@@ -1043,6 +1054,7 @@ fn build_stream_for_format(
             let ring = audio_state.ring.clone();
             let playback = audio_state.playback.clone();
             let latest_output_latency_us = audio_state.latest_output_latency_us.clone();
+            let duck_gain = audio_state.duck_gain.clone();
             device.build_output_stream(
                 config,
                 move |data: &mut [f32], info: &cpal::OutputCallbackInfo| {
@@ -1060,19 +1072,20 @@ fn build_stream_for_format(
                             .drift_dup_count
                             .fetch_add(dups, Ordering::Relaxed);
                         playback.fill_f32(data, info, &data_health, &mut fade);
-                        return;
-                    }
-                    let mut ring = ring.lock().unwrap();
-                    for sample in data.iter_mut() {
-                        if let Some(s) = ring.pop_front() {
-                            *sample = fade.feed(s as f32 / 32768.0);
-                        } else {
-                            if fade.phase == FadePhase::Playing {
-                                data_health.underrun_count.fetch_add(1, Ordering::Relaxed);
+                    } else {
+                        let mut ring = ring.lock().unwrap();
+                        for sample in data.iter_mut() {
+                            if let Some(s) = ring.pop_front() {
+                                *sample = fade.feed(s as f32 / 32768.0);
+                            } else {
+                                if fade.phase == FadePhase::Playing {
+                                    data_health.underrun_count.fetch_add(1, Ordering::Relaxed);
+                                }
+                                *sample = fade.drain();
                             }
-                            *sample = fade.drain();
                         }
                     }
+                    apply_duck_f32(data, duck_gain.load());
                 },
                 move |err| {
                     err_health
@@ -1084,6 +1097,31 @@ fn build_stream_for_format(
             )
         }
         _ => Err(cpal::BuildStreamError::StreamConfigNotSupported),
+    }
+}
+
+#[inline]
+fn scale_i16(sample: i16, gain: f32) -> i16 {
+    (sample as f32 * gain).clamp(i16::MIN as f32, i16::MAX as f32) as i16
+}
+
+#[inline]
+fn apply_duck_i16(samples: &mut [i16], gain: f32) {
+    if gain >= 1.0 {
+        return;
+    }
+    for sample in samples {
+        *sample = scale_i16(*sample, gain);
+    }
+}
+
+#[inline]
+fn apply_duck_f32(samples: &mut [f32], gain: f32) {
+    if gain >= 1.0 {
+        return;
+    }
+    for sample in samples {
+        *sample *= gain;
     }
 }
 
@@ -1353,6 +1391,17 @@ mod tests {
 
     fn mono_1khz() -> SampleFormat {
         SampleFormat::new(1_000, 16, 1)
+    }
+
+    #[test]
+    fn callback_duck_gain_scales_all_samples_from_one_precomputed_scalar() {
+        let mut i16_samples = [20_000, -20_000, i16::MAX, i16::MIN];
+        apply_duck_i16(&mut i16_samples, 0.25);
+        assert_eq!(i16_samples, [5_000, -5_000, 8_191, -8_192]);
+
+        let mut f32_samples = [1.0, -1.0, 0.5, -0.5];
+        apply_duck_f32(&mut f32_samples, 0.25);
+        assert_eq!(f32_samples, [0.25, -0.25, 0.125, -0.125]);
     }
 
     #[test]

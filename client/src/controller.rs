@@ -12,7 +12,7 @@ use sonium_transport::arq::{decode_time_echo, encode_time_probe};
 use sonium_transport::{ArqReceiver, RtpPacket, RTP_CLOCK_RATE};
 use std::sync::atomic::{AtomicU64, Ordering};
 
-use sonium_common::config::ClientConfig;
+use sonium_common::config::{ClientConfig, MAX_CLIENT_ID_LEN};
 use sonium_protocol::{
     header::{validate_payload_size, HEADER_SIZE},
     messages::{EqBand, HealthReport, Hello, Message, TimeMsg},
@@ -22,6 +22,7 @@ use sonium_sync::time_provider::now_us;
 use sonium_sync::{PcmChunk, SyncBuffer, TimeProvider};
 
 use crate::decoder::ActiveDecoder;
+use crate::ducking::{DuckEnvelope, DuckGain};
 use crate::eq::SmoothedEqProcessor;
 use crate::player::Player;
 
@@ -45,15 +46,46 @@ const MAX_CONCEALMENT_PACKETS_PER_GAP: u16 = 10;
 
 const READ_TIMEOUT: Duration = Duration::from_secs(20);
 const WRITE_TIMEOUT: Duration = Duration::from_secs(5);
+const CONTROL_QUEUE_CAPACITY: usize = 64;
+
+/// Derive a stable protocol-safe ID from an arbitrary local hostname.
+fn client_id_from_hostname(hostname: &str, instance: u32) -> String {
+    let mut normalized = String::with_capacity(hostname.len());
+    for byte in hostname.bytes() {
+        if byte.is_ascii_alphanumeric() {
+            normalized.push((byte as char).to_ascii_lowercase());
+        } else if !normalized.ends_with('-') {
+            normalized.push('-');
+        }
+    }
+    let normalized = normalized.trim_matches('-');
+    let normalized = if normalized.is_empty() {
+        "sonium-client"
+    } else {
+        normalized
+    };
+    let instance_suffix = format!("-{instance}");
+    if normalized.len() + instance_suffix.len() <= MAX_CLIENT_ID_LEN {
+        return format!("{normalized}{instance_suffix}");
+    }
+
+    let disambiguator = format!("-{:08x}", stable_hostname_hash(hostname));
+    let prefix_len = MAX_CLIENT_ID_LEN - disambiguator.len() - instance_suffix.len();
+    let prefix = normalized[..prefix_len].trim_end_matches('-');
+    format!("{prefix}{disambiguator}{instance_suffix}")
+}
+
+fn stable_hostname_hash(hostname: &str) -> u32 {
+    hostname.bytes().fold(0x811c_9dc5, |hash, byte| {
+        (hash ^ u32::from(byte)).wrapping_mul(0x0100_0193)
+    })
+}
 
 /// Dedicated TCP writer task — owns the write half exclusively so the
 /// main select! loop never blocks on a TCP write.  Control messages
-/// (time-sync requests, health reports) arrive via an unbounded channel
-/// and are written to the socket sequentially.
-async fn tcp_writer_task(
-    mut writer: OwnedWriteHalf,
-    mut ctrl_rx: mpsc::UnboundedReceiver<Vec<u8>>,
-) {
+/// (time-sync requests, health reports, announcement ACKs) arrive via a
+/// bounded channel and are written to the socket sequentially.
+async fn tcp_writer_task(mut writer: OwnedWriteHalf, mut ctrl_rx: mpsc::Receiver<Vec<u8>>) {
     loop {
         let Some(buf) = ctrl_rx.recv().await else {
             break;
@@ -164,7 +196,7 @@ async fn connect_and_run(
         .map(|h| h.to_string_lossy().to_string())
         .unwrap_or_else(|_| "sonium-client".into());
     let display_name = cfg.client_name.as_deref().unwrap_or(&hostname);
-    let client_id = format!("{}-{}", hostname, cfg.instance);
+    let client_id = client_id_from_hostname(&hostname, cfg.instance);
 
     let mut hello_msg = Hello::new(display_name, &client_id);
     hello_msg.hostname = display_name.to_owned();
@@ -175,8 +207,9 @@ async fn connect_and_run(
 
     // Channel and writer task: all subsequent writes go through the channel
     // so the main select! loop never blocks on TCP backpressure.
-    let (ctrl_tx, ctrl_rx) = mpsc::unbounded_channel::<Vec<u8>>();
+    let (ctrl_tx, ctrl_rx) = mpsc::channel::<Vec<u8>>(CONTROL_QUEUE_CAPACITY);
     let writer_task = tokio::spawn(tcp_writer_task(writer, ctrl_rx));
+    let mut announcement_acks = AnnouncementAckQueue::new(ctrl_tx.clone());
 
     // 2. Wait for CodecHeader, then ServerSettings
     let mut decoder: Option<ActiveDecoder> = None;
@@ -184,6 +217,8 @@ async fn connect_and_run(
     let mut sync_buf: Option<SyncBuffer> = None;
     let mut playback_handle: Option<crate::player::PlaybackHandle> = None;
     let mut playback_offset: Option<std::sync::Arc<std::sync::atomic::AtomicI64>> = None;
+    let duck_gain = DuckGain::default();
+    let mut duck_envelope = DuckEnvelope::new(duck_gain.clone());
     let mut volume: u8 = 100;
     let mut muted = false;
     let mut eq_bands: Vec<EqBand> = vec![];
@@ -231,6 +266,11 @@ async fn connect_and_run(
             // behaviour: if a chunk is due, play it.  The Player ring buffer absorbs
             // jitter; underruns are handled by the CPAL callback fade-to-silence.
             _ = audio_tick.tick() => {
+                let now_server_ms = time_provider.to_server_time(now_us()) / 1_000;
+                if !announcement_acks.send(duck_envelope.tick(now_server_ms)) {
+                    warn!("Control queue saturated — disconnecting before announcement ACKs can grow unbounded");
+                    break Ok(());
+                }
                 if playback_handle.is_some() {
                     continue;
                 }
@@ -369,8 +409,8 @@ async fn connect_and_run(
                 }
 
                 let msg = Message::HealthReport(report_msg).encode();
-                if ctrl_tx.send(msg).is_err() {
-                    warn!("Writer task died — cannot send health report");
+                if ctrl_tx.try_send(msg).is_err() {
+                    warn!("Control queue saturated — disconnecting slow server connection");
                     break Ok(());
                 }
             }
@@ -403,7 +443,7 @@ async fn connect_and_run(
                             None
                         };
 
-                        let p   = Player::new(fmt, cfg.device.as_deref(), playback.clone())?;
+                        let p   = Player::new(fmt, cfg.device.as_deref(), playback.clone(), duck_gain.clone())?;
                         let mut buf = SyncBuffer::new(fmt);
                         buf.set_target_buffer_ms(server_buffer_ms + cfg.latency_ms + server_latency_ms);
                         eq_processor = Some(SmoothedEqProcessor::new(eq_enabled, &eq_bands, fmt.rate, fmt.channels as usize));
@@ -587,6 +627,17 @@ async fn connect_and_run(
                             } else if let Some(buf) = sync_buf.as_mut() {
                                 buf.push(pcm_chunk, now_server);
                             }
+                        }
+                    }
+
+                    MessageType::AnnouncementControl => {
+                        let control = sonium_protocol::messages::AnnouncementControlV1::decode(&payload)?;
+                        let now_server_ms = time_provider.to_server_time(now_us()) / 1_000;
+                        let acknowledgements =
+                            duck_envelope.handle_control(control, now_server_ms);
+                        if !announcement_acks.send(acknowledgements) {
+                            warn!("Control queue saturated — disconnecting before announcement ACKs can grow unbounded");
+                            break Ok(());
                         }
                     }
 
@@ -805,6 +856,56 @@ async fn connect_and_run(
     result
 }
 
+struct AnnouncementAckQueue {
+    ctrl_tx: mpsc::Sender<Vec<u8>>,
+    last_enqueued: Option<(String, String, u8, i64)>,
+}
+
+impl AnnouncementAckQueue {
+    fn new(ctrl_tx: mpsc::Sender<Vec<u8>>) -> Self {
+        Self {
+            ctrl_tx,
+            last_enqueued: None,
+        }
+    }
+
+    fn send(
+        &mut self,
+        acknowledgements: Vec<sonium_protocol::messages::AnnouncementControlV1>,
+    ) -> bool {
+        for acknowledgement in acknowledgements {
+            let fingerprint = (
+                acknowledgement.announcement_id.clone(),
+                acknowledgement.group_id.clone(),
+                announcement_lifecycle_rank(acknowledgement.lifecycle),
+                acknowledgement.scheduled_at_ms,
+            );
+            if self.last_enqueued.as_ref() == Some(&fingerprint) {
+                continue;
+            }
+            if self
+                .ctrl_tx
+                .try_send(Message::AnnouncementControl(acknowledgement).encode())
+                .is_err()
+            {
+                return false;
+            }
+            self.last_enqueued = Some(fingerprint);
+        }
+        true
+    }
+}
+
+fn announcement_lifecycle_rank(lifecycle: sonium_protocol::messages::AnnouncementLifecycle) -> u8 {
+    match lifecycle {
+        sonium_protocol::messages::AnnouncementLifecycle::Scheduled => 0,
+        sonium_protocol::messages::AnnouncementLifecycle::Started => 1,
+        sonium_protocol::messages::AnnouncementLifecycle::Completed => 2,
+        sonium_protocol::messages::AnnouncementLifecycle::Cancelled => 3,
+        sonium_protocol::messages::AnnouncementLifecycle::Failed => 4,
+    }
+}
+
 fn configure_tcp_stream(stream: &TcpStream) {
     let sock = SockRef::from(stream);
 
@@ -839,7 +940,7 @@ fn configure_tcp_stream(stream: &TcpStream) {
 /// clock-sync algorithm measures client→server→client transit, which starts
 /// when we create the message, not when the kernel puts it on the wire.
 fn queue_time_request(
-    ctrl_tx: &mpsc::UnboundedSender<Vec<u8>>,
+    ctrl_tx: &mpsc::Sender<Vec<u8>>,
     sync_seq: &mut u16,
     pending_time: &mut Option<(u16, i64)>,
 ) {
@@ -848,8 +949,9 @@ fn queue_time_request(
     hdr.id = *sync_seq;
     let sent_us = hdr.sent.to_micros();
     let msg = Message::Time(TimeMsg::zero()).encode_with_header(hdr);
-    let _ = ctrl_tx.send(msg);
-    *pending_time = Some((*sync_seq, sent_us));
+    if ctrl_tx.try_send(msg).is_ok() {
+        *pending_time = Some((*sync_seq, sent_us));
+    }
 }
 
 async fn read_exact_with_timeout(reader: &mut OwnedReadHalf, buf: &mut [u8]) -> anyhow::Result<()> {
@@ -986,5 +1088,83 @@ fn apply_volume(samples: &mut [i16], volume: u8, muted: bool) {
     let gain = volume as f32 / 100.0;
     for sample in samples {
         *sample = (*sample as f32 * gain).clamp(i16::MIN as f32, i16::MAX as f32) as i16;
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use sonium_common::config::{validate_client_id, MAX_CLIENT_ID_LEN};
+
+    #[test]
+    fn client_id_normalizes_fqdn_hostname_into_the_protocol_charset() {
+        let id = client_id_from_hostname("living.room.example", 7);
+
+        assert_eq!(id, "living-room-example-7");
+        assert!(validate_client_id(&id).is_ok());
+    }
+
+    #[test]
+    fn long_hostnames_are_stably_bounded_without_colliding_on_the_prefix() {
+        let first_host = format!("{}-a.example.internal", "a".repeat(120));
+        let second_host = format!("{}-b.example.internal", "a".repeat(120));
+        let first = client_id_from_hostname(&first_host, 42);
+        let second = client_id_from_hostname(&second_host, 42);
+
+        assert!(first.len() <= MAX_CLIENT_ID_LEN);
+        assert!(validate_client_id(&first).is_ok());
+        assert_eq!(first, client_id_from_hostname(&first_host, 42));
+        assert_ne!(first, second);
+    }
+
+    #[test]
+    fn announcement_ack_batch_is_encoded_on_the_existing_control_writer() {
+        use sonium_protocol::messages::{AnnouncementControlV1, AnnouncementLifecycle};
+
+        let (tx, mut rx) = mpsc::channel(2);
+        let mut acknowledgements = AnnouncementAckQueue::new(tx);
+        let acknowledgement = AnnouncementControlV1 {
+            version: 1,
+            announcement_id: "doorbell".into(),
+            group_id: "default".into(),
+            lifecycle: AnnouncementLifecycle::Started,
+            scheduled_at_ms: 10_250,
+            max_duration_ms: 1_000,
+            intent: None,
+        };
+
+        assert!(acknowledgements.send(vec![acknowledgement.clone()]));
+        let bytes = rx.try_recv().unwrap();
+        let header = MessageHeader::from_bytes(&bytes[..HEADER_SIZE]).unwrap();
+        let decoded = Message::from_payload(&header, &bytes[HEADER_SIZE..]).unwrap();
+        assert!(matches!(
+            decoded,
+            Message::AnnouncementControl(message) if message == acknowledgement
+        ));
+    }
+
+    #[test]
+    fn announcement_ack_queue_is_bounded_and_coalesces_exact_replays() {
+        use sonium_protocol::messages::{AnnouncementControlV1, AnnouncementLifecycle};
+
+        let (tx, mut rx) = mpsc::channel(1);
+        let mut queue = AnnouncementAckQueue::new(tx);
+        let scheduled = AnnouncementControlV1 {
+            version: 1,
+            announcement_id: "doorbell".into(),
+            group_id: "default".into(),
+            lifecycle: AnnouncementLifecycle::Scheduled,
+            scheduled_at_ms: 10_250,
+            max_duration_ms: 1_000,
+            intent: None,
+        };
+
+        assert!(queue.send(vec![scheduled.clone()]));
+        assert!(queue.send(vec![scheduled.clone()]));
+
+        let mut started = scheduled;
+        started.lifecycle = AnnouncementLifecycle::Started;
+        assert!(!queue.send(vec![started]));
+        assert!(rx.try_recv().is_ok());
     }
 }

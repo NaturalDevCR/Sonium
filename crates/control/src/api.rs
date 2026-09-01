@@ -3,12 +3,13 @@
 //! Mount with [`router`] inside the server's `axum` application.
 //! All handlers share [`AppState`] via `axum::extract::State`.
 
-use crate::auth::UserStore;
-use crate::auth_api::AuthUser;
+use crate::announcements::{AnnouncementError, AnnouncementIntent, AnnouncementLifecycle};
+use crate::auth::{UserStore, WsTicketIssueError};
+use crate::auth_api::{AuthUser, RawToken};
 use crate::state::ServerState;
 use axum::{
-    extract::{Path, Query, Request, State, WebSocketUpgrade},
-    http::{header, StatusCode},
+    extract::{DefaultBodyLimit, Path, Query, Request, State, WebSocketUpgrade},
+    http::{header, HeaderMap, StatusCode},
     middleware::{self, Next},
     response::{IntoResponse, Json, Response},
     routing::{delete, get, patch, post},
@@ -36,8 +37,12 @@ pub fn router(state: AppState) -> Router {
         .route("/clients", get(get_clients))
         .route("/groups", get(get_groups))
         .route("/streams", get(get_streams))
-        .route("/events", get(ws_handler)) // WS: also accepts ?token=
+        .route("/events/ticket", post(post_ws_ticket))
         .layer(middleware::from_fn(require_viewer));
+
+    // Browsers cannot attach Authorization headers to WebSocket upgrades, so
+    // they first exchange the JWT for a short-lived, one-use subprotocol ticket.
+    let ws_routes = Router::new().route("/events", get(ws_handler));
 
     // Operator or admin only
     let write_routes = Router::new()
@@ -56,10 +61,24 @@ pub fn router(state: AppState) -> Router {
         .route("/server/transport", patch(patch_transport))
         .route("/discover/scan", get(get_discover_scan))
         .route("/discover/local-subnet", get(get_discover_local_subnet))
+        .route(
+            "/announcements",
+            get(get_announcements).post(post_announcement),
+        )
+        .route("/announcements/:id", delete(delete_announcement))
+        .route(
+            "/announcements/:id/lifecycle",
+            post(post_announcement_lifecycle),
+        )
+        // Intent metadata is bounded separately from Axum's normal JSON
+        // limit so an authenticated caller cannot create an oversized queue
+        // or control payload.
+        .layer(DefaultBodyLimit::max(16 * 1024))
         .layer(middleware::from_fn(require_operator));
 
     Router::new()
         .merge(read_routes)
+        .merge(ws_routes)
         .merge(write_routes)
         .with_state(state)
 }
@@ -67,19 +86,11 @@ pub fn router(state: AppState) -> Router {
 // ── Auth middleware ───────────────────────────────────────────────────────
 
 fn extract_token(req: &Request) -> Option<String> {
-    // 1. Authorization: Bearer <token>
     req.headers()
         .get(header::AUTHORIZATION)
         .and_then(|v| v.to_str().ok())
         .and_then(|s| s.strip_prefix("Bearer "))
         .map(String::from)
-        // 2. ?token= query param (required for WebSocket — browsers can't set WS headers)
-        .or_else(|| {
-            req.uri().query()?.split('&').find_map(|pair| {
-                let (k, v) = pair.split_once('=')?;
-                (k == "token").then(|| v.to_owned())
-            })
-        })
 }
 
 async fn require_viewer(
@@ -87,11 +98,11 @@ async fn require_viewer(
     mut req: Request,
     next: Next,
 ) -> Response {
-    match extract_token(&req)
-        .as_deref()
-        .and_then(|t| auth.verify_token(t))
-    {
+    let token = extract_token(&req);
+    match token.as_deref().and_then(|t| auth.verify_token(t)) {
         Some(claims) => {
+            req.extensions_mut()
+                .insert(RawToken(token.expect("token just verified")));
             req.extensions_mut().insert(AuthUser(claims));
             next.run(req).await
         }
@@ -401,21 +412,162 @@ async fn get_streams(State(s): State<AppState>) -> impl IntoResponse {
     Json(s.all_streams())
 }
 
-// ── WebSocket events ──────────────────────────────────────────────────────
+// ── Announcements ────────────────────────────────────────────────────────
 
-async fn ws_handler(ws: WebSocketUpgrade, State(s): State<AppState>) -> Response {
-    ws.on_upgrade(move |socket| handle_ws(socket, s))
+fn now_ms() -> i64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_millis()
+        .try_into()
+        .unwrap_or(i64::MAX)
 }
 
-async fn handle_ws(mut socket: axum::extract::ws::WebSocket, state: AppState) {
+fn announcement_error(error: AnnouncementError) -> Response {
+    let status = match error {
+        AnnouncementError::NotFound(_) => StatusCode::NOT_FOUND,
+        AnnouncementError::QueueDepthExceeded(_) | AnnouncementError::QueueDurationExceeded(_) => {
+            StatusCode::TOO_MANY_REQUESTS
+        }
+        AnnouncementError::IdempotencyConflict | AnnouncementError::InvalidLifecycle => {
+            StatusCode::CONFLICT
+        }
+        _ => StatusCode::BAD_REQUEST,
+    };
+    (status, error.to_string()).into_response()
+}
+
+async fn get_announcements(State(s): State<AppState>) -> impl IntoResponse {
+    s.expire_announcements(now_ms());
+    Json(s.all_announcements())
+}
+
+async fn post_announcement(
+    State(s): State<AppState>,
+    Json(intent): Json<AnnouncementIntent>,
+) -> Response {
+    s.expire_announcements(now_ms());
+    match s.admit_announcement(intent, now_ms()) {
+        Ok(admission) => {
+            let status = if admission.duplicate {
+                StatusCode::OK
+            } else {
+                StatusCode::CREATED
+            };
+            (status, Json(admission)).into_response()
+        }
+        Err(error) => announcement_error(error),
+    }
+}
+
+async fn delete_announcement(State(s): State<AppState>, Path(id): Path<String>) -> Response {
+    s.expire_announcements(now_ms());
+    match s.cancel_announcement(&id) {
+        Ok(()) => StatusCode::NO_CONTENT.into_response(),
+        Err(error) => announcement_error(error),
+    }
+}
+
+#[derive(Deserialize)]
+struct AnnouncementLifecycleBody {
+    group_id: String,
+    lifecycle: AnnouncementLifecycle,
+}
+
+async fn post_announcement_lifecycle(
+    State(s): State<AppState>,
+    Path(id): Path<String>,
+    Json(body): Json<AnnouncementLifecycleBody>,
+) -> Response {
+    s.expire_announcements(now_ms());
+    match s.acknowledge_announcement(&id, &body.group_id, body.lifecycle) {
+        Ok(()) => StatusCode::NO_CONTENT.into_response(),
+        Err(error) => announcement_error(error),
+    }
+}
+
+// ── WebSocket events ──────────────────────────────────────────────────────
+
+#[derive(Serialize)]
+struct WsTicketResponse {
+    ticket: String,
+}
+
+async fn post_ws_ticket(
+    Extension(auth): Extension<Arc<UserStore>>,
+    Extension(raw): Extension<RawToken>,
+) -> Response {
+    match auth.issue_ws_ticket(&raw.0) {
+        Ok(ticket) => (StatusCode::CREATED, Json(WsTicketResponse { ticket })).into_response(),
+        Err(WsTicketIssueError::InvalidToken) => {
+            (StatusCode::UNAUTHORIZED, "invalid or expired token").into_response()
+        }
+        Err(WsTicketIssueError::CapacityExceeded) => (
+            StatusCode::TOO_MANY_REQUESTS,
+            "WebSocket ticket capacity reached; retry shortly",
+        )
+            .into_response(),
+    }
+}
+
+async fn ws_handler(
+    ws: WebSocketUpgrade,
+    State(s): State<AppState>,
+    Extension(auth): Extension<Arc<UserStore>>,
+    headers: HeaderMap,
+) -> Response {
+    let Some(ticket) = headers
+        .get(header::SEC_WEBSOCKET_PROTOCOL)
+        .and_then(|value| value.to_str().ok())
+        .and_then(|value| {
+            let mut protocols = value.split(',').map(str::trim);
+            let ticket = protocols.next()?;
+            (protocols.next().is_none() && !ticket.is_empty()).then_some(ticket)
+        })
+        .map(str::to_owned)
+    else {
+        return (StatusCode::UNAUTHORIZED, "missing WebSocket ticket").into_response();
+    };
+    let Some(admitted) = auth.consume_ws_ticket(&ticket) else {
+        return (
+            StatusCode::UNAUTHORIZED,
+            "invalid or expired WebSocket ticket",
+        )
+            .into_response();
+    };
+
+    ws.protocols([ticket])
+        .on_upgrade(move |socket| handle_ws(socket, s, auth, admitted))
+}
+
+async fn handle_ws(
+    mut socket: axum::extract::ws::WebSocket,
+    state: AppState,
+    auth: Arc<UserStore>,
+    admitted: crate::auth::WsTicketClaims,
+) {
     use axum::extract::ws::Message as WsMsg;
+    use tokio::time::Duration;
+
     let mut rx = state.events().subscribe();
+    let mut session_check = tokio::time::interval(Duration::from_secs(1));
+    session_check.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
 
     loop {
         tokio::select! {
+            _ = session_check.tick() => {
+                if !auth.verify_ws_ticket_claims(&admitted) {
+                    let _ = socket.close().await;
+                    break;
+                }
+            }
             event = rx.recv() => {
                 match event {
                     Ok(ev) => {
+                        if !auth.verify_ws_ticket_claims(&admitted) {
+                            let _ = socket.close().await;
+                            break;
+                        }
                         if let Ok(json) = serde_json::to_string(&ev) {
                             if socket.send(WsMsg::Text(json)).await.is_err() {
                                 break;

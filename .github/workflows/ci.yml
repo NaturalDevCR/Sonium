@@ -71,6 +71,15 @@ jobs:
       - name: Integration tests
         run: cargo test --workspace --tests -- --test-threads=4
 
+      - name: Home Assistant adapter contract tests
+        run: >-
+          python3 -m unittest tests/home_assistant/test_announcement.py
+          tests/home_assistant/test_group_mute.py -v
+
+      - name: Phase 1 deployment smoke
+        if: runner.os == 'Linux'
+        run: bash tests/deployment/phase1_install_smoke.sh
+
   # ── Lightweight compile-only check on Windows ───────────────────────────
   windows-check:
     name: Build check (Windows)
@@ -88,6 +97,11 @@ jobs:
           key: windows-cargo-${{ hashFiles('**/Cargo.lock') }}
       - name: Build
         run: cargo build --workspace
+
+      - name: User persistence replacement tests
+        run: |
+          cargo test -p sonium-control auth::tests::atomic_replace_overwrites_an_existing_destination -- --exact
+          cargo test -p sonium-control auth::tests::initial_admin_password_persists_in_new_config_dir -- --exact
 
   # ── Nightly fuzz (60-second smoke, catches regressions) ─────────────────
   fuzz:

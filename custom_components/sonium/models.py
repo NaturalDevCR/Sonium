@@ -83,6 +83,19 @@ class SoniumGroup:
 
 
 @dataclass
+class StreamRecovery:
+    attempt: int
+    retry_in_ms: int
+
+    @classmethod
+    def from_dict(cls, d: dict) -> StreamRecovery:
+        return cls(
+            attempt=int(d.get("attempt", 0)),
+            retry_in_ms=int(d.get("retry_in_ms", 0)),
+        )
+
+
+@dataclass
 class SoniumStream:
     id: str
     display_name: Optional[str]
@@ -90,6 +103,7 @@ class SoniumStream:
     format: str
     source: str
     status: str
+    recovery: Optional[StreamRecovery] = None
 
     @property
     def name(self) -> str:
@@ -97,6 +111,7 @@ class SoniumStream:
 
     @classmethod
     def from_dict(cls, d: dict) -> SoniumStream:
+        recovery = StreamRecovery.from_dict(d["recovery"]) if d.get("recovery") else None
         return cls(
             id=d["id"],
             display_name=d.get("display_name") or None,
@@ -104,6 +119,7 @@ class SoniumStream:
             format=d.get("format", ""),
             source=d.get("source", ""),
             status=d.get("status", "idle"),
+            recovery=recovery,
         )
 
 

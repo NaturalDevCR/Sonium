@@ -32,12 +32,14 @@ music source -> sonium-server -> LAN -> sonium-client -> speaker
 - **Built-in web UI** with control view, admin dashboard, and **real-time sync
   monitor**, refreshed responsive styling, and role-aware routes.
 - **Users, roles, JWT auth**, first-run/admin setup, and role-aware UI.
-- **Groups, per-client volume/mute/latency, EQ**, and live stream switching.
+- **Groups, per-client volume/mute/latency, group mute, EQ**, and live stream
+  switching.
 - **Multiple configured streams**, including FIFO/files, TCP, `pipe://` external
   processes, ffmpeg-style radio sources, virtual AirPlay/Spotify templates in
   the UI, and meta streams.
 - **External stream recovery**: `pipe://` sources restart with backoff if their
-  stdout closes, and ffmpeg stderr is captured for diagnostics.
+  stdout closes; file and FIFO inputs reopen after producer disconnects or
+  replacement; ffmpeg stderr is captured for diagnostics.
 - **System/admin tooling**: dependency checks, raw TOML editing, log viewer with
   time filters, and restart requests when systemd permissions are installed.
 - **Multi-room sync foundation**: GroupSync, server-computed group offsets,
@@ -54,6 +56,36 @@ music source -> sonium-server -> LAN -> sonium-client -> speaker
 - **Observability** through HealthReport sync metrics, Prometheus `/metrics`,
   Sync Monitor UI, and Home Assistant entities for groups, clients, streams, and
   client health.
+- **Announcement control plane and ducking** — authenticated, idempotent
+  intents (priority `music < chime < announcement < emergency`) with bounded
+  per-group queues and synchronized client-side duck envelopes. Direct URI
+  fetch/decode remains a follow-up; see the
+  [announcement design](https://naturaldevcr.github.io/Sonium/architecture/announcement-ducking-design)
+  and [Music Assistant / Announcements](https://naturaldevcr.github.io/Sonium/integrations/music-assistant).
+
+## Operating boundary (Phase 1)
+
+Sonium Phase 1 is intended for a **trusted LAN only**. The audio stream is not
+TLS-encrypted or mutually authenticated, and the experimental UDP transports
+are not hardened for untrusted networks. Do not port-forward Sonium, place it
+directly on the Internet, or treat it as a VPN replacement. TCP is the
+supported transport default; `rtp_udp` and `rist` still need broader field
+validation.
+
+`server.bind` controls the audio listener and commonly remains `0.0.0.0` on a
+LAN. The control API, web UI, and metrics listener use the separate
+`server.control_bind`, which defaults to `127.0.0.1`. Keep it there and use a
+local browser or SSH tunnel whenever possible. If remote LAN administration is
+required, set it explicitly to a private LAN address (or `0.0.0.0`) and limit
+`control_port` with the host firewall to the administrators who need it.
+
+Authentication protects the control plane; it does not authenticate media.
+The installer creates an initial admin only when `users.json` is absent. Store
+`/etc/sonium` on persistent local storage: it contains password hashes and the
+durable JWT signing secret. Sonium writes the account file atomically with
+owner-only permissions and keeps its directory private on Unix. Do not put
+passwords, JWTs, or `users.json` in TOML, Compose files, source control, URLs,
+or logs.
 
 ## Install
 
@@ -79,8 +111,22 @@ We provide a lightweight native Desktop Agent (`.dmg` for macOS, `.exe` for Wind
 Docker can run the server:
 
 ```bash
-docker compose up -d
+read -r -s -p "Initial Sonium admin password: " SONIUM_INIT_ADMIN_PASSWORD
+printf '\n'
+export SONIUM_INIT_ADMIN_PASSWORD
+if docker compose --profile bootstrap run --rm init-admin; then
+  unset SONIUM_INIT_ADMIN_PASSWORD
+  docker compose up -d
+else
+  status=$?
+  unset SONIUM_INIT_ADMIN_PASSWORD
+  exit "$status"
+fi
 ```
+
+This bootstrap creates the administrator before the first normal server start
+without saving the password in Compose or shell history. See the installation
+guide for the trusted-LAN control-port profile and source mounting.
 
 The client should usually run directly on the playback machine because it needs
 access to local audio hardware.
@@ -103,6 +149,7 @@ mkfifo /tmp/sonium.fifo
 cat > sonium.toml <<'EOF'
 [server]
 bind = "0.0.0.0"
+control_bind = "127.0.0.1"
 stream_port = 1710
 control_port = 1711
 mdns = true
@@ -123,8 +170,21 @@ silence_on_idle = true
 level = "info"
 EOF
 
-./target/release/sonium-server --config sonium.toml
+read -r -s -p "Initial Sonium admin password: " SONIUM_INIT_ADMIN_PASSWORD
+printf '\n'
+if printf '%s' "$SONIUM_INIT_ADMIN_PASSWORD" | ./target/release/sonium-server --config sonium.toml --init-admin; then
+  unset SONIUM_INIT_ADMIN_PASSWORD
+  ./target/release/sonium-server --config sonium.toml
+else
+  status=$?
+  unset SONIUM_INIT_ADMIN_PASSWORD
+  exit "$status"
+fi
 ```
+
+`--init-admin` reads the password from standard input and accepts no password
+argument. This replaces the former `--init-admin PASSWORD` form so secrets do
+not appear in process listings or shell history.
 
 Feed audio in another terminal:
 
@@ -174,8 +234,10 @@ changes between releases.
   project still needs measured multi-device validation before claiming
   Sonos-class reliability. Chrony/NTP is recommended for tighter clocks; PTP and
   hardware timestamping remain future work.
-- **Source supervision:** `pipe://` recovery and ffmpeg stderr capture exist,
-  but operator-facing source health and guided remediation are still maturing.
+- **Source supervision:** file/FIFO inputs reopen after producer restarts and
+  expose `recovering` retry state; terminal configuration or permission errors
+  expose `error`. `pipe://` recovery and ffmpeg stderr capture also exist, but
+  operator-facing source health and guided remediation are still maturing.
 - **Upgrade/installer edges:** Linux systemd installs work best through the
   installer; hand-written services may miss restart permissions or migration
   steps.
@@ -184,7 +246,10 @@ changes between releases.
 
 ### Roadmap Toward Sonos-Class Reliability
 
-**Recently Completed (through v0.1.90):**
+**Recently Completed (through v0.1.92):**
+- Stability Phase 1: fail-closed strict configuration and account storage,
+  session-version invalidation, bounded client admission, loopback-by-default
+  control listener, and supervised file/FIFO recovery.
 - TCP streaming stability work: dedicated writers, audio-first draining, relaxed
   false-positive sync warnings, and UDP auto-bind fixes.
 - GroupSync protocol with server-computed group offsets, smoother client nudges,
@@ -194,7 +259,10 @@ changes between releases.
 - Observability phase A: extended HealthReport, playout percentiles, callback
   timing, drift/drop/dup counters, Prometheus metrics, and Sync Monitor updates.
 - Web/admin redesign, first-run auth flow hardening, stream templates for
-  AirPlay and Spotify Connect helpers, and Home Assistant integration.
+  AirPlay and Spotify Connect helpers, Home Assistant integration, and
+  announcement intents with synchronized ducking. Home Assistant group
+  entities now support coordinated mute/unmute while retaining per-client
+  volume levels.
 - Release packaging polish for Linux plus macOS/Windows Desktop Agent builds.
 
 **Next focus:**
@@ -205,12 +273,18 @@ changes between releases.
 - Turn health telemetry into automatic buffer recommendations and safer
   auto-buffer behavior.
 - Harden config reload/restart flows and upgrade checks.
+- Validate the callback-driven audio path under real-time scheduling; it is not
+  yet a certified real-time callback design.
+- Define and test authenticated media/TLS and complete UDP hardening before any
+  routed or untrusted-network deployment guidance.
 
 **Longer-term:**
 - QUIC DATAGRAM transport for encrypted/routed deployments.
 - PTP/hardware timestamp support through the `TimeSource` abstraction.
 - Relay/cross-subnet operation, TLS deployment profiles, richer source
   integrations, calibration/DSP tools, and safer auto-update flows.
+- Signed packaging, supported-platform certification, and long-running
+  fault-injection validation.
 
 ## License
 

@@ -9,16 +9,30 @@
 //! provided) also saves to `sonium-state.json` so the state survives restarts.
 
 use chrono::{DateTime, Utc};
-use parking_lot::RwLock;
+use parking_lot::{Mutex, RwLock};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::net::SocketAddr;
-use std::sync::Arc;
+use std::sync::{
+    atomic::{AtomicU64, Ordering},
+    Arc,
+};
 
+use crate::announcement_scheduler::{
+    AnnouncementClient, AnnouncementScheduler, SchedulerAdmission, SchedulerConfig, SchedulerEvents,
+};
+use crate::announcements::{
+    AnnouncementAdmission, AnnouncementError, AnnouncementIntent, AnnouncementLifecycle,
+    AnnouncementLimits, AnnouncementRecord, AnnouncementTransition,
+};
 use crate::persistence::{PersistedClient, PersistedGroup, PersistedStream, PersistenceStore};
 use crate::ws::EventBus;
-use sonium_protocol::messages::{EqBand, HealthReport};
+use sonium_common::config::validate_client_id;
+use sonium_common::SoniumError;
+use sonium_protocol::messages::{AnnouncementControlV1, EqBand, HealthReport};
 use sonium_transport::TransportMode;
+use std::cmp::Reverse;
+use tokio::sync::broadcast;
 
 // ── Client ────────────────────────────────────────────────────────────────
 
@@ -61,6 +75,9 @@ pub struct ClientInfo {
     pub connected_at: DateTime<Utc>,
     /// Protocol version reported in `Hello`.
     pub protocol_version: u32,
+    /// Monotonic connection identity used to ignore stale session cleanup.
+    #[serde(skip)]
+    pub session_generation: u64,
     /// Optional operator-assigned display name (shown instead of hostname).
     #[serde(default)]
     pub display_name: Option<String>,
@@ -120,6 +137,9 @@ pub struct StreamInfo {
     pub idle_timeout_ms: Option<u32>,
     pub silence_on_idle: bool,
     pub status: StreamStatus,
+    /// Reopen progress while a file/FIFO source waits for its producer.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub recovery: Option<StreamRecovery>,
     /// Per-stream EQ bands (empty = flat).
     #[serde(default)]
     pub eq_bands: Vec<EqBand>,
@@ -133,7 +153,17 @@ pub struct StreamInfo {
 pub enum StreamStatus {
     Playing,
     Idle,
+    Recovering,
     Error,
+}
+
+/// Context for a file/FIFO source that is waiting to be reopened.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct StreamRecovery {
+    /// Number of consecutive reopen attempts since the reader last produced input.
+    pub attempt: u32,
+    /// Bounded delay before the next reopen attempt.
+    pub retry_in_ms: u64,
 }
 
 fn default_chunk_ms() -> u32 {
@@ -149,19 +179,29 @@ struct TransportState {
     server_udp_port: u16,
 }
 
+type StreamStatusHook = dyn Fn(&str, StreamStatus, Option<StreamRecovery>) + Send + Sync + 'static;
+type ClientRemovalHook = dyn Fn(&str, u64) + Send + Sync + 'static;
+
 // ── ServerState ──────────────────────────────────────────────────────────
 
 /// Thread-safe in-memory state shared between the audio server and the
 /// control API.
 pub struct ServerState {
     clients: RwLock<HashMap<String, ClientInfo>>,
+    /// Serializes client replacement with deletion without holding either
+    /// state lock across the other, avoiding the clients/groups lock inversion.
+    client_lifecycle: Mutex<()>,
+    max_known_clients: usize,
+    client_removal_hook: RwLock<Option<Arc<ClientRemovalHook>>>,
+    next_client_generation: AtomicU64,
+    stream_status_hook: RwLock<Option<Arc<StreamStatusHook>>>,
     groups: RwLock<HashMap<String, Group>>,
+    announcements: Mutex<AnnouncementScheduler>,
+    announcement_controls: broadcast::Sender<AnnouncementControlV1>,
     streams: RwLock<HashMap<String, StreamInfo>>,
     events: Arc<EventBus>,
     start_time: DateTime<Utc>,
     persistence: Option<Arc<PersistenceStore>>,
-    /// Snapshot loaded at startup; used to restore per-client settings on reconnect.
-    saved_clients: Vec<PersistedClient>,
     /// Snapshot of stream settings loaded at startup.
     saved_streams: Vec<PersistedStream>,
     /// Active media transport configuration (runtime-mutable via control API).
@@ -177,6 +217,23 @@ impl ServerState {
         saved_clients: Vec<PersistedClient>,
         saved_streams: Vec<PersistedStream>,
     ) -> Self {
+        Self::new_with_known_client_limit(events, persistence, saved_clients, saved_streams, 256)
+    }
+
+    /// Construct state with an explicit bound for remembered, disconnected clients.
+    pub fn new_with_known_client_limit(
+        events: Arc<EventBus>,
+        persistence: Option<Arc<PersistenceStore>>,
+        saved_clients: Vec<PersistedClient>,
+        saved_streams: Vec<PersistedStream>,
+        max_known_clients: usize,
+    ) -> Self {
+        let mut saved_clients: Vec<PersistedClient> = saved_clients
+            .into_iter()
+            .filter(|client| validate_client_id(&client.id).is_ok())
+            .collect();
+        saved_clients.sort_by_key(|client| Reverse(client.last_seen));
+        saved_clients.truncate(max_known_clients);
         let mut groups = HashMap::new();
         let default_grp = Group {
             id: "default".into(),
@@ -203,6 +260,7 @@ impl ServerState {
                     idle_timeout_ms: None,
                     silence_on_idle: false,
                     status: StreamStatus::Idle,
+                    recovery: None,
                     eq_bands: ps.eq_bands.clone(),
                     eq_enabled: ps.eq_enabled,
                 },
@@ -225,11 +283,30 @@ impl ServerState {
                     idle_timeout_ms: None,
                     silence_on_idle: false,
                     status: StreamStatus::Idle,
+                    recovery: None,
                     eq_bands: vec![],
                     eq_enabled: true,
                 },
             );
         }
+
+        let mut announcements = AnnouncementScheduler::new(
+            AnnouncementLimits::default(),
+            groups.keys().cloned(),
+            SchedulerConfig::default(),
+        );
+        announcements.set_group_clients(
+            "default",
+            saved_clients
+                .iter()
+                .filter(|client| client.group_id == "default")
+                .map(|client| AnnouncementClient {
+                    client_id: client.id.clone(),
+                    generation: 0,
+                }),
+            Utc::now().timestamp_millis(),
+        );
+        let (announcement_controls, _) = broadcast::channel(256);
 
         Self {
             clients: RwLock::new(
@@ -252,6 +329,7 @@ impl ServerState {
                                 status: ClientStatus::Disconnected,
                                 connected_at: c.last_seen,
                                 protocol_version: 0,
+                                session_generation: 0,
                                 display_name: c.display_name.clone(),
                                 observability_enabled: c.observability_enabled,
                                 health: None,
@@ -261,18 +339,52 @@ impl ServerState {
                     })
                     .collect(),
             ),
+            client_lifecycle: Mutex::new(()),
+            max_known_clients,
+            client_removal_hook: RwLock::new(None),
+            next_client_generation: AtomicU64::new(1),
+            stream_status_hook: RwLock::new(None),
             groups: RwLock::new(groups),
+            announcements: Mutex::new(announcements),
+            announcement_controls,
             streams: RwLock::new(streams),
             events,
             start_time: Utc::now(),
             persistence,
-            saved_clients,
             saved_streams,
             transport: parking_lot::Mutex::new(TransportState {
                 mode: TransportMode::Tcp,
                 server_udp_port: 0,
             }),
             timezone: parking_lot::RwLock::new(None),
+        }
+    }
+
+    /// Register cleanup for client-labelled resources owned by the server binary.
+    pub fn set_client_removal_hook(&self, hook: Arc<ClientRemovalHook>) {
+        *self.client_removal_hook.write() = Some(hook);
+    }
+
+    fn notify_client_removed(&self, id: &str, generation: u64) {
+        if let Some(hook) = self.client_removal_hook.read().clone() {
+            hook(id, generation);
+        }
+    }
+
+    /// Register synchronization for stream-labelled resources owned by the
+    /// server binary, such as Prometheus gauges.
+    pub fn set_stream_status_hook(&self, hook: Arc<StreamStatusHook>) {
+        *self.stream_status_hook.write() = Some(hook);
+    }
+
+    fn notify_stream_status(
+        &self,
+        id: &str,
+        status: StreamStatus,
+        recovery: Option<StreamRecovery>,
+    ) {
+        if let Some(hook) = self.stream_status_hook.read().clone() {
+            hook(id, status, recovery);
         }
     }
 
@@ -290,6 +402,7 @@ impl ServerState {
     pub fn restore_groups(&self, persisted: Vec<PersistedGroup>) {
         let mut groups = self.groups.write();
         for pg in persisted {
+            self.announcements.lock().add_group(pg.id.clone());
             groups.entry(pg.id.clone()).or_insert_with(|| Group {
                 id: pg.id,
                 name: pg.name,
@@ -303,6 +416,12 @@ impl ServerState {
                     group.client_ids.push(client.id.clone());
                 }
             }
+        }
+        let group_ids: Vec<String> = groups.keys().cloned().collect();
+        drop(groups);
+        let now_ms = Utc::now().timestamp_millis();
+        for group_id in group_ids {
+            self.reconcile_announcement_group(&group_id, now_ms);
         }
     }
 
@@ -352,6 +471,27 @@ impl ServerState {
         store.save(&groups, &clients, &streams);
     }
 
+    fn announcement_clients_in_group(&self, group_id: &str) -> Vec<AnnouncementClient> {
+        self.clients
+            .read()
+            .values()
+            .filter(|client| client.group_id == group_id)
+            .map(|client| AnnouncementClient {
+                client_id: client.id.clone(),
+                generation: client.session_generation,
+            })
+            .collect()
+    }
+
+    fn reconcile_announcement_group(&self, group_id: &str, now_ms: i64) {
+        let clients = self.announcement_clients_in_group(group_id);
+        let events = self
+            .announcements
+            .lock()
+            .set_group_clients(group_id, clients, now_ms);
+        self.emit_announcement_events(events);
+    }
+
     // ── Client CRUD ───────────────────────────────────────────────────────
 
     /// Register a newly connected client, restoring persisted settings if available.
@@ -366,65 +506,111 @@ impl ServerState {
         addr: SocketAddr,
         protocol_version: u32,
     ) {
+        let _ =
+            self.try_client_connected(id, hostname, client_name, os, arch, addr, protocol_version);
+    }
+
+    /// Atomically admit a client without replacing an active session.
+    #[allow(clippy::too_many_arguments)]
+    pub fn try_client_connected(
+        &self,
+        id: impl Into<String>,
+        hostname: impl Into<String>,
+        client_name: impl Into<String>,
+        os: impl Into<String>,
+        arch: impl Into<String>,
+        addr: SocketAddr,
+        protocol_version: u32,
+    ) -> Result<u64, SoniumError> {
         let id = id.into();
+        validate_client_id(&id)?;
+        let _lifecycle = self.client_lifecycle.lock();
         let hostname = hostname.into();
 
-        // Restore settings from live state first, then the startup snapshot.
-        let existing = self.clients.read().get(&id).cloned();
-        let saved = self.saved_clients.iter().find(|c| c.id == id);
+        let (info, evicted) = {
+            let mut clients = self.clients.write();
+            let existing = clients.get(&id).cloned();
+            if existing.as_ref().is_some_and(ClientInfo::is_connected) {
+                return Err(SoniumError::Protocol(
+                    "client ID already has an active session".into(),
+                ));
+            }
 
-        let (volume, muted, latency_ms, group_id, display_name, observability_enabled) =
-            if let Some(c) = existing {
-                (
-                    c.volume,
-                    c.muted,
-                    c.latency_ms,
-                    c.group_id,
-                    c.display_name,
-                    c.observability_enabled,
-                )
-            } else if let Some(s) = saved {
-                (
-                    s.volume,
-                    s.muted,
-                    s.latency_ms,
-                    s.group_id.clone(),
-                    s.display_name.clone(),
-                    s.observability_enabled,
-                )
+            let evicted = if existing.is_none() && clients.len() >= self.max_known_clients {
+                let lru_id = clients
+                    .values()
+                    .filter(|client| !client.is_connected())
+                    .min_by_key(|client| client.connected_at)
+                    .map(|client| client.id.clone())
+                    .ok_or_else(|| {
+                        SoniumError::Protocol(
+                            "maximum known clients reached with no disconnected client to evict"
+                                .into(),
+                        )
+                    })?;
+                clients.remove(&lru_id)
             } else {
-                (100, false, 0, "default".into(), None, false)
+                None
             };
 
-        let info = ClientInfo {
-            id: id.clone(),
-            hostname: hostname.clone(),
-            client_name: client_name.into(),
-            os: os.into(),
-            arch: arch.into(),
-            remote_addr: addr.to_string(),
-            volume,
-            muted,
-            latency_ms,
-            group_id: group_id.clone(),
-            status: ClientStatus::Connected,
-            connected_at: Utc::now(),
-            protocol_version,
-            display_name,
-            observability_enabled,
-            health: None,
-            last_clock_offset_ms: None,
+            // The live registry already contains every retained startup entry.
+            // Once an entry is evicted or explicitly deleted, its old snapshot
+            // must not remain as a second restoration source.
+            let (volume, muted, latency_ms, group_id, display_name, observability_enabled) =
+                if let Some(client) = existing {
+                    (
+                        client.volume,
+                        client.muted,
+                        client.latency_ms,
+                        client.group_id,
+                        client.display_name,
+                        client.observability_enabled,
+                    )
+                } else {
+                    (100, false, 0, "default".into(), None, false)
+                };
+
+            let session_generation = self.next_client_generation.fetch_add(1, Ordering::Relaxed);
+            let info = ClientInfo {
+                id: id.clone(),
+                hostname: hostname.clone(),
+                client_name: client_name.into(),
+                os: os.into(),
+                arch: arch.into(),
+                remote_addr: addr.to_string(),
+                volume,
+                muted,
+                latency_ms,
+                group_id,
+                status: ClientStatus::Connected,
+                connected_at: Utc::now(),
+                protocol_version,
+                session_generation,
+                display_name,
+                observability_enabled,
+                health: None,
+                last_clock_offset_ms: None,
+            };
+            clients.insert(id.clone(), info.clone());
+            (info, evicted)
         };
 
         // Place into the correct group (restored or default).
         {
             let mut groups = self.groups.write();
+            if let Some(evicted) = &evicted {
+                if let Some(group) = groups.get_mut(&evicted.group_id) {
+                    group
+                        .client_ids
+                        .retain(|client_id| client_id != &evicted.id);
+                }
+            }
             // Remove from any group that already lists this client (stale from previous session).
             for g in groups.values_mut() {
                 g.client_ids.retain(|cid| cid != &id);
             }
-            let target = if groups.contains_key(&group_id) {
-                group_id.clone()
+            let target = if groups.contains_key(&info.group_id) {
+                info.group_id.clone()
             } else {
                 "default".into()
             };
@@ -433,42 +619,91 @@ impl ServerState {
             }
         }
 
-        self.clients.write().insert(id.clone(), info.clone());
+        let now_ms = Utc::now().timestamp_millis();
+        self.reconcile_announcement_group(&info.group_id, now_ms);
+        if let Some(evicted) = &evicted {
+            if evicted.group_id != info.group_id {
+                self.reconcile_announcement_group(&evicted.group_id, now_ms);
+            }
+        }
+
+        if let Some(evicted) = evicted {
+            self.events.emit(crate::ws::Event::ClientDeleted {
+                client_id: evicted.id.clone(),
+            });
+            self.notify_client_removed(&evicted.id, evicted.session_generation);
+        }
+        let session_generation = info.session_generation;
         self.events
             .emit(crate::ws::Event::ClientConnected { client: info });
         self.persist();
+        Ok(session_generation)
     }
 
     /// Mark a client as disconnected (keeps history in the registry).
     pub fn client_disconnected(&self, id: &str) {
-        let mut clients = self.clients.write();
-        if let Some(c) = clients.get_mut(id) {
-            c.status = ClientStatus::Disconnected;
+        let generation = self
+            .clients
+            .read()
+            .get(id)
+            .map(|client| client.session_generation);
+        if let Some(generation) = generation {
+            self.client_disconnected_generation(id, generation);
+        }
+    }
+
+    /// Mark only the matching admitted session as disconnected.
+    ///
+    /// The metric cleanup hook runs after releasing the state lock; its
+    /// generation lets the metric registry ignore stale cleanup after a
+    /// reconnect.
+    pub fn client_disconnected_generation(&self, id: &str, generation: u64) -> bool {
+        let disconnected = {
+            let mut clients = self.clients.write();
+            let Some(client) = clients.get_mut(id) else {
+                return false;
+            };
+            if client.session_generation != generation || !client.is_connected() {
+                return false;
+            }
+            client.status = ClientStatus::Disconnected;
+            client.connected_at = Utc::now();
+            true
+        };
+        if disconnected {
             self.events.emit(crate::ws::Event::ClientDisconnected {
                 client_id: id.into(),
             });
-            drop(clients);
+            self.notify_client_removed(id, generation);
             self.persist();
         }
+        disconnected
     }
 
     /// Permanently remove a disconnected client from the registry.
     /// Returns `false` if the client is not found or is still connected.
     pub fn delete_client(&self, client_id: &str) -> bool {
-        let mut clients = self.clients.write();
-        match clients.get(client_id) {
-            None => return false,
-            Some(c) if c.is_connected() => return false,
-            _ => {}
-        }
-        let info = clients.remove(client_id).unwrap();
+        let _lifecycle = self.client_lifecycle.lock();
+        let info = {
+            let mut clients = self.clients.write();
+            match clients.get(client_id) {
+                None => return false,
+                Some(c) if c.is_connected() => return false,
+                _ => {}
+            }
+            clients.remove(client_id).expect("client was checked above")
+        };
         // Remove from its group.
         if let Some(g) = self.groups.write().get_mut(&info.group_id) {
             g.client_ids.retain(|id| id != client_id);
         }
+        self.reconcile_announcement_group(&info.group_id, Utc::now().timestamp_millis());
+        // Emit while reconnects are still excluded so an old ClientDeleted
+        // event can never arrive after the replacement ClientConnected event.
         self.events.emit(crate::ws::Event::ClientDeleted {
             client_id: client_id.into(),
         });
+        self.notify_client_removed(client_id, info.session_generation);
         self.persist();
         true
     }
@@ -640,6 +875,10 @@ impl ServerState {
         if !groups.contains_key(group_id) {
             return false;
         }
+        if client.group_id == group_id {
+            return true;
+        }
+        let old_group_id = client.group_id.clone();
 
         // Remove from old group
         if let Some(old_grp) = groups.get_mut(&client.group_id) {
@@ -652,12 +891,15 @@ impl ServerState {
             }
         }
         client.group_id = group_id.into();
+        drop(clients);
+        drop(groups);
+        let now_ms = Utc::now().timestamp_millis();
+        self.reconcile_announcement_group(&old_group_id, now_ms);
+        self.reconcile_announcement_group(group_id, now_ms);
         self.events.emit(crate::ws::Event::ClientGroupChanged {
             client_id: client_id.into(),
             group_id: group_id.into(),
         });
-        drop(clients);
-        drop(groups);
         self.persist();
         true
     }
@@ -674,6 +916,7 @@ impl ServerState {
             client_ids: vec![],
         };
         self.groups.write().insert(id.clone(), grp.clone());
+        self.announcements.lock().add_group(id.clone());
         self.events
             .emit(crate::ws::Event::GroupCreated { group: grp });
         self.persist();
@@ -700,8 +943,14 @@ impl ServerState {
             self.events.emit(crate::ws::Event::GroupDeleted {
                 group_id: group_id.into(),
             });
+            let events = self
+                .announcements
+                .lock()
+                .remove_group(group_id, Utc::now().timestamp_millis());
+            self.emit_announcement_events(events);
             drop(groups);
             drop(clients);
+            self.reconcile_announcement_group("default", Utc::now().timestamp_millis());
             self.persist();
             true
         } else {
@@ -752,11 +1001,37 @@ impl ServerState {
     pub fn set_stream_status(&self, stream_id: &str, status: StreamStatus) {
         let mut streams = self.streams.write();
         if let Some(s) = streams.get_mut(stream_id) {
+            if status != StreamStatus::Recovering {
+                s.recovery = None;
+            }
             s.status = status.clone();
             self.events.emit(crate::ws::Event::StreamStatus {
                 stream_id: stream_id.into(),
-                status,
+                status: status.clone(),
+                recovery: None,
             });
+            drop(streams);
+            self.notify_stream_status(stream_id, status, None);
+        }
+    }
+
+    /// Mark a source as awaiting a reopen, with operator-visible retry context.
+    pub fn set_stream_recovering(&self, stream_id: &str, attempt: u32, retry_in_ms: u64) {
+        let mut streams = self.streams.write();
+        if let Some(s) = streams.get_mut(stream_id) {
+            s.status = StreamStatus::Recovering;
+            let recovery = StreamRecovery {
+                attempt,
+                retry_in_ms,
+            };
+            s.recovery = Some(recovery.clone());
+            self.events.emit(crate::ws::Event::StreamStatus {
+                stream_id: stream_id.into(),
+                status: StreamStatus::Recovering,
+                recovery: Some(recovery.clone()),
+            });
+            drop(streams);
+            self.notify_stream_status(stream_id, StreamStatus::Recovering, Some(recovery));
         }
     }
 
@@ -787,6 +1062,118 @@ impl ServerState {
 
     pub fn all_groups(&self) -> Vec<Group> {
         self.groups.read().values().cloned().collect()
+    }
+
+    // ── Announcements ─────────────────────────────────────────────────────
+
+    /// Admit a bounded, idempotent announcement intent and broadcast its
+    /// initial lifecycle state to authenticated WebSocket observers.
+    pub fn admit_announcement(
+        &self,
+        intent: AnnouncementIntent,
+        now_ms: i64,
+    ) -> Result<AnnouncementAdmission, AnnouncementError> {
+        for group_id in &intent.target_groups {
+            self.reconcile_announcement_group(group_id, now_ms);
+        }
+        let SchedulerAdmission { admission, events } =
+            self.announcements.lock().admit(intent, now_ms)?;
+        self.emit_announcement_events(events);
+        Ok(admission)
+    }
+
+    pub fn acknowledge_announcement(
+        &self,
+        id: &str,
+        group_id: &str,
+        lifecycle: AnnouncementLifecycle,
+    ) -> Result<(), AnnouncementError> {
+        self.acknowledge_announcement_at(id, group_id, lifecycle, Utc::now().timestamp_millis())
+    }
+
+    pub fn acknowledge_announcement_at(
+        &self,
+        id: &str,
+        group_id: &str,
+        lifecycle: AnnouncementLifecycle,
+        now_ms: i64,
+    ) -> Result<(), AnnouncementError> {
+        let events = self
+            .announcements
+            .lock()
+            .acknowledge(id, group_id, lifecycle, now_ms)?;
+        self.emit_announcement_events(events);
+        Ok(())
+    }
+
+    pub fn acknowledge_announcement_client_at(
+        &self,
+        id: &str,
+        group_id: &str,
+        client_id: &str,
+        generation: u64,
+        lifecycle: AnnouncementLifecycle,
+        now_ms: i64,
+    ) -> Result<(), AnnouncementError> {
+        let events = self.announcements.lock().acknowledge_client(
+            id,
+            group_id,
+            &AnnouncementClient {
+                client_id: client_id.into(),
+                generation,
+            },
+            lifecycle,
+            now_ms,
+        )?;
+        self.emit_announcement_events(events);
+        Ok(())
+    }
+
+    pub fn cancel_announcement(&self, id: &str) -> Result<(), AnnouncementError> {
+        let events = self
+            .announcements
+            .lock()
+            .cancel(id, Utc::now().timestamp_millis())?;
+        self.emit_announcement_events(events);
+        Ok(())
+    }
+
+    pub fn expire_announcements(&self, now_ms: i64) {
+        let events = self.announcements.lock().tick(now_ms);
+        self.emit_announcement_events(events);
+    }
+
+    pub fn all_announcements(&self) -> Vec<AnnouncementRecord> {
+        self.announcements.lock().records()
+    }
+
+    /// Subscribe a media session to bounded announcement controls.  Browser
+    /// lifecycle events remain on the existing EventBus and do not consume
+    /// this channel.
+    pub fn subscribe_announcement_controls(&self) -> broadcast::Receiver<AnnouncementControlV1> {
+        self.announcement_controls.subscribe()
+    }
+
+    pub fn pending_announcement_control(&self, group_id: &str) -> Option<AnnouncementControlV1> {
+        self.announcements.lock().pending_control(group_id)
+    }
+
+    fn emit_announcement_events(&self, events: SchedulerEvents) {
+        self.emit_announcement_transitions(events.transitions);
+        for control in events.controls {
+            let _ = self.announcement_controls.send(control);
+        }
+    }
+
+    fn emit_announcement_transitions(&self, transitions: Vec<AnnouncementTransition>) {
+        for transition in transitions {
+            self.events.emit(crate::ws::Event::AnnouncementLifecycle {
+                announcement_id: transition.announcement_id,
+                group_id: transition.group_id,
+                lifecycle: transition.lifecycle,
+                resume: transition.resume,
+            });
+        }
     }
 
     pub fn get_group(&self, id: &str) -> Option<Group> {
@@ -857,6 +1244,7 @@ impl ServerState {
                     idle_timeout_ms,
                     silence_on_idle,
                     status: StreamStatus::Idle,
+                    recovery: None,
                     eq_bands,
                     eq_enabled,
                 }
@@ -918,6 +1306,7 @@ impl ServerState {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::sync::{Arc, Mutex};
 
     fn state() -> Arc<ServerState> {
         Arc::new(ServerState::new(
@@ -928,12 +1317,270 @@ mod tests {
         ))
     }
 
+    fn state_with_known_client_limit(max_known_clients: usize) -> Arc<ServerState> {
+        Arc::new(ServerState::new_with_known_client_limit(
+            Arc::new(EventBus::new()),
+            None,
+            vec![],
+            vec![],
+            max_known_clients,
+        ))
+    }
+
     fn addr() -> SocketAddr {
         "127.0.0.1:50000".parse().unwrap()
     }
 
     fn connect(s: &ServerState, id: &str) {
         s.client_connected(id, "pi", "Sonium", "linux", "aarch64", addr(), 2);
+    }
+
+    #[test]
+    fn evicts_the_least_recently_seen_disconnected_client_at_known_client_capacity() {
+        let s = state_with_known_client_limit(2);
+        connect(&s, "active-client");
+        connect(&s, "old-client");
+        s.client_disconnected("old-client");
+
+        s.try_client_connected(
+            "new-client",
+            "new-pi",
+            "Sonium",
+            "linux",
+            "aarch64",
+            addr(),
+            2,
+        )
+        .expect("a disconnected LRU client can be replaced");
+
+        assert!(s.get_client("old-client").is_none());
+        assert!(s.get_client("active-client").unwrap().is_connected());
+        assert!(s.get_client("new-client").unwrap().is_connected());
+        assert!(!s
+            .get_group("default")
+            .unwrap()
+            .client_ids
+            .contains(&"old-client".to_string()));
+    }
+
+    #[test]
+    fn rejects_a_duplicate_active_id_without_replacing_its_session_state() {
+        let s = state();
+        s.try_client_connected(
+            "living-room-1",
+            "first-host",
+            "Sonium",
+            "linux",
+            "aarch64",
+            addr(),
+            2,
+        )
+        .expect("first session admitted");
+
+        assert!(s
+            .try_client_connected(
+                "living-room-1",
+                "second-host",
+                "Sonium",
+                "linux",
+                "aarch64",
+                addr(),
+                2,
+            )
+            .is_err());
+        assert_eq!(
+            s.get_client("living-room-1").unwrap().hostname,
+            "first-host"
+        );
+    }
+
+    #[test]
+    fn stale_disconnect_generation_cannot_mark_a_reconnected_client_offline() {
+        let s = state();
+        let first = s
+            .try_client_connected(
+                "generation-client",
+                "first-host",
+                "Sonium",
+                "linux",
+                "aarch64",
+                addr(),
+                2,
+            )
+            .expect("first session admitted");
+        assert!(s.client_disconnected_generation("generation-client", first));
+
+        let second = s
+            .try_client_connected(
+                "generation-client",
+                "second-host",
+                "Sonium",
+                "linux",
+                "aarch64",
+                addr(),
+                2,
+            )
+            .expect("reconnect admitted after the first session exits");
+
+        assert_ne!(first, second);
+        assert!(!s.client_disconnected_generation("generation-client", first));
+        assert!(s.get_client("generation-client").unwrap().is_connected());
+    }
+
+    #[test]
+    fn delete_and_reconnect_keep_the_replacement_membership_and_event_order() {
+        use std::sync::mpsc;
+        use std::time::Duration;
+
+        let s = state();
+        connect(&s, "generation-client");
+        s.client_disconnected("generation-client");
+        let mut events = s.events().subscribe();
+        let lifecycle = s.client_lifecycle.lock();
+
+        let (delete_done_tx, delete_done_rx) = mpsc::channel();
+        let deleting = s.clone();
+        std::thread::spawn(move || {
+            delete_done_tx
+                .send(deleting.delete_client("generation-client"))
+                .unwrap();
+        });
+
+        let (reconnect_done_tx, reconnect_done_rx) = mpsc::channel();
+        let reconnecting = s.clone();
+        std::thread::spawn(move || {
+            reconnect_done_tx
+                .send(reconnecting.try_client_connected(
+                    "generation-client",
+                    "replacement-host",
+                    "Sonium",
+                    "linux",
+                    "aarch64",
+                    addr(),
+                    2,
+                ))
+                .unwrap();
+        });
+
+        drop(lifecycle);
+        let deleted = delete_done_rx.recv_timeout(Duration::from_secs(1)).unwrap();
+        let reconnected = reconnect_done_rx
+            .recv_timeout(Duration::from_secs(1))
+            .unwrap()
+            .expect("replacement session is admitted");
+
+        // Both operations may acquire the lifecycle mutex first. If reconnect
+        // wins, delete observes the replacement and is rejected; if delete
+        // wins, it emits ClientDeleted while still holding the mutex, followed
+        // by reconnect's ClientConnected event. In either case, the mutex
+        // guarantees that the operations cannot interleave.
+        let first = events.try_recv().unwrap();
+        if matches!(
+            first,
+            crate::ws::Event::ClientDeleted { ref client_id }
+                if client_id == "generation-client"
+        ) {
+            assert!(deleted);
+            assert!(matches!(
+                events.try_recv().unwrap(),
+                crate::ws::Event::ClientConnected { ref client }
+                    if client.hostname == "replacement-host"
+            ));
+        } else {
+            assert!(!deleted);
+            assert!(matches!(
+                first,
+                crate::ws::Event::ClientConnected { ref client }
+                    if client.hostname == "replacement-host"
+            ));
+            assert!(events.try_recv().is_err());
+        }
+
+        let replacement = s.get_client("generation-client").unwrap();
+        assert_eq!(replacement.hostname, "replacement-host");
+        assert!(replacement.is_connected());
+        assert!(s
+            .get_group("default")
+            .unwrap()
+            .client_ids
+            .contains(&"generation-client".to_string()));
+
+        assert_eq!(reconnected, replacement.session_generation);
+    }
+
+    #[test]
+    fn removal_hook_runs_on_disconnect_delete_and_lru_eviction() {
+        let s = state_with_known_client_limit(1);
+        let removed = Arc::new(Mutex::new(Vec::<String>::new()));
+        let observed = removed.clone();
+        s.set_client_removal_hook(Arc::new(move |id, _generation| {
+            observed.lock().unwrap().push(id.to_owned())
+        }));
+
+        connect(&s, "first-client");
+        s.client_disconnected("first-client");
+        assert!(s.delete_client("first-client"));
+
+        connect(&s, "evicted-client");
+        s.client_disconnected("evicted-client");
+        s.try_client_connected(
+            "replacement-client",
+            "pi",
+            "Sonium",
+            "linux",
+            "aarch64",
+            addr(),
+            2,
+        )
+        .expect("disconnected client can be evicted");
+
+        assert_eq!(
+            *removed.lock().unwrap(),
+            vec![
+                "first-client",
+                "first-client",
+                "evicted-client",
+                "evicted-client"
+            ]
+        );
+    }
+
+    #[test]
+    fn unsafe_persisted_client_ids_are_not_restored() {
+        let saved_clients = vec![PersistedClient {
+            id: "living room/speaker".into(),
+            hostname: "pi".into(),
+            display_name: None,
+            volume: 100,
+            muted: false,
+            latency_ms: 0,
+            observability_enabled: false,
+            group_id: "default".into(),
+            last_seen: Utc::now(),
+        }];
+        let s = ServerState::new(Arc::new(EventBus::new()), None, saved_clients, vec![]);
+
+        assert!(
+            s.get_client("living room/speaker").is_none(),
+            "an unadmitted ID must not occupy persistent server state"
+        );
+    }
+
+    #[test]
+    fn unsafe_connected_client_ids_are_not_added_or_persisted() {
+        let s = state();
+
+        s.client_connected(
+            "living room/speaker",
+            "pi",
+            "Sonium",
+            "linux",
+            "aarch64",
+            addr(),
+            2,
+        );
+
+        assert!(s.all_clients().is_empty());
     }
 
     #[test]
@@ -1042,6 +1689,38 @@ mod tests {
     }
 
     #[test]
+    fn delete_client_with_persistence_releases_the_client_lock_before_saving() {
+        use std::sync::mpsc;
+        use std::time::Duration;
+        use tempfile::tempdir;
+
+        let dir = tempdir().unwrap();
+        let persistence = Arc::new(PersistenceStore::new(dir.path()));
+        let s = Arc::new(ServerState::new(
+            Arc::new(EventBus::new()),
+            Some(persistence.clone()),
+            vec![],
+            vec![],
+        ));
+        connect(&s, "pi-1");
+        s.client_disconnected("pi-1");
+
+        let (done_tx, done_rx) = mpsc::channel();
+        let deleting = s.clone();
+        std::thread::spawn(move || done_tx.send(deleting.delete_client("pi-1")).unwrap());
+
+        assert!(
+            done_rx.recv_timeout(Duration::from_secs(1)).unwrap(),
+            "deletion must finish instead of recursively locking clients during persistence"
+        );
+        let (_, clients, _) = persistence.load();
+        assert!(
+            clients.is_empty(),
+            "deleted client must not remain persisted"
+        );
+    }
+
+    #[test]
     fn cannot_delete_connected_client() {
         let s = state();
         connect(&s, "pi-1");
@@ -1084,5 +1763,109 @@ mod tests {
         assert!(c.muted);
         assert_eq!(c.latency_ms, 50);
         assert_eq!(c.display_name.as_deref(), Some("Kitchen"));
+    }
+
+    #[test]
+    fn deleted_or_evicted_client_does_not_restore_the_startup_snapshot() {
+        let saved_client = PersistedClient {
+            id: "pi-1".into(),
+            hostname: "pi".into(),
+            display_name: Some("Stale Name".into()),
+            volume: 23,
+            muted: true,
+            latency_ms: 50,
+            observability_enabled: true,
+            group_id: "default".into(),
+            last_seen: Utc::now(),
+        };
+
+        let deleted = ServerState::new(
+            Arc::new(EventBus::new()),
+            None,
+            vec![saved_client.clone()],
+            vec![],
+        );
+        assert!(deleted.delete_client("pi-1"));
+        connect(&deleted, "pi-1");
+        let client = deleted.get_client("pi-1").unwrap();
+        assert_eq!(client.volume, 100);
+        assert!(!client.muted);
+        assert_eq!(client.display_name, None);
+
+        let evicted = ServerState::new_with_known_client_limit(
+            Arc::new(EventBus::new()),
+            None,
+            vec![saved_client],
+            vec![],
+            1,
+        );
+        connect(&evicted, "replacement");
+        evicted.client_disconnected("replacement");
+        connect(&evicted, "pi-1");
+        let client = evicted.get_client("pi-1").unwrap();
+        assert_eq!(client.volume, 100);
+        assert!(!client.muted);
+        assert_eq!(client.display_name, None);
+    }
+
+    #[test]
+    fn recovery_event_matches_rest_state_and_includes_retry_context() {
+        let s = state();
+        let mut events = s.events().subscribe();
+
+        s.set_stream_recovering("default", 3, 200);
+
+        let stream = s
+            .all_streams()
+            .into_iter()
+            .find(|stream| stream.id == "default")
+            .unwrap();
+        assert_eq!(stream.status, StreamStatus::Recovering);
+        assert_eq!(
+            stream.recovery,
+            Some(StreamRecovery {
+                attempt: 3,
+                retry_in_ms: 200,
+            })
+        );
+        match events.try_recv().unwrap() {
+            crate::ws::Event::StreamStatus {
+                stream_id,
+                status,
+                recovery,
+            } => {
+                assert_eq!(stream_id, "default");
+                assert_eq!(status, StreamStatus::Recovering);
+                assert_eq!(recovery, stream.recovery);
+            }
+            event => panic!("unexpected event: {event:?}"),
+        }
+    }
+
+    #[test]
+    fn stream_status_hook_receives_recovery_context_for_metrics() {
+        let s = state();
+        let observed = Arc::new(Mutex::new(Vec::new()));
+        let hook_observed = observed.clone();
+        s.set_stream_status_hook(Arc::new(move |id, status, recovery| {
+            hook_observed
+                .lock()
+                .unwrap()
+                .push((id.to_owned(), status, recovery));
+        }));
+
+        s.set_stream_recovering("default", 2, 100);
+
+        assert_eq!(
+            *observed.lock().unwrap(),
+            vec![(
+                "default".to_owned(),
+                StreamStatus::Recovering,
+                Some(StreamRecovery {
+                    attempt: 2,
+                    retry_in_ms: 100,
+                }),
+            )]
+        );
     }
 }

@@ -9,8 +9,9 @@ mod streamreader;
 use anyhow::Context;
 use clap::Parser;
 use socket2::{SockRef, TcpKeepalive};
-use std::{path::PathBuf, sync::Arc};
+use std::{io::Read, net::SocketAddr, path::PathBuf, sync::Arc};
 use tokio::net::{TcpListener, TcpStream, UdpSocket};
+use tokio::sync::Semaphore;
 use tokio::task::JoinHandle;
 use tokio_util::sync::CancellationToken;
 use tracing::{info, warn};
@@ -61,16 +62,40 @@ struct Cli {
     #[arg(long, env = "SONIUM_NO_MDNS")]
     no_mdns: bool,
 
-    /// Initialize admin password and exit (only if no users exist).
+    /// Read the initial admin password from standard input and exit (only if no users exist).
+    ///
+    /// This intentionally accepts no value: passing a password on the command
+    /// line would expose it to process inspection and shell history.
     #[arg(long)]
-    init_admin: Option<String>,
+    init_admin: bool,
+
+    /// Parse and semantically validate the explicit configuration, then exit.
+    #[arg(long, conflicts_with = "init_admin")]
+    check_config: bool,
+}
+
+fn read_initial_admin_password(mut reader: impl Read) -> anyhow::Result<String> {
+    let mut password = String::new();
+    reader
+        .read_to_string(&mut password)
+        .context("could not read the initial admin password from standard input")?;
+    let password = password.trim_end_matches(['\r', '\n']).to_owned();
+    if password.is_empty() {
+        anyhow::bail!("initial admin password from standard input must not be empty");
+    }
+    Ok(password)
 }
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
     let cli = Cli::parse();
 
-    let mut cfg = ServerConfig::from_file_or_default(&cli.config);
+    let mut cfg = if cli.check_config {
+        ServerConfig::from_file(&cli.config)
+    } else {
+        ServerConfig::from_file_or_default(&cli.config)
+    }
+    .with_context(|| format!("cannot load configuration {}", cli.config.display()))?;
 
     if let Some(p) = cli.stream_port {
         cfg.server.stream_port = p;
@@ -87,6 +112,22 @@ async fn main() -> anyhow::Result<()> {
     if cli.no_mdns {
         cfg.server.mdns = false;
     }
+    cfg.validate()
+        .with_context(|| format!("invalid configuration {}", cli.config.display()))?;
+    if cli.check_config {
+        println!("configuration is valid: {}", cli.config.display());
+        return Ok(());
+    }
+    let audio_bind = cfg
+        .server
+        .bind
+        .parse()
+        .expect("validated server.bind must be an IP address");
+    let control_bind = cfg
+        .server
+        .control_bind
+        .parse()
+        .expect("validated server.control_bind must be an IP address");
 
     let config_dir = cli
         .config
@@ -152,26 +193,30 @@ async fn main() -> anyhow::Result<()> {
     let shutdown = CancellationToken::new();
 
     // One-time initialization if requested.
-    if let Some(password) = cli.init_admin {
-        let _ = UserStore::load_or_init(&config_dir, Some(password));
+    if cli.init_admin {
+        let password = read_initial_admin_password(std::io::stdin().lock())?;
+        UserStore::load_or_init(&config_dir, Some(password))?;
         info!("Admin account initialized (if it didn't exist).");
         return Ok(());
     }
 
     // Auth: load users from config directory.
-    let auth = UserStore::load_or_init(&config_dir, None);
+    let auth = UserStore::load_or_init(&config_dir, None)?;
 
     // State persistence: load from sonium-state.json.
     let persistence = Arc::new(PersistenceStore::new(&config_dir));
     let (saved_groups, saved_clients, saved_streams) = persistence.load();
 
     let events = Arc::new(EventBus::new());
-    let state = Arc::new(ServerState::new(
+    let state = Arc::new(ServerState::new_with_known_client_limit(
         events,
         Some(persistence),
         saved_clients,
         saved_streams,
+        cfg.server.max_known_clients,
     ));
+    state.set_client_removal_hook(Arc::new(metrics::forget_client));
+    state.set_stream_status_hook(Arc::new(metrics::update_stream_status));
     let registry = new_registry();
 
     // Auto-assign a UDP port when the transport mode requires it but udp_port was left at 0.
@@ -236,16 +281,38 @@ async fn main() -> anyhow::Result<()> {
         });
     }
 
+    // Announcement deadlines must progress even when the REST API is idle and
+    // every target client is offline.  The scheduler itself is deterministic;
+    // this task only supplies wall-clock observations.
+    {
+        let state = state.clone();
+        let cancel = shutdown.clone();
+        tokio::spawn(async move {
+            let mut interval = tokio::time::interval(Duration::from_millis(50));
+            interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+            loop {
+                tokio::select! {
+                    _ = interval.tick() => {
+                        state.expire_announcements(
+                            sonium_sync::time_provider::now_us() / 1_000,
+                        );
+                    }
+                    _ = cancel.cancelled() => break,
+                }
+            }
+        });
+    }
+
     // ── HTTP control server (REST API + embedded web UI) ──────────────────
     {
         let state = state.clone();
         let auth = auth.clone();
         let config_path = cli.config.clone();
-        let port = cfg.server.control_port;
+        let addr = SocketAddr::new(control_bind, cfg.server.control_port);
         let cancel = shutdown.clone();
         tokio::spawn(async move {
             tokio::select! {
-                result = control_server::run(state, auth, config_path, None, port) => {
+                result = control_server::run(state, auth, config_path, None, addr) => {
                     if let Err(e) = result {
                         warn!("Control server error: {e}");
                     }
@@ -278,7 +345,7 @@ async fn main() -> anyhow::Result<()> {
 
     // ── UDP socket for RTP/UDP media delivery (Phase 2) ──────────────────
     let udp_socket: Option<Arc<UdpSocket>> = if effective_udp_port > 0 {
-        let udp_addr = format!("{}:{}", cfg.server.bind, effective_udp_port);
+        let udp_addr = SocketAddr::new(audio_bind, effective_udp_port);
         match UdpSocket::bind(&udp_addr).await {
             Ok(sock) => {
                 info!("RTP/UDP media socket bound to {udp_addr}");
@@ -303,11 +370,12 @@ async fn main() -> anyhow::Result<()> {
     }
 
     // ── TCP listener for audio clients ────────────────────────────────────
-    let addr = format!("{}:{}", cfg.server.bind, cfg.server.stream_port);
+    let addr = SocketAddr::new(audio_bind, cfg.server.stream_port);
     let listener = TcpListener::bind(&addr)
         .await
         .with_context(|| format!("cannot bind to {addr}"))?;
     info!("Listening for audio clients on {addr}");
+    let session_capacity = Arc::new(Semaphore::new(cfg.server.max_clients));
 
     // ── Accept loop with graceful shutdown ─────────────────────────────────
     let shutdown_signal = shutdown_signal();
@@ -317,6 +385,13 @@ async fn main() -> anyhow::Result<()> {
         tokio::select! {
             accept = listener.accept() => {
                 let (stream, peer) = accept?;
+                let permit = match session::ClientSessionPermit::try_acquire(session_capacity.clone()) {
+                    Ok(permit) => permit,
+                    Err(error) => {
+                        warn!(%peer, %error, "Rejecting client: session capacity reached");
+                        continue;
+                    }
+                };
                 let _ = stream.set_nodelay(true);
                 configure_tcp_stream(&stream);
                 info!(%peer, "New client connected");
@@ -328,7 +403,7 @@ async fn main() -> anyhow::Result<()> {
                 let nack_rtr = nack_router.clone();
                 tokio::spawn(async move {
                     tokio::select! {
-                        result = session::handle(stream, peer, registry, session_cfg, state, udp_sock, nack_rtr) => {
+                        result = session::handle(stream, peer, registry, session_cfg, state, udp_sock, nack_rtr, permit) => {
                             if let Err(e) = result {
                                 warn!(%peer, "Session error: {e}");
                             }
@@ -424,28 +499,22 @@ fn spawn_stream(
     let reg2 = registry.clone();
 
     let handle = tokio::spawn(async move {
-        metrics::STREAM_STATUS
-            .with_label_values(&[&stream_cfg.id])
-            .set(1);
-        state2.set_stream_status(&stream_cfg.id, sonium_control::state::StreamStatus::Playing);
+        state2.set_stream_status(&stream_cfg.id, sonium_control::state::StreamStatus::Idle);
         tokio::select! {
-            result = streamreader::run(bc, stream_cfg.clone(), state2, reg2) => {
+            result = streamreader::run(bc, stream_cfg.clone(), state2, reg2, task_cancel.clone()) => {
                 if let Err(e) = result {
                     warn!("[{}] Stream reader exited: {e}", stream_cfg.id);
-                    metrics::STREAM_STATUS.with_label_values(&[&stream_cfg.id]).set(-1);
+                    state3.set_stream_status(&stream_cfg.id, sonium_control::state::StreamStatus::Error);
                 } else {
-                    metrics::STREAM_STATUS.with_label_values(&[&stream_cfg.id]).set(0);
+                    state3.set_stream_status(&stream_cfg.id, sonium_control::state::StreamStatus::Idle);
                 }
-                state3.set_stream_status(&stream_cfg.id, sonium_control::state::StreamStatus::Idle);
             }
             _ = task_cancel.cancelled() => {
                 info!("[{}] Stream reader reloading", stream_cfg.id);
-                metrics::STREAM_STATUS.with_label_values(&[&stream_cfg.id]).set(0);
                 state3.set_stream_status(&stream_cfg.id, sonium_control::state::StreamStatus::Idle);
             }
             _ = shutdown.cancelled() => {
                 info!("[{}] Stream reader shutting down", stream_cfg.id);
-                metrics::STREAM_STATUS.with_label_values(&[&stream_cfg.id]).set(0);
                 state3.set_stream_status(&stream_cfg.id, sonium_control::state::StreamStatus::Idle);
             }
         }
@@ -472,5 +541,111 @@ async fn shutdown_signal() {
     #[cfg(not(unix))]
     {
         ctrl_c.await.ok();
+    }
+}
+
+#[cfg(test)]
+mod cli_tests {
+    use super::{
+        new_registry, read_initial_admin_password, spawn_stream, Cli, StreamRuntimeConfig,
+    };
+    use clap::Parser;
+    use std::io::Cursor;
+    use std::sync::Arc;
+
+    #[test]
+    fn init_admin_is_a_valueless_stdin_flag() {
+        let cli = Cli::try_parse_from(["sonium-server", "--init-admin"])
+            .expect("the bootstrap flag must not require a password argument");
+        assert!(cli.init_admin);
+        assert!(
+            Cli::try_parse_from(["sonium-server", "--init-admin", "plaintext-password"]).is_err()
+        );
+    }
+
+    #[test]
+    fn init_admin_password_is_read_from_stdin_without_retaining_newlines() {
+        let password = read_initial_admin_password(Cursor::new(b"stdin-secret\r\n"))
+            .expect("a non-empty stdin password must be accepted");
+
+        assert_eq!(password, "stdin-secret");
+    }
+
+    #[test]
+    fn check_config_is_a_valueless_validation_flag() {
+        let cli = Cli::try_parse_from([
+            "sonium-server",
+            "--config",
+            "existing.toml",
+            "--check-config",
+        ])
+        .expect("the config validation flag must parse without a value");
+
+        assert!(cli.check_config);
+        assert!(!cli.init_admin);
+    }
+
+    #[tokio::test]
+    async fn empty_source_never_announces_playing_before_first_frame_or_recovery() {
+        use sonium_common::config::StreamSource;
+        use sonium_control::state::StreamStatus;
+        use sonium_control::{EventBus, ServerState};
+        use tokio_util::sync::CancellationToken;
+
+        let state = Arc::new(ServerState::new(
+            Arc::new(EventBus::new()),
+            None,
+            vec![],
+            vec![],
+        ));
+        let mut events = state.events().subscribe();
+        let source_path =
+            std::env::temp_dir().join(format!("sonium-empty-{}", uuid::Uuid::new_v4()));
+        std::fs::write(&source_path, []).unwrap();
+        let stream = StreamSource {
+            id: "missing-source-status-test".into(),
+            source: source_path.display().to_string(),
+            codec: "pcm".into(),
+            sample_format: sonium_common::SampleFormat::new(8_000, 16, 1),
+            chunk_ms: Some(10),
+            ..StreamSource::default()
+        };
+        let shutdown = CancellationToken::new();
+        let (cancel, handle) = spawn_stream(
+            stream,
+            StreamRuntimeConfig {
+                effective_buffer_ms: 200,
+                buffer_ms_overridden: false,
+                effective_chunk_ms: 10,
+                chunk_ms_overridden: true,
+            },
+            new_registry(),
+            state,
+            shutdown,
+        );
+
+        let mut announced_playing = false;
+        loop {
+            let event = tokio::time::timeout(std::time::Duration::from_secs(2), events.recv())
+                .await
+                .expect("missing source did not enter recovery")
+                .unwrap();
+            if let sonium_control::ws::Event::StreamStatus { status, .. } = event {
+                if status == StreamStatus::Playing {
+                    announced_playing = true;
+                }
+                if status == StreamStatus::Recovering {
+                    break;
+                }
+            }
+        }
+        cancel.cancel();
+        handle.await.unwrap();
+        std::fs::remove_file(source_path).unwrap();
+
+        assert!(
+            !announced_playing,
+            "a stream must not expose playing until the reader produces a frame"
+        );
     }
 }

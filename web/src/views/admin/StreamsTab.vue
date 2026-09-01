@@ -1006,7 +1006,7 @@ async function restartServer() {
               {{ s.codec.toUpperCase() }} · {{ s.format }}
               </p>
             </div>
-            <StreamBadge :status="s.status" :codec="s.codec" />
+            <StreamBadge :status="s.status" :codec="s.codec" :recovery="s.recovery" />
           </div>
 
           <button v-if="auth.isAdmin" @click="editStream(s)"
@@ -1111,7 +1111,7 @@ async function restartServer() {
                           @click="addToMeta(s.id)"
                           class="meta-stream-btn"
                         >
-                          <StreamBadge :status="s.status" :codec="s.codec" />
+                          <StreamBadge :status="s.status" :codec="s.codec" :recovery="s.recovery" />
                           <span class="flex-1 text-left truncate" style="font-size:12px;">
                             {{ s.display_name || s.id }}
                           </span>

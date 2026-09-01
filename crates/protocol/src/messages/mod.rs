@@ -1,3 +1,4 @@
+pub mod announcement;
 pub mod client_info;
 pub mod codec_header;
 pub mod error;
@@ -24,6 +25,7 @@ use sonium_common::SoniumError;
 /// A fully parsed message including its decoded payload.
 #[derive(Debug, Clone)]
 pub enum Message {
+    AnnouncementControl(AnnouncementControlV1),
     Hello(Hello),
     ServerSettings(ServerSettings),
     ClientInfo(ClientInfo),
@@ -38,6 +40,7 @@ pub enum Message {
 impl Message {
     pub fn message_type(&self) -> MessageType {
         match self {
+            Self::AnnouncementControl(_) => MessageType::AnnouncementControl,
             Self::Hello(_) => MessageType::Hello,
             Self::ServerSettings(_) => MessageType::ServerSettings,
             Self::ClientInfo(_) => MessageType::ClientInfo,
@@ -53,6 +56,9 @@ impl Message {
     /// Deserialize a message given a parsed header and its raw payload bytes.
     pub fn from_payload(hdr: &MessageHeader, payload: &[u8]) -> sonium_common::error::Result<Self> {
         match hdr.msg_type {
+            MessageType::AnnouncementControl => Ok(Self::AnnouncementControl(
+                AnnouncementControlV1::decode(payload)?,
+            )),
             MessageType::Hello => Ok(Self::Hello(Hello::decode(payload)?)),
             MessageType::ServerSettings => {
                 Ok(Self::ServerSettings(ServerSettings::decode(payload)?))
@@ -90,6 +96,7 @@ impl Message {
 
     fn encode_payload(&self) -> Vec<u8> {
         match self {
+            Self::AnnouncementControl(m) => m.encode(),
             Self::Hello(m) => m.encode(),
             Self::ServerSettings(m) => m.encode(),
             Self::ClientInfo(m) => m.encode(),
@@ -102,3 +109,7 @@ impl Message {
         }
     }
 }
+pub use announcement::{
+    AnnouncementControlV1, AnnouncementDuckingV1, AnnouncementIntentMetadataV1,
+    AnnouncementLifecycle, AnnouncementPriorityV1, AnnouncementResumeV1,
+};

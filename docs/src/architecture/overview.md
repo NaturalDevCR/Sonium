@@ -86,5 +86,6 @@ TCP control socket + optional UDP media socket
 5. **Transport migration-friendly** — TCP stays as the stable compatibility path
    while RTP/UDP, ARQ/FEC, and future QUIC DATAGRAM evolve behind the
    `MediaSender` abstraction.
-6. **Migration-friendly** — optional Snapcast compatibility mode lets existing
-   Snapcast clients connect during migration (see configuration docs).
+6. **Migration-friendly** — optional Snapcast discovery mode can assist a
+   migration; verify each client/version because full drop-in compatibility is
+   not claimed (see configuration docs).

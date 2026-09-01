@@ -1,7 +1,17 @@
 # Configuration
 
-Sonium works **without any configuration file**. All defaults are chosen to be
-immediately useful on a typical home network.
+Sonium can use defaults when no configuration file exists, but a server still
+needs an initial administrator (`--init-admin`) before it can start. Once an
+explicit `sonium.toml` exists, it is strict: malformed TOML, unknown keys,
+invalid addresses, unsafe port combinations, and invalid audio timing values
+stop startup instead of falling back to defaults.
+
+`--init-admin` is a flag with no password argument. Provide the password on
+standard input, for example `printf '%s' "$SONIUM_INIT_ADMIN_PASSWORD" |
+sonium-server --init-admin`. Releases that accepted
+`--init-admin PASSWORD` no longer do so, because command-line arguments can be
+read from process inspection and shell history. Update automation to feed stdin
+or an inherited protected file descriptor; do not restore the old argument form.
 
 If you need to customise behaviour, create a `sonium.toml` file in the working
 directory where you run `sonium-server` (typically `/etc/sonium/sonium.toml`
@@ -10,10 +20,17 @@ when installed via the Linux installer).
 ## Server — `sonium.toml`
 
 ```toml
+# Timezone for log timestamps and web UI display. It is a root key and must
+# appear before the first TOML table.
+timezone = "America/Costa_Rica"
+
 [server]
 bind            = "0.0.0.0"   # Listen on all interfaces
+control_bind    = "127.0.0.1" # Web UI/API/metrics; keep local by default
 stream_port     = 1710        # Audio stream port (Sonium default)
 control_port    = 1711        # HTTP/WS control API and web UI
+max_clients     = 64          # 1–256 active sessions, including handshakes
+max_known_clients = 256       # Remembered clients; max_clients–1024
 mdns            = true        # Advertise via mDNS for zero-config discovery
 snapcast_compat = false       # Set true to also advertise _snapcast._tcp mDNS
 
@@ -31,8 +48,8 @@ step_down_ms  = 40            # Decrease step when playback remains stable
 cooldown_ms   = 8000          # Minimum delay between auto adjustments
 
 [server.transport]
-mode     = "tcp"              # "tcp" | "rtp_udp" | "quic_dgram"
-udp_port = 0                  # Server UDP port for RTP (0 = same as stream_port)
+mode     = "tcp"              # "tcp" | "rtp_udp" | "rist" | "quic_dgram"
+udp_port = 0                  # Must be 0 for tcp/quic_dgram; rtp_udp/rist use 0 = stream_port + 2
 
 [[streams]]
 id        = "default"
@@ -50,12 +67,62 @@ silence_on_idle = true   # Optional: emit silence while idle
 # source = "/tmp/kitchen.fifo"
 # codec  = "flac"
 
-# Timezone for log timestamps and web UI display
-timezone = "America/Costa_Rica"
-
 [log]
 level = "info"  # "trace" | "debug" | "info" | "warn" | "error"
 ```
+
+### Trusted-LAN boundary and control bind
+
+This configuration is for a trusted LAN. `server.bind` is the audio listener;
+Sonium does not encrypt or authenticate that media path. Never expose it to the
+Internet or through an untrusted routed network.
+
+The web UI, REST API, WebSocket endpoint, and metrics endpoint use
+`server.control_bind`, not `server.bind`. The default is `127.0.0.1`, so a
+fresh install is administered locally. To administer from a trusted LAN host,
+set `control_bind` to a specific private address (preferred) or `0.0.0.0`, then
+apply a host firewall rule that permits only the intended administrator hosts.
+This is an explicit exposure decision; JWT login does not turn the deployment
+into a TLS or authenticated-media service.
+
+### Account storage and migration
+
+The account database is `users.json` next to `sonium.toml`. On Unix Sonium
+keeps the directory at `0700` and writes the account file atomically at `0600`.
+It includes password hashes and the persistent JWT signing secret, so keep it
+on durable local storage and never copy it into TOML, Compose files, URLs,
+logs, or source control.
+
+Existing account files that predate `session_version` remain readable: missing
+values are treated as `0` and are written back on the next successful startup.
+Tokens issued before session versions were added do not carry that claim and
+must be replaced by signing in again. Afterwards, a password, role, or account
+deletion change invalidates that user's earlier tokens, including after a
+restart. A present-but-corrupt, unreadable, or semantically invalid `users.json`
+is fatal and is not replaced; restore it from a known-good backup before
+retrying.
+
+### Initial-admin bootstrap
+
+Run the one-time bootstrap locally before the first ordinary server start. The
+server reads its only input from standard input only when `--init-admin` is
+present, then exits; normal server startup never reads stdin for a password.
+The Docker, source, Windows, and Linux-installer procedures all use this same
+stdin contract. Keep any temporary secret in memory only, clear it immediately
+after success or failure, and never place it in a command argument, TOML file,
+Compose file, shell history, log, or source control.
+
+### Legacy installer configuration
+
+Phase 1 accepts timing keys only in `[server.audio]`. The Linux installer
+preflights an existing configuration with Python 3.11+ `tomllib` before it
+changes binaries or systemd. If it finds legacy `buffer_ms`, `chunk_ms`, or
+`output_prefill_ms` keys directly under `[server]`, or cannot parse the
+existing TOML, it aborts without stopping the current service. Move those
+values to `[server.audio]`, fix any TOML syntax error, and rerun the installer.
+If the host lacks Python 3.11+ with `tomllib`, install or enable it first; this
+deliberate stop avoids restarting a healthy service with a strict-config
+startup failure.
 
 ### Audio Timing
 
@@ -71,7 +138,7 @@ most networks.
 | Wired LAN   | 0–50        | Zero-config if all devices use wired Ethernet |
 | Wi-Fi LAN   | 100–200     | Default; handles most Wi-Fi jitter |
 | Mesh/PLC    | 200–400     | Powerline or mesh Wi-Fi with higher latency |
-| Internet    | 500–1000    | Only for WAN streaming (not recommended) |
+| Internet    | N/A         | Unsupported in Phase 1; do not expose media to a WAN |
 
 `output_prefill_ms` is separate from `buffer_ms`. `buffer_ms` absorbs network
 jitter; `output_prefill_ms` keeps the client's local audio-device ring fed. Use
@@ -124,8 +191,13 @@ idle_timeout_ms = 3000
 silence_on_idle = true
 ```
 
-If the process output closes, Sonium marks the stream idle and restarts the
-external source with backoff.
+If the process output closes, Sonium restarts the external source with backoff.
+For ordinary file and FIFO paths, Sonium reports `recovering` with retry context
+and reopens after producer disconnects, path recreation, or file replacement.
+The Recovering state is only for ordinary file/FIFO sources after a recoverable
+open/read/EOF condition. `error` is reserved for terminal source failures such
+as an empty path, permission denial, a directory, unsupported path type, or a
+symlink loop; it does not mean a `pipe://` child simply closed.
 
 ### Timezone
 
@@ -188,9 +260,9 @@ compensate so all speakers stay in sync:
 latency_ms = 150  # Adjust to match your Bluetooth device
 ```
 
-## Snapcast Migration (Drop-in Replacement)
+## Snapcast discovery migration
 
-To use Sonium as a drop-in replacement for an existing Snapcast setup:
+To advertise a Sonium server to legacy Snapcast discovery tooling:
 
 ```toml
 [server]
@@ -199,8 +271,9 @@ control_port    = 1780   # Snapcast's default HTTP port
 snapcast_compat = true   # Advertise _snapcast._tcp mDNS service
 ```
 
-> **Note:** Sonium's native defaults are `1710`/`1711`. Changing them to
-> Snapcast's ports is only needed for legacy client compatibility.
+> **Note:** Sonium's native defaults are `1710`/`1711`. Changing ports and
+> enabling the mDNS advertisement can assist discovery, but does **not** claim
+> drop-in protocol compatibility with all Snapcast clients or versions.
 
 ## Environment Variables
 

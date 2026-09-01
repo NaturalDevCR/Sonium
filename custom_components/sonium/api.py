@@ -138,20 +138,36 @@ class SoniumApiClient:
     async def delete_group(self, group_id: str) -> None:
         await self._request("DELETE", f"/api/groups/{group_id}")
 
+    async def create_announcement(self, intent: dict[str, Any]) -> dict[str, Any]:
+        """Submit a locally validated, idempotent announcement intent."""
+        response = await self._request("POST", "/api/announcements", json=intent)
+        if not isinstance(response, dict):
+            raise RuntimeError("Sonium returned an invalid announcement response")
+        return response
+
+    async def cancel_announcement(self, announcement_id: str) -> None:
+        await self._request("DELETE", f"/api/announcements/{announcement_id}")
+
     async def subscribe_events(self) -> AsyncGenerator[dict, None]:
         ws_url = (
             f"{self._ws_scheme}://{self._host}:{self._port}"
-            f"/api/events?token={self._token}"
+            "/api/events"
         )
+        ticket_response = await self._request("POST", "/api/events/ticket", json={})
+        ticket = ticket_response.get("ticket") if isinstance(ticket_response, dict) else None
+        if not isinstance(ticket, str) or not ticket:
+            raise InvalidAuth("WebSocket ticket was not issued")
         async with self._session.ws_connect(
             ws_url,
+            protocols=[ticket],
             heartbeat=30,
             ssl=self._ssl,
         ) as ws:
             async for msg in ws:
                 if msg.type == aiohttp.WSMsgType.TEXT:
                     try:
-                        yield json.loads(msg.data)
+                        event = json.loads(msg.data)
+                        yield event
                     except json.JSONDecodeError:
                         _LOGGER.debug("Failed to parse WS message: %s", msg.data)
                 elif msg.type in (aiohttp.WSMsgType.CLOSED, aiohttp.WSMsgType.ERROR):

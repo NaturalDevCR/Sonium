@@ -18,8 +18,10 @@ use sonium_control::{api, EventBus, ServerState, UserStore};
 fn test_auth() -> (Arc<UserStore>, String) {
     let dir = std::env::temp_dir().join(format!("sonium-api-test-{}", uuid::Uuid::new_v4()));
     std::fs::create_dir_all(&dir).unwrap();
-    let store = UserStore::load_or_init(&dir, None);
-    let _ = store.create_user("test-admin", "test-password", Role::Admin);
+    let store = UserStore::load_or_init(&dir, Some("initial-admin-password".to_string())).unwrap();
+    let _ = store
+        .create_user("test-admin", "test-password", Role::Admin)
+        .unwrap();
     let user = store.authenticate("test-admin", "test-password").unwrap();
     let token = store.create_token(&user, 1);
     (store, token)
@@ -91,6 +93,171 @@ fn delete(uri: &str, token: &str) -> Request<Body> {
         .header(header::AUTHORIZATION, format!("Bearer {token}"))
         .body(Body::empty())
         .unwrap()
+}
+
+fn post_empty(uri: &str, token: &str) -> Request<Body> {
+    Request::builder()
+        .method(Method::POST)
+        .uri(uri)
+        .header(header::AUTHORIZATION, format!("Bearer {token}"))
+        .body(Body::empty())
+        .unwrap()
+}
+
+fn ws_request(url: &str, ticket: &str) -> tokio_tungstenite::tungstenite::http::Request<()> {
+    use tokio_tungstenite::tungstenite::client::IntoClientRequest;
+    use tokio_tungstenite::tungstenite::http::{header::SEC_WEBSOCKET_PROTOCOL, HeaderValue};
+
+    let mut request = url.into_client_request().unwrap();
+    request.headers_mut().insert(
+        SEC_WEBSOCKET_PROTOCOL,
+        HeaderValue::from_str(ticket).unwrap(),
+    );
+    request
+}
+
+fn announcement_body(key: &str) -> Value {
+    json!({
+        "version": 1,
+        "idempotency_key": key,
+        "target_groups": ["default"],
+        "priority": "announcement",
+        "source": {"kind": "uri", "uri": "https://media.example.test/doorbell.ogg"},
+        "duck": {"attenuation_db": -18.0, "attack_ms": 25, "release_ms": 100},
+        "max_duration_ms": 1000,
+        "expires_at_ms": test_expiry_ms(),
+        "resume": "resume_previous"
+    })
+}
+
+fn test_expiry_ms() -> i64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_millis()
+        .try_into()
+        .unwrap_or(i64::MAX - 60_000)
+        + 60_000
+}
+
+#[tokio::test]
+async fn announcement_rest_api_is_authenticated_idempotent_and_bounded() {
+    let (app, token) = make_app();
+    let unauthorized = app
+        .clone()
+        .oneshot(post_json(
+            "/announcements",
+            announcement_body("unauthorized"),
+            "bad-token",
+        ))
+        .await
+        .unwrap();
+    assert_eq!(unauthorized.status(), StatusCode::UNAUTHORIZED);
+
+    let doorbell = announcement_body("doorbell-1");
+    let created = app
+        .clone()
+        .oneshot(post_json("/announcements", doorbell.clone(), &token))
+        .await
+        .unwrap();
+    assert_eq!(created.status(), StatusCode::CREATED);
+    let created_json = json_body(created.into_body()).await;
+    assert!(created_json["id"].is_string());
+    assert!(!created_json["duplicate"].as_bool().unwrap());
+
+    let retried = app
+        .clone()
+        .oneshot(post_json("/announcements", doorbell, &token))
+        .await
+        .unwrap();
+    assert_eq!(retried.status(), StatusCode::OK);
+    let retried_json = json_body(retried.into_body()).await;
+    assert_eq!(retried_json["id"], created_json["id"]);
+    assert!(retried_json["duplicate"].as_bool().unwrap());
+
+    let too_many_targets = app.clone().oneshot(post_json(
+        "/announcements",
+        json!({"version": 1, "idempotency_key": "too-many", "target_groups": (0..33).map(|n| format!("group-{n}")).collect::<Vec<_>>(), "priority": "chime", "source": {"kind":"uri", "uri":"https://media.example.test/a.ogg"}, "duck": {"attenuation_db": -1.0, "attack_ms": 0, "release_ms": 0}, "max_duration_ms": 1, "expires_at_ms": test_expiry_ms(), "resume": "resume_previous"}),
+        &token,
+    )).await.unwrap();
+    assert_eq!(too_many_targets.status(), StatusCode::BAD_REQUEST);
+
+    let mut missing_expiry = announcement_body("no-expiry");
+    missing_expiry
+        .as_object_mut()
+        .unwrap()
+        .remove("expires_at_ms");
+    let missing_expiry = app
+        .oneshot(post_json("/announcements", missing_expiry, &token))
+        .await
+        .unwrap();
+    assert_eq!(missing_expiry.status(), StatusCode::UNPROCESSABLE_ENTITY);
+}
+
+#[tokio::test]
+async fn authenticated_websocket_receives_announcement_lifecycle_events() {
+    use futures_util::StreamExt;
+    use tokio_tungstenite::connect_async;
+    use tokio_tungstenite::tungstenite::Message;
+
+    let state = Arc::new(ServerState::new(
+        Arc::new(EventBus::new()),
+        None,
+        vec![],
+        vec![],
+    ));
+    let (auth, token) = test_auth();
+    let app = api::router(state.clone()).layer(axum::Extension(auth.clone()));
+    let mut low_body = announcement_body("ws-low");
+    low_body["priority"] = json!("chime");
+    let intent = serde_json::from_value(low_body).unwrap();
+    state
+        .admit_announcement(intent, test_expiry_ms() - 60_000)
+        .unwrap();
+    let ticket_response = app
+        .oneshot(post_empty("/events/ticket", &token))
+        .await
+        .unwrap();
+    let ticket = json_body(ticket_response.into_body()).await["ticket"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    let (port, _server) = start_ws_test_server(state.clone(), auth).await;
+    let (mut ws, _) = connect_async(ws_request(
+        &format!("ws://127.0.0.1:{port}/events"),
+        &ticket,
+    ))
+    .await
+    .unwrap();
+
+    let mut high_body = announcement_body("ws-high");
+    high_body["priority"] = json!("emergency");
+    let intent = serde_json::from_value(high_body).unwrap();
+    state
+        .admit_announcement(intent, test_expiry_ms() - 60_000)
+        .unwrap();
+
+    let mut lifecycles = Vec::new();
+    for _ in 0..2 {
+        let event = tokio::time::timeout(tokio::time::Duration::from_secs(1), ws.next())
+            .await
+            .unwrap()
+            .unwrap()
+            .unwrap();
+        let Message::Text(event) = event else {
+            panic!("expected text event")
+        };
+        let event: Value = serde_json::from_str(&event).unwrap();
+        assert_eq!(event["type"], "announcement_lifecycle");
+        lifecycles.push((
+            event["lifecycle"].as_str().unwrap().to_owned(),
+            event["resume"].as_bool().unwrap(),
+        ));
+    }
+    assert_eq!(
+        lifecycles,
+        vec![("cancelled".into(), true), ("scheduled".into(), false)]
+    );
 }
 
 // ── /status ───────────────────────────────────────────────────────────────
@@ -312,10 +479,24 @@ async fn streams_has_default_on_start() {
 
 // ── WS /events ────────────────────────────────────────────────────────────
 
-#[tokio::test]
-async fn ws_events_endpoint_upgrades() {
-    use futures_util::{SinkExt, StreamExt};
+async fn start_ws_test_server(
+    state: Arc<ServerState>,
+    auth: Arc<UserStore>,
+) -> (u16, tokio::task::JoinHandle<()>) {
     use tokio::net::TcpListener;
+
+    let app = api::router(state).layer(axum::Extension(auth));
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let port = listener.local_addr().unwrap().port();
+    let server = tokio::spawn(async move {
+        axum::serve(listener, app).await.unwrap();
+    });
+    (port, server)
+}
+
+#[tokio::test]
+async fn ws_ticket_is_consumed_before_upgrade_and_cannot_be_replayed() {
+    use futures_util::StreamExt;
     use tokio_tungstenite::connect_async;
     use tokio_tungstenite::tungstenite::Message;
 
@@ -326,24 +507,124 @@ async fn ws_events_endpoint_upgrades() {
         vec![],
     ));
     let (auth, token) = test_auth();
-    let app = api::router(state).layer(axum::Extension(auth));
-    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
-    let port = listener.local_addr().unwrap().port();
-
-    tokio::spawn(async move {
-        axum::serve(listener, app).await.unwrap();
-    });
-
-    tokio::time::sleep(tokio::time::Duration::from_millis(20)).await;
-
-    let url = format!("ws://127.0.0.1:{port}/events?token={token}");
-    let (mut ws, _) = connect_async(&url).await.expect("WS connect failed");
-
-    ws.send(Message::Ping(vec![42])).await.unwrap();
-
-    // Expect a Pong back
-    let reply = tokio::time::timeout(tokio::time::Duration::from_secs(2), ws.next())
+    let app = api::router(state.clone()).layer(axum::Extension(auth.clone()));
+    let ticket_response = app
+        .oneshot(post_empty("/events/ticket", &token))
         .await
-        .expect("timeout waiting for WS reply");
-    assert!(reply.is_some(), "WS closed unexpectedly");
+        .expect("ticket endpoint responds");
+    assert_eq!(ticket_response.status(), StatusCode::CREATED);
+    let ticket = json_body(ticket_response.into_body()).await["ticket"]
+        .as_str()
+        .expect("ticket response contains a ticket")
+        .to_owned();
+    let (port, _server) = start_ws_test_server(state.clone(), auth).await;
+
+    let url = format!("ws://127.0.0.1:{port}/events");
+    let request = ws_request(&url, &ticket);
+    let (mut ws, response) = connect_async(request)
+        .await
+        .expect("ticketed WS connect failed");
+    assert_eq!(response.headers()["Sec-WebSocket-Protocol"], ticket);
+
+    state
+        .events()
+        .emit(sonium_control::ws::Event::Heartbeat { uptime_s: 42 });
+    let event = tokio::time::timeout(tokio::time::Duration::from_secs(1), ws.next())
+        .await
+        .expect("timeout waiting for authenticated event")
+        .expect("WS closed before event")
+        .expect("WS event failed");
+    let Message::Text(event) = event else {
+        panic!("expected text event");
+    };
+    assert_eq!(
+        serde_json::from_str::<Value>(&event).unwrap()["type"],
+        "heartbeat"
+    );
+
+    let replay = ws_request(&url, &ticket);
+    assert!(
+        connect_async(replay).await.is_err(),
+        "a consumed WebSocket ticket must be rejected before upgrade"
+    );
+}
+
+#[tokio::test]
+async fn ws_does_not_accept_a_long_lived_jwt_from_the_url() {
+    use tokio_tungstenite::connect_async;
+
+    let state = Arc::new(ServerState::new(
+        Arc::new(EventBus::new()),
+        None,
+        vec![],
+        vec![],
+    ));
+    let (auth, token) = test_auth();
+    let (port, _server) = start_ws_test_server(state.clone(), auth).await;
+    let url = format!("ws://127.0.0.1:{port}/events");
+
+    assert!(
+        connect_async(format!("{url}?token={token}")).await.is_err(),
+        "a JWT query parameter must be rejected before WebSocket upgrade"
+    );
+    assert!(
+        connect_async(ws_request(&url, &token)).await.is_err(),
+        "a long-lived JWT offered as a WebSocket subprotocol must be rejected before upgrade"
+    );
+}
+
+#[tokio::test]
+async fn websocket_ticket_capacity_is_reported_as_a_retryable_non_auth_error() {
+    let state = Arc::new(ServerState::new(
+        Arc::new(EventBus::new()),
+        None,
+        vec![],
+        vec![],
+    ));
+    let (auth, token) = test_auth();
+    for _ in 0..1024 {
+        auth.issue_ws_ticket(&token)
+            .expect("ticket capacity has not been reached yet");
+    }
+
+    let response = api::router(state)
+        .layer(axum::Extension(auth))
+        .oneshot(post_empty("/events/ticket", &token))
+        .await
+        .expect("ticket endpoint responds");
+
+    assert_eq!(response.status(), StatusCode::TOO_MANY_REQUESTS);
+}
+
+#[tokio::test]
+async fn ws_closes_before_forwarding_events_after_session_revocation() {
+    use futures_util::StreamExt;
+    use tokio_tungstenite::connect_async;
+    use tokio_tungstenite::tungstenite::Message;
+
+    let state = Arc::new(ServerState::new(
+        Arc::new(EventBus::new()),
+        None,
+        vec![],
+        vec![],
+    ));
+    let (auth, token) = test_auth();
+    let ticket = auth.issue_ws_ticket(&token).expect("issue a ticket");
+    let (port, _server) = start_ws_test_server(state.clone(), auth.clone()).await;
+    let url = format!("ws://127.0.0.1:{port}/events");
+    let request = ws_request(&url, &ticket);
+    let (mut ws, _) = connect_async(request).await.expect("WS connect failed");
+
+    auth.revoke_token(&token);
+    state
+        .events()
+        .emit(sonium_control::ws::Event::Heartbeat { uptime_s: 99 });
+
+    let reply = tokio::time::timeout(tokio::time::Duration::from_secs(1), ws.next())
+        .await
+        .expect("revoked WS was not closed promptly");
+    assert!(
+        !matches!(reply, Some(Ok(Message::Text(_)))),
+        "a revoked WS must not receive another event"
+    );
 }
