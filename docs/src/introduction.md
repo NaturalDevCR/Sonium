@@ -45,6 +45,9 @@ Sonium is built from scratch for correctness, performance, and ease of use:
 - **Admin UI** — users, roles, groups, streams, config editing, dependency checks, logs, and supervised restart requests.
 - **Desktop Agent** — tray app for macOS and Windows client instances.
 - **Home Assistant** — custom integration for zones, speakers, streams, health sensors, and latency controls.
+- **Announcements with ducking** — authenticated, idempotent announcement intents
+  with priority arbitration and synchronized client-side duck envelopes
+  (see [Music Assistant / Announcements](./integrations/music-assistant.md)).
 - **Snapcast migration path** — optional discovery mode can assist migration;
   validate each client/version because full drop-in compatibility is not claimed
   (see [configuration](./getting-started/configuration.md)).

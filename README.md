@@ -55,6 +55,11 @@ music source -> sonium-server -> LAN -> sonium-client -> speaker
 - **Observability** through HealthReport sync metrics, Prometheus `/metrics`,
   Sync Monitor UI, and Home Assistant entities for groups, clients, streams, and
   client health.
+- **Announcements with ducking** — authenticated, idempotent announcement
+  intents (priority `music < chime < announcement < emergency`) with bounded
+  per-group queues and synchronized client-side duck envelopes. See the
+  [announcement design](https://naturaldevcr.github.io/Sonium/architecture/announcement-ducking-design)
+  and [Music Assistant / Announcements](https://naturaldevcr.github.io/Sonium/integrations/music-assistant).
 
 ## Operating boundary (Phase 1)
 
@@ -252,7 +257,8 @@ changes between releases.
 - Observability phase A: extended HealthReport, playout percentiles, callback
   timing, drift/drop/dup counters, Prometheus metrics, and Sync Monitor updates.
 - Web/admin redesign, first-run auth flow hardening, stream templates for
-  AirPlay and Spotify Connect helpers, and Home Assistant integration.
+  AirPlay and Spotify Connect helpers, Home Assistant integration, and
+  announcement intents with synchronized ducking.
 - Release packaging polish for Linux plus macOS/Windows Desktop Agent builds.
 
 **Next focus:**

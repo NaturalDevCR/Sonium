@@ -35,6 +35,7 @@
 # Integrations
 
 - [Home Assistant](./integrations/home-assistant.md)
+- [Music Assistant / Announcements](./integrations/music-assistant.md)
 
 ---
 
