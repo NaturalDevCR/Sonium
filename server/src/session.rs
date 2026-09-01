@@ -86,10 +86,54 @@ impl ClientSessionPermit {
     }
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ControlQueuePolicy {
+    Critical,
+    Repeatable,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ControlQueueResult {
+    Enqueued,
+    Coalesced,
+}
+
+fn queue_control_frame(
+    ctrl_tx: &mpsc::Sender<Vec<u8>>,
+    frame: Vec<u8>,
+) -> anyhow::Result<ControlQueueResult> {
+    let header = MessageHeader::from_bytes(&frame)?;
+    let expected_len = HEADER_SIZE.saturating_add(header.payload_size as usize);
+    if frame.len() != expected_len {
+        return Err(anyhow::anyhow!(
+            "control frame length mismatch: header declares {}, got {}",
+            header.payload_size,
+            frame.len().saturating_sub(HEADER_SIZE),
+        ));
+    }
+    let policy = match header.msg_type {
+        MessageType::Time | MessageType::GroupSync => ControlQueuePolicy::Repeatable,
+        _ => ControlQueuePolicy::Critical,
+    };
+    match ctrl_tx.try_send(frame) {
+        Ok(()) => Ok(ControlQueueResult::Enqueued),
+        Err(mpsc::error::TrySendError::Full(_)) if policy == ControlQueuePolicy::Repeatable => {
+            Ok(ControlQueueResult::Coalesced)
+        }
+        Err(mpsc::error::TrySendError::Full(_)) => {
+            Err(anyhow::anyhow!("critical control queue saturated"))
+        }
+        Err(mpsc::error::TrySendError::Closed(_)) => {
+            Err(anyhow::anyhow!("control writer channel closed"))
+        }
+    }
+}
+
 /// Dedicated TCP writer task.  Owns the `OwnedWriteHalf` exclusively so the
 /// select loop never blocks on a TCP write.  Audio frames arrive via a bounded
 /// channel (`try_send` — drop on full); control messages use a separate
-/// bounded channel.  Announcement enqueue saturation is connection-fatal.
+/// bounded channel.  Critical-control and announcement saturation is
+/// connection-fatal; repeatable timing updates coalesce explicitly on full.
 ///
 /// Audio is latency-sensitive: the writer always drains the audio queue first
 /// with non-blocking `try_recv` before blocking on either channel.  This
@@ -575,7 +619,7 @@ async fn session_loop(
     // yet, so we queue them.
     if let Some(b) = &bc {
         if let Some(hdr) = b.codec_header() {
-            let _ = ctrl_tx.try_send(hdr.to_vec());
+            queue_control_frame(&ctrl_tx, hdr.to_vec())?;
         }
     }
 
@@ -688,7 +732,10 @@ async fn session_loop(
         };
         let mut hdr = MessageHeader::new(MessageType::ServerSettings, 0);
         hdr.id = next_id();
-        let _ = ctrl_tx.try_send(Message::ServerSettings(settings).encode_with_header(hdr));
+        queue_control_frame(
+            &ctrl_tx,
+            Message::ServerSettings(settings).encode_with_header(hdr),
+        )?;
         info!(%peer, buffer_ms = current_buffer_ms, "ServerSettings sent to client");
     }
 
@@ -942,7 +989,7 @@ async fn session_loop(
                         let lat = c.as_ref().map(|c| c.latency_ms).unwrap_or(0);
                         let obs = c.as_ref().map(|c| c.observability_enabled).unwrap_or(false);
                         let (eq, en) = state.get_stream_eq(&stream_id).unwrap_or_default();
-                        send_server_settings_via_channel(&ctrl_tx, current_buffer_ms, volume, muted, lat, eq, en, obs, effective_mode.to_string(), server_udp_port, cfg.server.audio.output_prefill_ms);
+                        send_server_settings_via_channel(&ctrl_tx, current_buffer_ms, volume, muted, lat, eq, en, obs, effective_mode.to_string(), server_udp_port, cfg.server.audio.output_prefill_ms)?;
                         debug!(%peer, volume, muted, "Volume settings pushed to client");
                     }
 
@@ -952,7 +999,7 @@ async fn session_loop(
                         let (vol, muted) = state.get_volume(client_id).unwrap_or((100, false));
                         let obs = state.get_client(client_id).map(|c| c.observability_enabled).unwrap_or(false);
                         let (eq, en) = state.get_stream_eq(&stream_id).unwrap_or_default();
-                        send_server_settings_via_channel(&ctrl_tx, current_buffer_ms, vol, muted, latency_ms, eq, en, obs, effective_mode.to_string(), server_udp_port, cfg.server.audio.output_prefill_ms);
+                        send_server_settings_via_channel(&ctrl_tx, current_buffer_ms, vol, muted, latency_ms, eq, en, obs, effective_mode.to_string(), server_udp_port, cfg.server.audio.output_prefill_ms)?;
                         debug!(%peer, latency_ms, "Latency settings pushed to client");
                     }
 
@@ -969,7 +1016,7 @@ async fn session_loop(
                         let c = state.get_client(client_id);
                         let lat = c.as_ref().map(|c| c.latency_ms).unwrap_or(0);
                         let obs = c.as_ref().map(|c| c.observability_enabled).unwrap_or(false);
-                        send_server_settings_via_channel(&ctrl_tx, current_buffer_ms, vol, muted, lat, eq_bands, enabled, obs, effective_mode.to_string(), server_udp_port, cfg.server.audio.output_prefill_ms);
+                        send_server_settings_via_channel(&ctrl_tx, current_buffer_ms, vol, muted, lat, eq_bands, enabled, obs, effective_mode.to_string(), server_udp_port, cfg.server.audio.output_prefill_ms)?;
                         debug!(%peer, stream_id, "Stream EQ settings pushed to client");
                     }
 
@@ -997,8 +1044,18 @@ async fn session_loop(
                 );
                 let mut hdr = MessageHeader::new(MessageType::GroupSync, 24);
                 hdr.id = next_id();
-                let _ = ctrl_tx.try_send(Message::GroupSync(gs).encode_with_header(hdr));
-                tracing::trace!(%peer, server_now_us, group_offset_us, "GroupSync broadcast");
+                match queue_control_frame(
+                    &ctrl_tx,
+                    Message::GroupSync(gs).encode_with_header(hdr),
+                ) {
+                    Ok(ControlQueueResult::Enqueued) => {
+                        tracing::trace!(%peer, server_now_us, group_offset_us, "GroupSync broadcast");
+                    }
+                    Ok(ControlQueueResult::Coalesced) => {
+                        tracing::trace!(%peer, "GroupSync coalesced while control queue is full");
+                    }
+                    Err(error) => break Err(error),
+                }
             }
         }
     };
@@ -1032,7 +1089,7 @@ fn switch_stream(
     if let Some(bc) = &new_bc {
         // Send the new stream's CodecHeader so the client re-initialises its decoder.
         if let Some(hdr) = bc.codec_header() {
-            let _ = ctrl_tx.try_send(hdr.to_vec());
+            queue_control_frame(ctrl_tx, hdr.to_vec())?;
         }
         *audio_rx = Some(bc.subscribe());
     } else {
@@ -1066,7 +1123,7 @@ fn send_server_settings_via_channel(
     transport_mode: String,
     server_udp_port: u16,
     output_prefill_ms: u32,
-) {
+) -> anyhow::Result<()> {
     let settings = ServerSettings {
         buffer_ms: buffer_ms as i32,
         output_prefill_ms,
@@ -1081,7 +1138,11 @@ fn send_server_settings_via_channel(
     };
     let mut hdr = MessageHeader::new(MessageType::ServerSettings, 0);
     hdr.id = next_id();
-    let _ = ctrl_tx.try_send(Message::ServerSettings(settings).encode_with_header(hdr));
+    queue_control_frame(
+        ctrl_tx,
+        Message::ServerSettings(settings).encode_with_header(hdr),
+    )?;
+    Ok(())
 }
 
 struct ClientMsgContext<'a> {
@@ -1123,9 +1184,13 @@ async fn handle_client_msg(
             reply.id = next_id();
             reply.refers_to = hdr.id;
             reply.received = now;
-            let _ = ctx
-                .ctrl_tx
-                .try_send(Message::Time(TimeMsg { latency: diff }).encode_with_header(reply));
+            if queue_control_frame(
+                ctx.ctrl_tx,
+                Message::Time(TimeMsg { latency: diff }).encode_with_header(reply),
+            )? == ControlQueueResult::Coalesced
+            {
+                tracing::trace!(client_id = %ctx.client_id, "Time reply coalesced while control queue is full");
+            }
         }
         MessageType::ClientInfo => {
             if let Ok(Message::ClientInfo(ci)) = Message::from_payload(&hdr, payload) {
@@ -1179,7 +1244,7 @@ async fn handle_client_msg(
                         ctx.transport_mode.clone(),
                         ctx.server_udp_port,
                         ctx.output_prefill_ms,
-                    );
+                    )?;
                     *ctx.current_buffer_ms = next_buffer_ms;
                     debug!(client_id = %ctx.client_id, buffer_ms = next_buffer_ms, "Auto buffer adjusted");
                 }
@@ -1514,6 +1579,80 @@ mod tests {
             Err(mpsc::error::TrySendError::Full(_))
         ));
         assert!(rx.try_recv().is_ok());
+    }
+
+    #[test]
+    fn bounded_control_critical_frames_fail_when_queue_is_full_or_closed() {
+        let critical_frames = [
+            Message::CodecHeader(sonium_protocol::messages::CodecHeader::new(
+                "opus",
+                vec![1, 2, 3],
+            ))
+            .encode(),
+            Message::ServerSettings(ServerSettings::default()).encode(),
+        ];
+
+        for frame in critical_frames {
+            let (full_tx, _full_rx) = mpsc::channel(1);
+            full_tx.try_send(vec![0]).unwrap();
+            assert!(queue_control_frame(&full_tx, frame.clone()).is_err());
+
+            let (closed_tx, closed_rx) = mpsc::channel(1);
+            drop(closed_rx);
+            assert!(queue_control_frame(&closed_tx, frame).is_err());
+        }
+    }
+
+    #[test]
+    fn bounded_control_repeatable_frames_coalesce_only_when_queue_is_full() {
+        let repeatable_frames = [
+            Message::Time(TimeMsg::zero()).encode(),
+            Message::GroupSync(sonium_protocol::messages::GroupSync::new(10, -2, 0, 0.5)).encode(),
+        ];
+
+        for frame in repeatable_frames {
+            let (full_tx, _full_rx) = mpsc::channel(1);
+            full_tx.try_send(vec![0]).unwrap();
+            assert_eq!(
+                queue_control_frame(&full_tx, frame.clone()).unwrap(),
+                ControlQueueResult::Coalesced,
+            );
+
+            let (closed_tx, closed_rx) = mpsc::channel(1);
+            drop(closed_rx);
+            assert!(queue_control_frame(&closed_tx, frame).is_err());
+        }
+    }
+
+    #[test]
+    fn bounded_control_enqueued_frames_preserve_protocol_format() {
+        let messages = [
+            Message::CodecHeader(sonium_protocol::messages::CodecHeader::new(
+                "opus",
+                vec![1, 2, 3],
+            )),
+            Message::ServerSettings(ServerSettings::default()),
+            Message::Time(TimeMsg::zero()),
+            Message::GroupSync(sonium_protocol::messages::GroupSync::new(10, -2, 0, 0.5)),
+        ];
+
+        for message in messages {
+            let expected_type = message.message_type();
+            let (tx, mut rx) = mpsc::channel(1);
+            let result = queue_control_frame(&tx, message.encode()).unwrap();
+
+            assert_eq!(result, ControlQueueResult::Enqueued);
+            let bytes = rx.try_recv().unwrap();
+            let header = MessageHeader::from_bytes(&bytes[..HEADER_SIZE]).unwrap();
+            assert_eq!(header.msg_type, expected_type);
+            assert_eq!(header.payload_size as usize, bytes.len() - HEADER_SIZE);
+            assert_eq!(
+                Message::from_payload(&header, &bytes[HEADER_SIZE..])
+                    .unwrap()
+                    .message_type(),
+                expected_type,
+            );
+        }
     }
 
     #[test]

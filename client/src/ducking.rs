@@ -148,16 +148,19 @@ impl DuckEnvelope {
             .scheduled_at_ms
             .saturating_add(i64::from(active.control.max_duration_ms));
         if now_ms >= end_at_ms {
-            let start_gain = active.gain_before_release(end_at_ms);
+            let start_gain = self.gain.load();
             let release = Release {
-                started_at_ms: end_at_ms,
+                started_at_ms: now_ms,
                 start_gain,
             };
             active.release = Some(release);
             self.gain.store(active.gain_during_release(release, now_ms));
             acknowledgements.push(ack(&active.control, AnnouncementLifecycle::Completed));
             if active.release_ms == 0
-                || now_ms >= end_at_ms.saturating_add(i64::from(active.release_ms))
+                || now_ms
+                    >= release
+                        .started_at_ms
+                        .saturating_add(i64::from(active.release_ms))
             {
                 self.gain.store(1.0);
                 self.active = None;

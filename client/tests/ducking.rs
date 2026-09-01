@@ -124,6 +124,33 @@ fn terminal_between_ticks_releases_from_the_last_published_gain() {
 }
 
 #[test]
+fn delayed_natural_completion_releases_from_the_last_published_gain() {
+    let gain = DuckGain::default();
+    let mut envelope = DuckEnvelope::new(gain.clone());
+    envelope.handle_control(
+        scheduled(
+            "delayed-natural",
+            AnnouncementPriorityV1::Announcement,
+            1_000,
+        ),
+        900,
+    );
+    envelope.tick(1_000);
+    envelope.tick(1_050);
+    approx(gain.load(), 0.55);
+
+    let completed = envelope.tick(2_050);
+
+    assert_eq!(completed.len(), 1);
+    assert_eq!(completed[0].lifecycle, AnnouncementLifecycle::Completed);
+    approx(gain.load(), 0.55);
+    envelope.tick(2_150);
+    approx(gain.load(), 0.775);
+    envelope.tick(2_250);
+    approx(gain.load(), 1.0);
+}
+
+#[test]
 fn terminal_before_started_does_not_publish_an_unobserved_attack_gain() {
     let gain = DuckGain::default();
     let mut envelope = DuckEnvelope::new(gain.clone());
