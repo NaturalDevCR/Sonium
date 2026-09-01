@@ -109,4 +109,7 @@ impl Message {
         }
     }
 }
-pub use announcement::{AnnouncementControlV1, AnnouncementLifecycle};
+pub use announcement::{
+    AnnouncementControlV1, AnnouncementDuckingV1, AnnouncementIntentMetadataV1,
+    AnnouncementLifecycle, AnnouncementPriorityV1, AnnouncementResumeV1,
+};

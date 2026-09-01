@@ -243,6 +243,13 @@ impl AnnouncementCoordinator {
         self.records.get(id).cloned()
     }
 
+    /// Snapshot the currently active record for a group.  Queue ordering stays
+    /// private; the scheduler only needs the head selected by arbitration.
+    pub fn active_record(&self, group_id: &str) -> Option<AnnouncementRecord> {
+        let id = self.queues.get(group_id)?.active.as_deref()?;
+        self.records.get(id).cloned()
+    }
+
     pub fn admit(
         &mut self,
         intent: AnnouncementIntent,

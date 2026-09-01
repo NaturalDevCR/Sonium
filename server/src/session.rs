@@ -39,8 +39,8 @@ use sonium_control::{ws::Event, ServerState};
 use sonium_protocol::{
     header::{validate_payload_size, HEADER_SIZE},
     messages::{
-        jitter_warning_ms, low_buffer_warning_ms, AudioHealthState, HealthReport, Message,
-        ServerSettings, TimeMsg,
+        jitter_warning_ms, low_buffer_warning_ms, AnnouncementControlV1, AudioHealthState,
+        HealthReport, Message, ServerSettings, TimeMsg,
     },
     MessageHeader, MessageType, Timestamp,
 };
@@ -689,6 +689,10 @@ async fn session_loop(
 
     let mut audio_rx: Option<broadcast::Receiver<AudioFrame>> = bc.as_ref().map(|b| b.subscribe());
     let mut events_rx = state.events().subscribe();
+    let mut announcement_rx = state.subscribe_announcement_controls();
+    if let Some(control) = state.pending_announcement_control(&group_id) {
+        queue_announcement_control(&ctrl_tx, &group_id, &control);
+    }
 
     let (incoming_tx, mut incoming_rx) = mpsc::unbounded_channel();
     let read_task = tokio::spawn(socket_reader(reader, incoming_tx));
@@ -811,6 +815,7 @@ async fn session_loop(
                                 ctrl_tx: &ctrl_tx,
                                 state: &state,
                                 client_id,
+                                group_id: &group_id,
                                 current_buffer_ms: &mut current_buffer_ms,
                                 auto_buffer_tuner: &mut auto_buffer_tuner,
                                 health_tracker: &mut health_tracker,
@@ -826,6 +831,21 @@ async fn session_loop(
                         info!(%peer, %reason, "Client reader closed");
                         break Ok(());
                     }
+                }
+            }
+
+            // ── Timestamped announcement controls for this group ──────────
+            control = announcement_rx.recv() => {
+                match control {
+                    Ok(control) => {
+                        queue_announcement_control(&ctrl_tx, &group_id, &control);
+                    }
+                    Err(broadcast::error::RecvError::Lagged(dropped)) => {
+                        // The scheduler's ACK timeout recovers dropped control
+                        // messages without blocking or replaying audio here.
+                        warn!(%peer, dropped, "Announcement control receiver lagged");
+                    }
+                    Err(broadcast::error::RecvError::Closed) => break Ok(()),
                 }
             }
 
@@ -1041,6 +1061,7 @@ struct ClientMsgContext<'a> {
     ctrl_tx: &'a mpsc::UnboundedSender<Vec<u8>>,
     state: &'a ServerState,
     client_id: &'a str,
+    group_id: &'a str,
     current_buffer_ms: &'a mut u32,
     auto_buffer_tuner: &'a mut AutoBufferTuner,
     health_tracker: &'a mut HealthTransitionTracker,
@@ -1140,9 +1161,71 @@ async fn handle_client_msg(
                 ctx.state.set_client_health(ctx.client_id, health);
             }
         }
+        MessageType::AnnouncementControl => {
+            let control = AnnouncementControlV1::decode(payload)?;
+            handle_announcement_ack(
+                ctx.state,
+                ctx.group_id,
+                &control,
+                sonium_sync::time_provider::now_us() / 1_000,
+            )?;
+        }
         other => debug!("Ignoring message: {other:?}"),
     }
     Ok(())
+}
+
+fn queue_announcement_control(
+    ctrl_tx: &mpsc::UnboundedSender<Vec<u8>>,
+    session_group_id: &str,
+    control: &AnnouncementControlV1,
+) -> bool {
+    if control.group_id != session_group_id {
+        return false;
+    }
+    let mut header = MessageHeader::new(MessageType::AnnouncementControl, 0);
+    header.id = next_id();
+    ctrl_tx
+        .send(Message::AnnouncementControl(control.clone()).encode_with_header(header))
+        .is_ok()
+}
+
+fn handle_announcement_ack(
+    state: &ServerState,
+    session_group_id: &str,
+    control: &AnnouncementControlV1,
+    now_ms: i64,
+) -> anyhow::Result<()> {
+    if control.group_id != session_group_id || control.intent.is_some() {
+        return Err(anyhow::anyhow!(
+            "announcement acknowledgement does not belong to the client session"
+        ));
+    }
+    let lifecycle = match control.lifecycle {
+        sonium_protocol::messages::AnnouncementLifecycle::Scheduled => {
+            sonium_control::announcements::AnnouncementLifecycle::Scheduled
+        }
+        sonium_protocol::messages::AnnouncementLifecycle::Started => {
+            sonium_control::announcements::AnnouncementLifecycle::Started
+        }
+        sonium_protocol::messages::AnnouncementLifecycle::Completed => {
+            sonium_control::announcements::AnnouncementLifecycle::Completed
+        }
+        sonium_protocol::messages::AnnouncementLifecycle::Cancelled => {
+            sonium_control::announcements::AnnouncementLifecycle::Cancelled
+        }
+        sonium_protocol::messages::AnnouncementLifecycle::Failed => {
+            sonium_control::announcements::AnnouncementLifecycle::Failed
+        }
+    };
+    state
+        .acknowledge_announcement_at(
+            &control.announcement_id,
+            session_group_id,
+            lifecycle,
+            now_ms,
+        )
+        .map_err(Into::into)
 }
 
 async fn socket_reader(mut reader: OwnedReadHalf, tx: mpsc::UnboundedSender<IncomingClientFrame>) {
@@ -1218,12 +1301,100 @@ where
 #[cfg(test)]
 mod tests {
     use super::*;
+    use sonium_control::announcements::{
+        AnnouncementIntent, AnnouncementLifecycle as ControlLifecycle, AnnouncementPriority,
+        AnnouncementSource, Ducking, ResumePolicy, ANNOUNCEMENT_INTENT_VERSION,
+    };
     use sonium_protocol::messages::HealthReport;
+    use sonium_protocol::messages::{AnnouncementControlV1, AnnouncementLifecycle};
     use std::sync::Barrier;
     use std::thread;
     use tokio::sync::Semaphore;
 
     const BUF_MS: u32 = 1200;
+
+    fn announcement_intent() -> AnnouncementIntent {
+        AnnouncementIntent {
+            version: ANNOUNCEMENT_INTENT_VERSION,
+            idempotency_key: "session-route".into(),
+            target_groups: vec!["default".into()],
+            priority: AnnouncementPriority::Announcement,
+            source: AnnouncementSource::Uri("https://media.example.test/a.ogg".into()),
+            duck: Ducking {
+                attenuation_db: -18.0,
+                attack_ms: 25,
+                release_ms: 100,
+            },
+            max_duration_ms: 1_000,
+            expires_at_ms: 20_000,
+            resume: ResumePolicy::ResumePrevious,
+        }
+    }
+
+    #[test]
+    fn announcement_controls_are_routed_only_to_the_target_group() {
+        let (tx, mut rx) = mpsc::unbounded_channel();
+        let control = AnnouncementControlV1 {
+            version: 1,
+            announcement_id: "doorbell".into(),
+            group_id: "default".into(),
+            lifecycle: AnnouncementLifecycle::Cancelled,
+            scheduled_at_ms: 10_250,
+            max_duration_ms: 1_000,
+            intent: None,
+        };
+
+        assert!(!queue_announcement_control(&tx, "bedroom", &control));
+        assert!(rx.try_recv().is_err());
+        assert!(queue_announcement_control(&tx, "default", &control));
+
+        let bytes = rx.try_recv().unwrap();
+        let header = MessageHeader::from_bytes(&bytes[..HEADER_SIZE]).unwrap();
+        let decoded = Message::from_payload(&header, &bytes[HEADER_SIZE..]).unwrap();
+        assert!(matches!(
+            decoded,
+            Message::AnnouncementControl(message) if message == control
+        ));
+    }
+
+    #[test]
+    fn announcement_ack_cannot_mutate_a_different_session_group() {
+        let state = ServerState::new(
+            Arc::new(sonium_control::EventBus::new()),
+            None,
+            vec![],
+            vec![],
+        );
+        let admitted = state
+            .admit_announcement(announcement_intent(), 10_000)
+            .unwrap();
+        let mut controls = state.subscribe_announcement_controls();
+        // The receiver subscribed after admission in this unit fixture; use the
+        // timestamp assigned by the deterministic default scheduler.
+        let mut ack = AnnouncementControlV1 {
+            version: 1,
+            announcement_id: admitted.id.clone(),
+            group_id: "default".into(),
+            lifecycle: AnnouncementLifecycle::Scheduled,
+            scheduled_at_ms: 10_250,
+            max_duration_ms: 1_000,
+            intent: None,
+        };
+        assert!(handle_announcement_ack(&state, "bedroom", &ack, 10_010).is_err());
+        assert_eq!(
+            state.all_announcements()[0].lifecycle,
+            ControlLifecycle::Scheduled
+        );
+
+        handle_announcement_ack(&state, "default", &ack, 10_010).unwrap();
+        ack.lifecycle = AnnouncementLifecycle::Started;
+        handle_announcement_ack(&state, "default", &ack, 10_250).unwrap();
+        assert_eq!(
+            state.all_announcements()[0].lifecycle,
+            ControlLifecycle::Started
+        );
+        assert!(controls.try_recv().is_err());
+    }
 
     fn stable_report() -> HealthReport {
         HealthReport::new(0, 0, 0, 800, 0, 0)

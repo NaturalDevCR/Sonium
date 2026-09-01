@@ -18,17 +18,21 @@ use std::sync::{
     Arc,
 };
 
+use crate::announcement_scheduler::{
+    AnnouncementScheduler, SchedulerAdmission, SchedulerConfig, SchedulerEvents,
+};
 use crate::announcements::{
-    AnnouncementAdmission, AnnouncementCoordinator, AnnouncementError, AnnouncementIntent,
-    AnnouncementLifecycle, AnnouncementLimits, AnnouncementRecord, AnnouncementTransition,
+    AnnouncementAdmission, AnnouncementError, AnnouncementIntent, AnnouncementLifecycle,
+    AnnouncementLimits, AnnouncementRecord, AnnouncementTransition,
 };
 use crate::persistence::{PersistedClient, PersistedGroup, PersistedStream, PersistenceStore};
 use crate::ws::EventBus;
 use sonium_common::config::validate_client_id;
 use sonium_common::SoniumError;
-use sonium_protocol::messages::{EqBand, HealthReport};
+use sonium_protocol::messages::{AnnouncementControlV1, EqBand, HealthReport};
 use sonium_transport::TransportMode;
 use std::cmp::Reverse;
+use tokio::sync::broadcast;
 
 // ── Client ────────────────────────────────────────────────────────────────
 
@@ -192,7 +196,8 @@ pub struct ServerState {
     next_client_generation: AtomicU64,
     stream_status_hook: RwLock<Option<Arc<StreamStatusHook>>>,
     groups: RwLock<HashMap<String, Group>>,
-    announcements: Mutex<AnnouncementCoordinator>,
+    announcements: Mutex<AnnouncementScheduler>,
+    announcement_controls: broadcast::Sender<AnnouncementControlV1>,
     streams: RwLock<HashMap<String, StreamInfo>>,
     events: Arc<EventBus>,
     start_time: DateTime<Utc>,
@@ -285,8 +290,12 @@ impl ServerState {
             );
         }
 
-        let announcements =
-            AnnouncementCoordinator::new(AnnouncementLimits::default(), groups.keys().cloned());
+        let announcements = AnnouncementScheduler::new(
+            AnnouncementLimits::default(),
+            groups.keys().cloned(),
+            SchedulerConfig::default(),
+        );
+        let (announcement_controls, _) = broadcast::channel(256);
 
         Self {
             clients: RwLock::new(
@@ -326,6 +335,7 @@ impl ServerState {
             stream_status_hook: RwLock::new(None),
             groups: RwLock::new(groups),
             announcements: Mutex::new(announcements),
+            announcement_controls,
             streams: RwLock::new(streams),
             events,
             start_time: Utc::now(),
@@ -879,8 +889,11 @@ impl ServerState {
             self.events.emit(crate::ws::Event::GroupDeleted {
                 group_id: group_id.into(),
             });
-            let transitions = self.announcements.lock().remove_group(group_id);
-            self.emit_announcement_transitions(transitions);
+            let events = self
+                .announcements
+                .lock()
+                .remove_group(group_id, Utc::now().timestamp_millis());
+            self.emit_announcement_events(events);
             drop(groups);
             drop(clients);
             self.persist();
@@ -1005,13 +1018,9 @@ impl ServerState {
         intent: AnnouncementIntent,
         now_ms: i64,
     ) -> Result<AnnouncementAdmission, AnnouncementError> {
-        let (admission, transitions) = {
-            let mut announcements = self.announcements.lock();
-            let admission = announcements.admit(intent, now_ms)?;
-            let transitions = admission.transitions.clone();
-            (admission, transitions)
-        };
-        self.emit_announcement_transitions(transitions);
+        let SchedulerAdmission { admission, events } =
+            self.announcements.lock().admit(intent, now_ms)?;
+        self.emit_announcement_events(events);
         Ok(admission)
     }
 
@@ -1021,27 +1030,58 @@ impl ServerState {
         group_id: &str,
         lifecycle: AnnouncementLifecycle,
     ) -> Result<(), AnnouncementError> {
-        let transitions = self
+        self.acknowledge_announcement_at(id, group_id, lifecycle, Utc::now().timestamp_millis())
+    }
+
+    pub fn acknowledge_announcement_at(
+        &self,
+        id: &str,
+        group_id: &str,
+        lifecycle: AnnouncementLifecycle,
+        now_ms: i64,
+    ) -> Result<(), AnnouncementError> {
+        let events = self
             .announcements
             .lock()
-            .acknowledge(id, group_id, lifecycle)?;
-        self.emit_announcement_transitions(transitions);
+            .acknowledge(id, group_id, lifecycle, now_ms)?;
+        self.emit_announcement_events(events);
         Ok(())
     }
 
     pub fn cancel_announcement(&self, id: &str) -> Result<(), AnnouncementError> {
-        let transitions = self.announcements.lock().cancel(id)?;
-        self.emit_announcement_transitions(transitions);
+        let events = self
+            .announcements
+            .lock()
+            .cancel(id, Utc::now().timestamp_millis())?;
+        self.emit_announcement_events(events);
         Ok(())
     }
 
     pub fn expire_announcements(&self, now_ms: i64) {
-        let transitions = self.announcements.lock().expire(now_ms);
-        self.emit_announcement_transitions(transitions);
+        let events = self.announcements.lock().tick(now_ms);
+        self.emit_announcement_events(events);
     }
 
     pub fn all_announcements(&self) -> Vec<AnnouncementRecord> {
         self.announcements.lock().records()
+    }
+
+    /// Subscribe a media session to bounded announcement controls.  Browser
+    /// lifecycle events remain on the existing EventBus and do not consume
+    /// this channel.
+    pub fn subscribe_announcement_controls(&self) -> broadcast::Receiver<AnnouncementControlV1> {
+        self.announcement_controls.subscribe()
+    }
+
+    pub fn pending_announcement_control(&self, group_id: &str) -> Option<AnnouncementControlV1> {
+        self.announcements.lock().pending_control(group_id)
+    }
+
+    fn emit_announcement_events(&self, events: SchedulerEvents) {
+        self.emit_announcement_transitions(events.transitions);
+        for control in events.controls {
+            let _ = self.announcement_controls.send(control);
+        }
     }
 
     fn emit_announcement_transitions(&self, transitions: Vec<AnnouncementTransition>) {

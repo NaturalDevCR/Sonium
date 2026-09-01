@@ -25,6 +25,7 @@ fn versioned_announcement_control_message_round_trips_on_its_own_wire_type() {
         lifecycle: AnnouncementLifecycle::Scheduled,
         scheduled_at_ms: 1_700_000_000_000,
         max_duration_ms: 1_000,
+        intent: None,
     };
     let (_, decoded) = parse(&wire(&Message::AnnouncementControl(original.clone())));
 
@@ -42,10 +43,96 @@ fn announcement_control_rejects_invalid_semantics_on_encode_and_decode() {
         lifecycle: AnnouncementLifecycle::Scheduled,
         scheduled_at_ms: -1,
         max_duration_ms: 0,
+        intent: None,
     };
 
     assert!(invalid.try_encode().is_err());
     assert!(AnnouncementControlV1::decode(&serde_json::to_vec(&invalid).unwrap()).is_err());
+}
+
+#[test]
+fn announcement_control_metadata_round_trips_and_legacy_v1_payload_still_decodes() {
+    use sonium_protocol::messages::{
+        AnnouncementControlV1, AnnouncementDuckingV1, AnnouncementIntentMetadataV1,
+        AnnouncementLifecycle, AnnouncementPriorityV1, AnnouncementResumeV1,
+    };
+
+    let legacy = br#"{
+        "version":1,
+        "announcement_id":"legacy",
+        "group_id":"default",
+        "lifecycle":"scheduled",
+        "scheduled_at_ms":1700000000000,
+        "max_duration_ms":1000
+    }"#;
+    let decoded_legacy = AnnouncementControlV1::decode(legacy).unwrap();
+    assert_eq!(decoded_legacy.intent, None);
+
+    let original = AnnouncementControlV1 {
+        version: 1,
+        announcement_id: "doorbell".into(),
+        group_id: "default".into(),
+        lifecycle: AnnouncementLifecycle::Scheduled,
+        scheduled_at_ms: 1_700_000_000_250,
+        max_duration_ms: 2_000,
+        intent: Some(AnnouncementIntentMetadataV1 {
+            source_uri: "https://media.example.test/doorbell.ogg".into(),
+            priority: AnnouncementPriorityV1::Announcement,
+            duck: AnnouncementDuckingV1 {
+                attenuation_db: -18.0,
+                attack_ms: 25,
+                release_ms: 100,
+            },
+            expires_at_ms: 1_700_000_010_000,
+            resume: AnnouncementResumeV1::ResumePrevious,
+        }),
+    };
+
+    let decoded = AnnouncementControlV1::decode(&original.try_encode().unwrap()).unwrap();
+    assert_eq!(decoded, original);
+}
+
+#[test]
+fn announcement_control_rejects_unbounded_or_invalid_intent_metadata() {
+    use sonium_protocol::messages::{
+        AnnouncementControlV1, AnnouncementDuckingV1, AnnouncementIntentMetadataV1,
+        AnnouncementLifecycle, AnnouncementPriorityV1, AnnouncementResumeV1,
+    };
+
+    let message =
+        |source_uri: String, attenuation_db: f32, expires_at_ms: i64| AnnouncementControlV1 {
+            version: 1,
+            announcement_id: "doorbell".into(),
+            group_id: "default".into(),
+            lifecycle: AnnouncementLifecycle::Scheduled,
+            scheduled_at_ms: 10_000,
+            max_duration_ms: 1_000,
+            intent: Some(AnnouncementIntentMetadataV1 {
+                source_uri,
+                priority: AnnouncementPriorityV1::Announcement,
+                duck: AnnouncementDuckingV1 {
+                    attenuation_db,
+                    attack_ms: 25,
+                    release_ms: 100,
+                },
+                expires_at_ms,
+                resume: AnnouncementResumeV1::ResumePrevious,
+            }),
+        };
+
+    assert!(message("x".repeat(2_049), -18.0, 20_000)
+        .try_encode()
+        .is_err());
+    assert!(
+        message("https://media.example.test/a.ogg".into(), f32::NAN, 20_000)
+            .try_encode()
+            .is_err()
+    );
+    assert!(
+        message("https://media.example.test/a.ogg".into(), -18.0, 9_999)
+            .try_encode()
+            .is_err()
+    );
 }
 
 // ── Helpers ───────────────────────────────────────────────────────────────

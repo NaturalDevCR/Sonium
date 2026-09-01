@@ -22,6 +22,7 @@ use sonium_sync::time_provider::now_us;
 use sonium_sync::{PcmChunk, SyncBuffer, TimeProvider};
 
 use crate::decoder::ActiveDecoder;
+use crate::ducking::{DuckEnvelope, DuckGain};
 use crate::eq::SmoothedEqProcessor;
 use crate::player::Player;
 
@@ -217,6 +218,8 @@ async fn connect_and_run(
     let mut sync_buf: Option<SyncBuffer> = None;
     let mut playback_handle: Option<crate::player::PlaybackHandle> = None;
     let mut playback_offset: Option<std::sync::Arc<std::sync::atomic::AtomicI64>> = None;
+    let duck_gain = DuckGain::default();
+    let mut duck_envelope = DuckEnvelope::new(duck_gain.clone());
     let mut volume: u8 = 100;
     let mut muted = false;
     let mut eq_bands: Vec<EqBand> = vec![];
@@ -264,6 +267,11 @@ async fn connect_and_run(
             // behaviour: if a chunk is due, play it.  The Player ring buffer absorbs
             // jitter; underruns are handled by the CPAL callback fade-to-silence.
             _ = audio_tick.tick() => {
+                let now_server_ms = time_provider.to_server_time(now_us()) / 1_000;
+                if !send_announcement_acks(&ctrl_tx, duck_envelope.tick(now_server_ms)) {
+                    warn!("Writer task died — cannot send announcement acknowledgement");
+                    break Ok(());
+                }
                 if playback_handle.is_some() {
                     continue;
                 }
@@ -436,7 +444,7 @@ async fn connect_and_run(
                             None
                         };
 
-                        let p   = Player::new(fmt, cfg.device.as_deref(), playback.clone())?;
+                        let p   = Player::new(fmt, cfg.device.as_deref(), playback.clone(), duck_gain.clone())?;
                         let mut buf = SyncBuffer::new(fmt);
                         buf.set_target_buffer_ms(server_buffer_ms + cfg.latency_ms + server_latency_ms);
                         eq_processor = Some(SmoothedEqProcessor::new(eq_enabled, &eq_bands, fmt.rate, fmt.channels as usize));
@@ -620,6 +628,17 @@ async fn connect_and_run(
                             } else if let Some(buf) = sync_buf.as_mut() {
                                 buf.push(pcm_chunk, now_server);
                             }
+                        }
+                    }
+
+                    MessageType::AnnouncementControl => {
+                        let control = sonium_protocol::messages::AnnouncementControlV1::decode(&payload)?;
+                        let now_server_ms = time_provider.to_server_time(now_us()) / 1_000;
+                        let acknowledgements =
+                            duck_envelope.handle_control(control, now_server_ms);
+                        if !send_announcement_acks(&ctrl_tx, acknowledgements) {
+                            warn!("Writer task died — cannot send announcement acknowledgement");
+                            break Ok(());
                         }
                     }
 
@@ -838,6 +857,21 @@ async fn connect_and_run(
     result
 }
 
+fn send_announcement_acks(
+    ctrl_tx: &mpsc::UnboundedSender<Vec<u8>>,
+    acknowledgements: Vec<sonium_protocol::messages::AnnouncementControlV1>,
+) -> bool {
+    for acknowledgement in acknowledgements {
+        if ctrl_tx
+            .send(Message::AnnouncementControl(acknowledgement).encode())
+            .is_err()
+        {
+            return false;
+        }
+    }
+    true
+}
+
 fn configure_tcp_stream(stream: &TcpStream) {
     let sock = SockRef::from(stream);
 
@@ -1046,5 +1080,30 @@ mod tests {
         assert!(validate_client_id(&first).is_ok());
         assert_eq!(first, client_id_from_hostname(&first_host, 42));
         assert_ne!(first, second);
+    }
+
+    #[test]
+    fn announcement_ack_batch_is_encoded_on_the_existing_control_writer() {
+        use sonium_protocol::messages::{AnnouncementControlV1, AnnouncementLifecycle};
+
+        let (tx, mut rx) = mpsc::unbounded_channel();
+        let acknowledgement = AnnouncementControlV1 {
+            version: 1,
+            announcement_id: "doorbell".into(),
+            group_id: "default".into(),
+            lifecycle: AnnouncementLifecycle::Started,
+            scheduled_at_ms: 10_250,
+            max_duration_ms: 1_000,
+            intent: None,
+        };
+
+        assert!(send_announcement_acks(&tx, vec![acknowledgement.clone()]));
+        let bytes = rx.try_recv().unwrap();
+        let header = MessageHeader::from_bytes(&bytes[..HEADER_SIZE]).unwrap();
+        let decoded = Message::from_payload(&header, &bytes[HEADER_SIZE..]).unwrap();
+        assert!(matches!(
+            decoded,
+            Message::AnnouncementControl(message) if message == acknowledgement
+        ));
     }
 }

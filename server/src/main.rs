@@ -281,6 +281,28 @@ async fn main() -> anyhow::Result<()> {
         });
     }
 
+    // Announcement deadlines must progress even when the REST API is idle and
+    // every target client is offline.  The scheduler itself is deterministic;
+    // this task only supplies wall-clock observations.
+    {
+        let state = state.clone();
+        let cancel = shutdown.clone();
+        tokio::spawn(async move {
+            let mut interval = tokio::time::interval(Duration::from_millis(50));
+            interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+            loop {
+                tokio::select! {
+                    _ = interval.tick() => {
+                        state.expire_announcements(
+                            sonium_sync::time_provider::now_us() / 1_000,
+                        );
+                    }
+                    _ = cancel.cancelled() => break,
+                }
+            }
+        });
+    }
+
     // ── HTTP control server (REST API + embedded web UI) ──────────────────
     {
         let state = state.clone();
