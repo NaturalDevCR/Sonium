@@ -692,8 +692,6 @@ async fn session_loop(
                         peer.hash(&mut h);
                         h.finish() as u32
                     };
-                    // Register with the NACK router to receive client NACKs.
-                    nack_rx = Some(nack_router.register(ssrc, client_udp_addr).await);
                     arq_ssrc = Some(ssrc);
                     udp_media = Some(UdpMedia::Arq(ArqSender::new(
                         sock.clone(),
@@ -752,6 +750,13 @@ async fn session_loop(
             .map_err(|_| anyhow::anyhow!("announcement control queue saturated"))?;
     }
 
+    // Register with the NACK router only after all fallible session setup is
+    // complete, so setup errors cannot leave a stale route behind.
+    if let Some(ssrc) = arq_ssrc {
+        let client_udp_addr = SocketAddr::new(peer.ip(), hello_udp_port);
+        nack_rx = Some(nack_router.register(ssrc, client_udp_addr).await);
+    }
+
     let (incoming_tx, mut incoming_rx) = mpsc::unbounded_channel();
     let read_task = tokio::spawn(socket_reader(reader, incoming_tx));
     let mut health_tracker = HealthTransitionTracker::default();
@@ -784,11 +789,11 @@ async fn session_loop(
                 // Keep the dummy sender alive inside the task so tcp_writer_task
                 // sees Empty (not Disconnected) and only exits when ctrl_rx closes.
                 let (dummy_tx, dummy_rx) = mpsc::channel::<bytes::Bytes>(1);
-                let _tcp_ctrl_task = tokio::spawn(async move {
+                let tcp_ctrl_task = tokio::spawn(async move {
                     let _keep = dummy_tx;
                     tcp_writer_task(writer, dummy_rx, ctrl_rx, peer).await;
                 });
-                udp_task
+                (udp_task, Some(tcp_ctrl_task))
             }
             UdpMedia::Arq(mut arq) => {
                 // ARQ: audio send loop + NACK handling from the NackRouter.
@@ -828,17 +833,21 @@ async fn session_loop(
                 // Same fix: keep dummy sender alive so the TCP control task only
                 // exits when ctrl_rx closes (session end), not on Disconnected.
                 let (dummy_tx, dummy_rx) = mpsc::channel::<bytes::Bytes>(1);
-                let _tcp_ctrl_task = tokio::spawn(async move {
+                let tcp_ctrl_task = tokio::spawn(async move {
                     let _keep = dummy_tx;
                     tcp_writer_task(writer, dummy_rx, ctrl_rx, peer).await;
                 });
-                udp_task
+                (udp_task, Some(tcp_ctrl_task))
             }
         }
     } else {
         // For TCP: both audio AND control go through the unified writer task.
-        tokio::spawn(tcp_writer_task(writer, audio_write_rx, ctrl_rx, peer))
+        (
+            tokio::spawn(tcp_writer_task(writer, audio_write_rx, ctrl_rx, peer)),
+            None,
+        )
     };
+    let (audio_write_task, control_write_task) = audio_write_task;
 
     let result = loop {
         tokio::select! {
@@ -868,7 +877,7 @@ async fn session_loop(
                 };
                 match incoming {
                     IncomingClientFrame::Message(hdr, payload) => {
-                        handle_client_msg(
+                        if let Err(error) = handle_client_msg(
                             ClientMsgContext {
                                 ctrl_tx: &ctrl_tx,
                                 state: &state,
@@ -883,7 +892,9 @@ async fn session_loop(
                             },
                             hdr,
                             &payload,
-                        ).await?;
+                        ).await {
+                            break Err(error);
+                        }
                     }
                     IncomingClientFrame::Closed(reason) => {
                         info!(%peer, %reason, "Client reader closed");
@@ -934,11 +945,13 @@ async fn session_loop(
                         if let Some(new_sid) = state.get_group(&new_gid)
                             .map(|g| g.stream_id.clone())
                         {
-                            switch_stream(
+                            if let Err(error) = switch_stream(
                                 &ctrl_tx, &registry,
                                 &mut audio_rx, &mut stream_id, &mut bc,
                                 &new_sid,
-                            )?;
+                            ) {
+                                break Err(error);
+                            }
                             current_buffer_ms =
                                 bc.as_ref().map(|x| x.buffer_ms).unwrap_or(cfg.server.audio.buffer_ms);
                         }
@@ -947,11 +960,13 @@ async fn session_loop(
                     Ok(Event::GroupStreamChanged { group_id: gid, stream_id: new_sid })
                         if gid == group_id =>
                     {
-                        switch_stream(
+                        if let Err(error) = switch_stream(
                             &ctrl_tx, &registry,
                             &mut audio_rx, &mut stream_id, &mut bc,
                             &new_sid,
-                        )?;
+                        ) {
+                            break Err(error);
+                        }
                         current_buffer_ms =
                             bc.as_ref().map(|x| x.buffer_ms).unwrap_or(cfg.server.audio.buffer_ms);
                     }
@@ -964,11 +979,13 @@ async fn session_loop(
                         // clearing our current stream_id.
                         let current_sid = stream_id.clone();
                         stream_id.clear();
-                        switch_stream(
+                        if let Err(error) = switch_stream(
                             &ctrl_tx, &registry,
                             &mut audio_rx, &mut stream_id, &mut bc,
                             &current_sid,
-                        )?;
+                        ) {
+                            break Err(error);
+                        }
                         current_buffer_ms =
                             bc.as_ref().map(|x| x.buffer_ms).unwrap_or(cfg.server.audio.buffer_ms);
                     }
@@ -989,7 +1006,9 @@ async fn session_loop(
                         let lat = c.as_ref().map(|c| c.latency_ms).unwrap_or(0);
                         let obs = c.as_ref().map(|c| c.observability_enabled).unwrap_or(false);
                         let (eq, en) = state.get_stream_eq(&stream_id).unwrap_or_default();
-                        send_server_settings_via_channel(&ctrl_tx, current_buffer_ms, volume, muted, lat, eq, en, obs, effective_mode.to_string(), server_udp_port, cfg.server.audio.output_prefill_ms)?;
+                        if let Err(error) = send_server_settings_via_channel(&ctrl_tx, current_buffer_ms, volume, muted, lat, eq, en, obs, effective_mode.to_string(), server_udp_port, cfg.server.audio.output_prefill_ms) {
+                            break Err(error);
+                        }
                         debug!(%peer, volume, muted, "Volume settings pushed to client");
                     }
 
@@ -999,7 +1018,9 @@ async fn session_loop(
                         let (vol, muted) = state.get_volume(client_id).unwrap_or((100, false));
                         let obs = state.get_client(client_id).map(|c| c.observability_enabled).unwrap_or(false);
                         let (eq, en) = state.get_stream_eq(&stream_id).unwrap_or_default();
-                        send_server_settings_via_channel(&ctrl_tx, current_buffer_ms, vol, muted, latency_ms, eq, en, obs, effective_mode.to_string(), server_udp_port, cfg.server.audio.output_prefill_ms)?;
+                        if let Err(error) = send_server_settings_via_channel(&ctrl_tx, current_buffer_ms, vol, muted, latency_ms, eq, en, obs, effective_mode.to_string(), server_udp_port, cfg.server.audio.output_prefill_ms) {
+                            break Err(error);
+                        }
                         debug!(%peer, latency_ms, "Latency settings pushed to client");
                     }
 
@@ -1016,7 +1037,9 @@ async fn session_loop(
                         let c = state.get_client(client_id);
                         let lat = c.as_ref().map(|c| c.latency_ms).unwrap_or(0);
                         let obs = c.as_ref().map(|c| c.observability_enabled).unwrap_or(false);
-                        send_server_settings_via_channel(&ctrl_tx, current_buffer_ms, vol, muted, lat, eq_bands, enabled, obs, effective_mode.to_string(), server_udp_port, cfg.server.audio.output_prefill_ms)?;
+                        if let Err(error) = send_server_settings_via_channel(&ctrl_tx, current_buffer_ms, vol, muted, lat, eq_bands, enabled, obs, effective_mode.to_string(), server_udp_port, cfg.server.audio.output_prefill_ms) {
+                            break Err(error);
+                        }
                         debug!(%peer, stream_id, "Stream EQ settings pushed to client");
                     }
 
@@ -1062,6 +1085,9 @@ async fn session_loop(
 
     read_task.abort();
     audio_write_task.abort();
+    if let Some(control_write_task) = control_write_task {
+        control_write_task.abort();
+    }
     // Unregister from the NACK router if we were in ARQ mode.
     if let Some(ssrc) = arq_ssrc {
         nack_router.unregister(ssrc).await;
@@ -1494,7 +1520,10 @@ mod tests {
     use sonium_protocol::messages::{AnnouncementControlV1, AnnouncementLifecycle};
     use std::sync::Barrier;
     use std::thread;
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    use tokio::net::TcpListener;
     use tokio::sync::Semaphore;
+    use tokio::time::timeout;
 
     const BUF_MS: u32 = 1200;
 
@@ -1845,6 +1874,60 @@ mod tests {
             ClientSessionPermit::try_acquire(capacity).is_ok(),
             "dropping a session permit must release capacity for the next client"
         );
+    }
+
+    #[tokio::test]
+    async fn fatal_client_message_aborts_arq_reader_and_writers() {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let listener_addr = listener.local_addr().unwrap();
+        let client = tokio::spawn(async move { TcpStream::connect(listener_addr).await.unwrap() });
+        let (server_stream, peer) = listener.accept().await.unwrap();
+        let mut client = client.await.unwrap();
+
+        let state = Arc::new(ServerState::new(
+            Arc::new(sonium_control::EventBus::new()),
+            None,
+            vec![],
+            vec![],
+        ));
+        let udp_socket = Arc::new(UdpSocket::bind("127.0.0.1:0").await.unwrap());
+        state.set_transport_config(TransportMode::Rist, udp_socket.local_addr().unwrap().port());
+        let nack_router = crate::nack_router::NackRouter::new();
+        let cfg = ServerConfig::default();
+        let registry = crate::broadcaster::new_registry();
+        let (reader, writer) = server_stream.into_split();
+
+        let session = tokio::spawn(session_loop(
+            reader,
+            writer,
+            peer,
+            SessionLoopContext {
+                registry,
+                cfg,
+                state,
+                client_id: "fatal-client".into(),
+                session_generation: 1,
+                udp_socket: Some(udp_socket),
+                hello_udp_port: 45_678,
+                nack_router,
+            },
+        ));
+
+        let header = MessageHeader::new(MessageType::AnnouncementControl, 1);
+        client.write_all(&header.to_bytes()).await.unwrap();
+        client.write_all(&[0]).await.unwrap();
+
+        assert!(session.await.unwrap().is_err());
+        let mut bytes = [0u8; 4096];
+        loop {
+            let read = timeout(Duration::from_secs(1), client.read(&mut bytes))
+                .await
+                .unwrap()
+                .unwrap();
+            if read == 0 {
+                break;
+            }
+        }
     }
 
     #[test]
