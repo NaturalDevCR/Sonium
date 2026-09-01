@@ -12,6 +12,7 @@
 //! - **[`discovery`]** — mDNS advertisement + subnet scanner for finding
 //!   Sonium clients and servers on the network.
 
+pub mod announcements;
 pub mod api;
 pub mod auth;
 pub mod auth_api;

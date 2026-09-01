@@ -4,6 +4,7 @@
 //! The server emits events from the [`crate::state::ServerState`] mutation
 //! methods; connected WebSocket handlers subscribe and forward them as JSON.
 
+use crate::announcements::AnnouncementLifecycle;
 use crate::state::{ClientInfo, Group, StreamRecovery, StreamStatus};
 use serde::Serialize;
 use sonium_protocol::messages::{EqBand, HealthReport};
@@ -93,6 +94,13 @@ pub enum Event {
     TransportModeChanged {
         mode: String,
         server_udp_port: u16,
+    },
+    /// Bounded announcement lifecycle transition for the control-plane UI.
+    AnnouncementLifecycle {
+        announcement_id: String,
+        group_id: String,
+        lifecycle: AnnouncementLifecycle,
+        resume: bool,
     },
 }
 

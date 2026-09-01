@@ -31,6 +31,7 @@
 //! | 5  | [`Hello`]       | C→S | Client introduction on connect |
 //! | 7  | [`ClientInfo`]  | C→S | Volume / mute update from client |
 //! | 8  | [`ErrorMsg`]    | S→C | Error notification |
+//! | 11 | `AnnouncementControl` | C↔S | Versioned announcement lifecycle control |
 //!
 //! [`CodecHeader`]:    messages::CodecHeader
 //! [`WireChunk`]:      messages::WireChunk

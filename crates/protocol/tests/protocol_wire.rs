@@ -14,6 +14,23 @@ use sonium_protocol::{
     MessageHeader, MessageType, Timestamp,
 };
 
+#[test]
+fn versioned_announcement_control_message_round_trips_on_its_own_wire_type() {
+    use sonium_protocol::messages::{AnnouncementControlV1, AnnouncementLifecycle};
+
+    let original = AnnouncementControlV1 {
+        version: 1,
+        announcement_id: "018f4ec1-8b8d-7f8f-b75a-0d0e0c000001".into(),
+        group_id: "default".into(),
+        lifecycle: AnnouncementLifecycle::Scheduled,
+        scheduled_at_ms: 1_700_000_000_000,
+        max_duration_ms: 1_000,
+    };
+    let (_, decoded) = parse(&wire(&Message::AnnouncementControl(original.clone())));
+
+    assert!(matches!(decoded, Message::AnnouncementControl(message) if message == original));
+}
+
 // ── Helpers ───────────────────────────────────────────────────────────────
 
 /// Build the full wire bytes for a message: header + payload.

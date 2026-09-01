@@ -3,11 +3,12 @@
 //! Mount with [`router`] inside the server's `axum` application.
 //! All handlers share [`AppState`] via `axum::extract::State`.
 
+use crate::announcements::{AnnouncementError, AnnouncementIntent, AnnouncementLifecycle};
 use crate::auth::{UserStore, WsTicketIssueError};
 use crate::auth_api::{AuthUser, RawToken};
 use crate::state::ServerState;
 use axum::{
-    extract::{Path, Query, Request, State, WebSocketUpgrade},
+    extract::{DefaultBodyLimit, Path, Query, Request, State, WebSocketUpgrade},
     http::{header, HeaderMap, StatusCode},
     middleware::{self, Next},
     response::{IntoResponse, Json, Response},
@@ -60,6 +61,19 @@ pub fn router(state: AppState) -> Router {
         .route("/server/transport", patch(patch_transport))
         .route("/discover/scan", get(get_discover_scan))
         .route("/discover/local-subnet", get(get_discover_local_subnet))
+        .route(
+            "/announcements",
+            get(get_announcements).post(post_announcement),
+        )
+        .route("/announcements/:id", delete(delete_announcement))
+        .route(
+            "/announcements/:id/lifecycle",
+            post(post_announcement_lifecycle),
+        )
+        // Intent metadata is bounded separately from Axum's normal JSON
+        // limit so an authenticated caller cannot create an oversized queue
+        // or control payload.
+        .layer(DefaultBodyLimit::max(16 * 1024))
         .layer(middleware::from_fn(require_operator));
 
     Router::new()
@@ -396,6 +410,80 @@ async fn patch_transport(
 
 async fn get_streams(State(s): State<AppState>) -> impl IntoResponse {
     Json(s.all_streams())
+}
+
+// ── Announcements ────────────────────────────────────────────────────────
+
+fn now_ms() -> i64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_millis()
+        .try_into()
+        .unwrap_or(i64::MAX)
+}
+
+fn announcement_error(error: AnnouncementError) -> Response {
+    let status = match error {
+        AnnouncementError::NotFound(_) => StatusCode::NOT_FOUND,
+        AnnouncementError::QueueDepthExceeded(_) | AnnouncementError::QueueDurationExceeded(_) => {
+            StatusCode::TOO_MANY_REQUESTS
+        }
+        AnnouncementError::IdempotencyConflict | AnnouncementError::InvalidLifecycle => {
+            StatusCode::CONFLICT
+        }
+        _ => StatusCode::BAD_REQUEST,
+    };
+    (status, error.to_string()).into_response()
+}
+
+async fn get_announcements(State(s): State<AppState>) -> impl IntoResponse {
+    s.expire_announcements(now_ms());
+    Json(s.all_announcements())
+}
+
+async fn post_announcement(
+    State(s): State<AppState>,
+    Json(intent): Json<AnnouncementIntent>,
+) -> Response {
+    s.expire_announcements(now_ms());
+    match s.admit_announcement(intent, now_ms()) {
+        Ok(admission) => {
+            let status = if admission.duplicate {
+                StatusCode::OK
+            } else {
+                StatusCode::CREATED
+            };
+            (status, Json(admission)).into_response()
+        }
+        Err(error) => announcement_error(error),
+    }
+}
+
+async fn delete_announcement(State(s): State<AppState>, Path(id): Path<String>) -> Response {
+    s.expire_announcements(now_ms());
+    match s.cancel_announcement(&id) {
+        Ok(()) => StatusCode::NO_CONTENT.into_response(),
+        Err(error) => announcement_error(error),
+    }
+}
+
+#[derive(Deserialize)]
+struct AnnouncementLifecycleBody {
+    group_id: String,
+    lifecycle: AnnouncementLifecycle,
+}
+
+async fn post_announcement_lifecycle(
+    State(s): State<AppState>,
+    Path(id): Path<String>,
+    Json(body): Json<AnnouncementLifecycleBody>,
+) -> Response {
+    s.expire_announcements(now_ms());
+    match s.acknowledge_announcement(&id, &body.group_id, body.lifecycle) {
+        Ok(()) => StatusCode::NO_CONTENT.into_response(),
+        Err(error) => announcement_error(error),
+    }
 }
 
 // ── WebSocket events ──────────────────────────────────────────────────────

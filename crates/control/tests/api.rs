@@ -116,6 +116,132 @@ fn ws_request(url: &str, ticket: &str) -> tokio_tungstenite::tungstenite::http::
     request
 }
 
+fn announcement_body(key: &str) -> Value {
+    json!({
+        "version": 1,
+        "idempotency_key": key,
+        "target_groups": ["default"],
+        "priority": "announcement",
+        "source": {"kind": "uri", "uri": "https://media.example.test/doorbell.ogg"},
+        "duck": {"attenuation_db": -18.0, "attack_ms": 25, "release_ms": 100},
+        "max_duration_ms": 1000,
+        "expires_at_ms": test_expiry_ms(),
+        "resume": "resume_previous"
+    })
+}
+
+fn test_expiry_ms() -> i64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_millis()
+        .try_into()
+        .unwrap_or(i64::MAX - 60_000)
+        + 60_000
+}
+
+#[tokio::test]
+async fn announcement_rest_api_is_authenticated_idempotent_and_bounded() {
+    let (app, token) = make_app();
+    let unauthorized = app
+        .clone()
+        .oneshot(post_json(
+            "/announcements",
+            announcement_body("unauthorized"),
+            "bad-token",
+        ))
+        .await
+        .unwrap();
+    assert_eq!(unauthorized.status(), StatusCode::UNAUTHORIZED);
+
+    let doorbell = announcement_body("doorbell-1");
+    let created = app
+        .clone()
+        .oneshot(post_json("/announcements", doorbell.clone(), &token))
+        .await
+        .unwrap();
+    assert_eq!(created.status(), StatusCode::CREATED);
+    let created_json = json_body(created.into_body()).await;
+    assert!(created_json["id"].is_string());
+    assert!(!created_json["duplicate"].as_bool().unwrap());
+
+    let retried = app
+        .clone()
+        .oneshot(post_json("/announcements", doorbell, &token))
+        .await
+        .unwrap();
+    assert_eq!(retried.status(), StatusCode::OK);
+    let retried_json = json_body(retried.into_body()).await;
+    assert_eq!(retried_json["id"], created_json["id"]);
+    assert!(retried_json["duplicate"].as_bool().unwrap());
+
+    let too_many_targets = app.clone().oneshot(post_json(
+        "/announcements",
+        json!({"version": 1, "idempotency_key": "too-many", "target_groups": (0..33).map(|n| format!("group-{n}")).collect::<Vec<_>>(), "priority": "chime", "source": {"kind":"uri", "uri":"https://media.example.test/a.ogg"}, "duck": {"attenuation_db": -1.0, "attack_ms": 0, "release_ms": 0}, "max_duration_ms": 1, "expires_at_ms": test_expiry_ms(), "resume": "resume_previous"}),
+        &token,
+    )).await.unwrap();
+    assert_eq!(too_many_targets.status(), StatusCode::BAD_REQUEST);
+
+    let mut missing_expiry = announcement_body("no-expiry");
+    missing_expiry
+        .as_object_mut()
+        .unwrap()
+        .remove("expires_at_ms");
+    let missing_expiry = app
+        .oneshot(post_json("/announcements", missing_expiry, &token))
+        .await
+        .unwrap();
+    assert_eq!(missing_expiry.status(), StatusCode::UNPROCESSABLE_ENTITY);
+}
+
+#[tokio::test]
+async fn authenticated_websocket_receives_announcement_lifecycle_events() {
+    use futures_util::StreamExt;
+    use tokio_tungstenite::connect_async;
+    use tokio_tungstenite::tungstenite::Message;
+
+    let state = Arc::new(ServerState::new(
+        Arc::new(EventBus::new()),
+        None,
+        vec![],
+        vec![],
+    ));
+    let (auth, token) = test_auth();
+    let app = api::router(state.clone()).layer(axum::Extension(auth.clone()));
+    let ticket_response = app
+        .oneshot(post_empty("/events/ticket", &token))
+        .await
+        .unwrap();
+    let ticket = json_body(ticket_response.into_body()).await["ticket"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    let (port, _server) = start_ws_test_server(state.clone(), auth).await;
+    let (mut ws, _) = connect_async(ws_request(
+        &format!("ws://127.0.0.1:{port}/events"),
+        &ticket,
+    ))
+    .await
+    .unwrap();
+
+    let intent = serde_json::from_value(announcement_body("ws-announcement")).unwrap();
+    state
+        .admit_announcement(intent, test_expiry_ms() - 60_000)
+        .unwrap();
+
+    let event = tokio::time::timeout(tokio::time::Duration::from_secs(1), ws.next())
+        .await
+        .unwrap()
+        .unwrap()
+        .unwrap();
+    let Message::Text(event) = event else {
+        panic!("expected text event")
+    };
+    let event: Value = serde_json::from_str(&event).unwrap();
+    assert_eq!(event["type"], "announcement_lifecycle");
+    assert_eq!(event["lifecycle"], "scheduled");
+}
+
 // ── /status ───────────────────────────────────────────────────────────────
 
 #[tokio::test]

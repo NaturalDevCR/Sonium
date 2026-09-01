@@ -18,6 +18,10 @@ use std::sync::{
     Arc,
 };
 
+use crate::announcements::{
+    AnnouncementAdmission, AnnouncementCoordinator, AnnouncementError, AnnouncementIntent,
+    AnnouncementLifecycle, AnnouncementLimits, AnnouncementRecord, AnnouncementTransition,
+};
 use crate::persistence::{PersistedClient, PersistedGroup, PersistedStream, PersistenceStore};
 use crate::ws::EventBus;
 use sonium_common::config::validate_client_id;
@@ -188,6 +192,7 @@ pub struct ServerState {
     next_client_generation: AtomicU64,
     stream_status_hook: RwLock<Option<Arc<StreamStatusHook>>>,
     groups: RwLock<HashMap<String, Group>>,
+    announcements: Mutex<AnnouncementCoordinator>,
     streams: RwLock<HashMap<String, StreamInfo>>,
     events: Arc<EventBus>,
     start_time: DateTime<Utc>,
@@ -280,6 +285,9 @@ impl ServerState {
             );
         }
 
+        let announcements =
+            AnnouncementCoordinator::new(AnnouncementLimits::default(), groups.keys().cloned());
+
         Self {
             clients: RwLock::new(
                 saved_clients
@@ -317,6 +325,7 @@ impl ServerState {
             next_client_generation: AtomicU64::new(1),
             stream_status_hook: RwLock::new(None),
             groups: RwLock::new(groups),
+            announcements: Mutex::new(announcements),
             streams: RwLock::new(streams),
             events,
             start_time: Utc::now(),
@@ -372,6 +381,7 @@ impl ServerState {
     pub fn restore_groups(&self, persisted: Vec<PersistedGroup>) {
         let mut groups = self.groups.write();
         for pg in persisted {
+            self.announcements.lock().add_group(pg.id.clone());
             groups.entry(pg.id.clone()).or_insert_with(|| Group {
                 id: pg.id,
                 name: pg.name,
@@ -842,6 +852,7 @@ impl ServerState {
             client_ids: vec![],
         };
         self.groups.write().insert(id.clone(), grp.clone());
+        self.announcements.lock().add_group(id.clone());
         self.events
             .emit(crate::ws::Event::GroupCreated { group: grp });
         self.persist();
@@ -868,6 +879,7 @@ impl ServerState {
             self.events.emit(crate::ws::Event::GroupDeleted {
                 group_id: group_id.into(),
             });
+            self.announcements.lock().remove_group(group_id);
             drop(groups);
             drop(clients);
             self.persist();
@@ -981,6 +993,80 @@ impl ServerState {
 
     pub fn all_groups(&self) -> Vec<Group> {
         self.groups.read().values().cloned().collect()
+    }
+
+    // ── Announcements ─────────────────────────────────────────────────────
+
+    /// Admit a bounded, idempotent announcement intent and broadcast its
+    /// initial lifecycle state to authenticated WebSocket observers.
+    pub fn admit_announcement(
+        &self,
+        intent: AnnouncementIntent,
+        now_ms: i64,
+    ) -> Result<AnnouncementAdmission, AnnouncementError> {
+        let (admission, transitions) = {
+            let mut announcements = self.announcements.lock();
+            let admission = announcements.admit(intent, now_ms)?;
+            let transitions = if admission.duplicate {
+                Vec::new()
+            } else {
+                announcements
+                    .record(&admission.id)
+                    .expect("admitted announcement exists")
+                    .groups
+                    .iter()
+                    .map(|group| AnnouncementTransition {
+                        announcement_id: admission.id.clone(),
+                        group_id: group.group_id.clone(),
+                        lifecycle: AnnouncementLifecycle::Scheduled,
+                        resume: false,
+                    })
+                    .collect()
+            };
+            (admission, transitions)
+        };
+        self.emit_announcement_transitions(transitions);
+        Ok(admission)
+    }
+
+    pub fn acknowledge_announcement(
+        &self,
+        id: &str,
+        group_id: &str,
+        lifecycle: AnnouncementLifecycle,
+    ) -> Result<(), AnnouncementError> {
+        let transitions = self
+            .announcements
+            .lock()
+            .acknowledge(id, group_id, lifecycle)?;
+        self.emit_announcement_transitions(transitions);
+        Ok(())
+    }
+
+    pub fn cancel_announcement(&self, id: &str) -> Result<(), AnnouncementError> {
+        let transitions = self.announcements.lock().cancel(id)?;
+        self.emit_announcement_transitions(transitions);
+        Ok(())
+    }
+
+    pub fn expire_announcements(&self, now_ms: i64) {
+        let transitions = self.announcements.lock().expire(now_ms);
+        self.emit_announcement_transitions(transitions);
+    }
+
+    pub fn all_announcements(&self) -> Vec<AnnouncementRecord> {
+        self.announcements.lock().records()
+    }
+
+    fn emit_announcement_transitions(&self, transitions: Vec<AnnouncementTransition>) {
+        for transition in transitions {
+            self.events.emit(crate::ws::Event::AnnouncementLifecycle {
+                announcement_id: transition.announcement_id,
+                group_id: transition.group_id,
+                lifecycle: transition.lifecycle,
+                resume: transition.resume,
+            });
+        }
     }
 
     pub fn get_group(&self, id: &str) -> Option<Group> {
