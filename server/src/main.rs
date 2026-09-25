@@ -1,5 +1,6 @@
 mod broadcaster;
 mod control_server;
+mod duck;
 mod encoder;
 mod media;
 mod metrics;

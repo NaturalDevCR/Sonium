@@ -10,6 +10,7 @@
 
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
+pub use sonium_common::config::AnnouncementMode;
 use tokio::sync::oneshot;
 
 /// An active one-shot media playback.
@@ -23,6 +24,9 @@ pub struct MediaSession {
     pub client_ids: Vec<String>,
     /// Temporary volume (0–100) applied to the target clients, if any.
     pub volume: Option<u8>,
+    /// `duck` mixes the media over the lowered music; `replace` silences it.
+    #[serde(default)]
+    pub mode: AnnouncementMode,
     /// When playback was requested.
     pub started_at: DateTime<Utc>,
 }
@@ -32,6 +36,11 @@ pub struct PlayMediaRequest {
     pub url: String,
     pub client_ids: Vec<String>,
     pub volume: Option<u8>,
+    /// Per-request overrides of the `[announcements]` defaults.
+    pub mode: Option<AnnouncementMode>,
+    pub duck_db: Option<f32>,
+    pub attack_ms: Option<u32>,
+    pub release_ms: Option<u32>,
     pub respond_to: oneshot::Sender<Result<MediaSession, String>>,
 }
 

@@ -183,8 +183,14 @@ class SoniumApiClient:
         client_ids: list[str] | None = None,
         group_ids: list[str] | None = None,
         volume: int | None = None,
+        options: dict[str, Any] | None = None,
     ) -> dict:
-        """Play a URL once (announcement/TTS), then resume the previous source."""
+        """Play a URL once (announcement/TTS), then resume the previous source.
+
+        ``options`` may carry ``mode`` ("duck" or "replace"), ``duck_db``,
+        ``attack_ms`` and ``release_ms``; the server's ``[announcements]``
+        defaults apply to anything omitted.
+        """
         body: dict[str, Any] = {
             "url": url,
             "client_ids": client_ids or [],
@@ -192,6 +198,7 @@ class SoniumApiClient:
         }
         if volume is not None:
             body["volume"] = max(0, min(100, int(volume)))
+        body.update(options or {})
         return await self._request("POST", "/api/media/play", json=body)
 
     async def stop_media(self, media_id: str) -> None:

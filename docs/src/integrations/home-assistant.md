@@ -118,6 +118,35 @@ data:
     volume: 0.6
 ```
 
+#### Duck or replace, and routing
+
+By default the music keeps playing **under** the announcement (`duck` mode):
+it fades down, the announcement plays on top, and the music fades back up,
+without interrupting playback. Use `replace` mode to silence the music
+completely while the announcement plays. Set the default in `sonium.toml`
+(`[announcements] mode = "duck"` or `"replace"`) and override it per call:
+
+```yaml
+action: media_player.play_media
+target:
+  entity_id: [media_player.kitchen, media_player.patio]   # route to these only
+data:
+  media_content_id: "http://192.168.1.10:8123/local/doorbell.mp3"
+  media_content_type: music
+  announce: true
+  extra:
+    mode: replace          # or duck
+    volume: 0.6            # optional temporary volume
+    duck_db: -24           # duck mode only: how much to lower the music
+    attack_ms: 150         # fade-down time
+    release_ms: 600        # fade-up time
+```
+
+Routing is per call: target any speakers (client players) and/or zones
+(group players). Only those play the announcement; every other zone keeps
+its music untouched. Speakers whose music is idle simply play the
+announcement.
+
 `sonium.play_announcement` keeps its duck-only behaviour: it schedules
 synchronized ducking but does not fetch `source`; provide that audio through an
 existing Sonium stream. Cancellation is available as

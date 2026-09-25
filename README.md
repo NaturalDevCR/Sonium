@@ -31,7 +31,8 @@ music source -> sonium-server -> LAN -> sonium-client -> speaker
 
 - **Announcements, TTS and URL playback** (`POST /api/media/play`, Home
   Assistant `tts.speak` / `play_media` with `announce`): plays once on the
-  target speakers or zones in sync, then resumes the previous source.
+  target speakers or zones in sync, either ducking the music underneath
+  (default) or replacing it, then resumes the previous source.
 - **Built-in web UI** with control view, admin dashboard, and **real-time sync
   monitor**, refreshed responsive styling, and role-aware routes.
 - **Users, roles, JWT auth**, first-run/admin setup, and role-aware UI.

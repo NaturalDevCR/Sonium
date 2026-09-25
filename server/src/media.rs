@@ -18,7 +18,7 @@ use tracing::{debug, info, warn};
 use sonium_codec::make_encoder;
 use sonium_common::config::ServerConfig;
 use sonium_common::SampleFormat;
-use sonium_control::media::{MediaSession, PlayMediaRequest};
+use sonium_control::media::{AnnouncementMode, MediaSession, PlayMediaRequest};
 use sonium_control::ServerState;
 use sonium_protocol::{
     messages::{CodecHeader, Message, WireChunk},
@@ -26,6 +26,7 @@ use sonium_protocol::{
 };
 
 use crate::broadcaster::{self, Broadcaster, BroadcasterRegistry};
+use crate::duck;
 use crate::streamreader::{read_pcm_frame, stream_chunk_ms, FrameRead, Pacer};
 
 /// Silence published before the media starts, so every client has switched
@@ -49,11 +50,56 @@ pub fn spawn_worker(
     let (tx, mut rx) = mpsc::channel::<PlayMediaRequest>(16);
     tokio::spawn(async move {
         while let Some(req) = rx.recv().await {
-            let result = start(req.url, req.client_ids, req.volume, &registry, &state, &cfg);
+            let result = dispatch(&req, &registry, &state, &cfg);
             let _ = req.respond_to.send(result);
         }
     });
     tx
+}
+
+/// Pick duck or replace mode (request override, else `[announcements]`).
+fn dispatch(
+    req: &PlayMediaRequest,
+    registry: &Arc<BroadcasterRegistry>,
+    state: &Arc<ServerState>,
+    cfg: &ServerConfig,
+) -> Result<MediaSession, String> {
+    let defaults = &cfg.announcements;
+    let mode = req.mode.unwrap_or(defaults.mode);
+    if mode == AnnouncementMode::Duck {
+        let (plans, fallback) = duck::plan(&req.client_ids, registry, state);
+        if !plans.is_empty() {
+            if !fallback.is_empty() {
+                // Speakers whose music cannot be ducked (idle, missing or not
+                // re-encodable) still get the announcement, replacing silence.
+                info!(clients = ?fallback, "Using replace mode for clients without duckable music");
+                if let Err(e) = start(req.url.clone(), fallback, req.volume, registry, state, cfg) {
+                    warn!("Replace-mode fallback failed: {e}");
+                }
+            }
+            let params = duck::DuckParams {
+                duck_db: req.duck_db.unwrap_or(defaults.duck_db).clamp(-60.0, 0.0),
+                attack_ms: req.attack_ms.unwrap_or(defaults.attack_ms),
+                release_ms: req.release_ms.unwrap_or(defaults.release_ms),
+            };
+            return Ok(duck::start(
+                req.url.clone(),
+                plans,
+                req.volume,
+                params,
+                registry,
+                state,
+            ));
+        }
+    }
+    start(
+        req.url.clone(),
+        req.client_ids.clone(),
+        req.volume,
+        registry,
+        state,
+        cfg,
+    )
 }
 
 /// Codec and format for the temporary stream: reuse the first target's
@@ -122,6 +168,7 @@ fn start(
         url: url.clone(),
         client_ids,
         volume,
+        mode: AnnouncementMode::Replace,
         started_at: chrono::Utc::now(),
     };
     info!(media = %id, url = %url, clients = ?session.client_ids, codec = %codec, "Starting media playback");

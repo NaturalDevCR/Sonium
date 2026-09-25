@@ -431,6 +431,17 @@ struct PlayMediaBody {
     /// Optional temporary volume (0–100) for the target clients.
     #[serde(default)]
     volume: Option<u8>,
+    /// `duck` (music lowered underneath) or `replace` (music silenced).
+    /// Defaults to `[announcements] mode` in the server config.
+    #[serde(default)]
+    mode: Option<crate::media::AnnouncementMode>,
+    /// Music attenuation in dB while ducked (-60..0).
+    #[serde(default)]
+    duck_db: Option<f32>,
+    #[serde(default)]
+    attack_ms: Option<u32>,
+    #[serde(default)]
+    release_ms: Option<u32>,
 }
 
 /// Play a URL once on the given clients/groups, then return them to their
@@ -441,6 +452,18 @@ async fn post_media_play(State(s): State<AppState>, Json(body): Json<PlayMediaBo
     }
     if matches!(body.volume, Some(v) if v > 100) {
         return (StatusCode::BAD_REQUEST, "volume must be between 0 and 100").into_response();
+    }
+    if matches!(body.duck_db, Some(db) if !(-60.0..=0.0).contains(&db)) {
+        return (StatusCode::BAD_REQUEST, "duck_db must be between -60 and 0").into_response();
+    }
+    if matches!(body.attack_ms, Some(ms) if ms > 5_000)
+        || matches!(body.release_ms, Some(ms) if ms > 10_000)
+    {
+        return (
+            StatusCode::BAD_REQUEST,
+            "attack_ms must be at most 5000 and release_ms at most 10000",
+        )
+            .into_response();
     }
 
     let mut client_ids: Vec<String> = Vec::new();
@@ -482,6 +505,10 @@ async fn post_media_play(State(s): State<AppState>, Json(body): Json<PlayMediaBo
         url: body.url.trim().to_owned(),
         client_ids,
         volume: body.volume,
+        mode: body.mode,
+        duck_db: body.duck_db,
+        attack_ms: body.attack_ms,
+        release_ms: body.release_ms,
         respond_to,
     };
     if backend.send(request).await.is_err() {

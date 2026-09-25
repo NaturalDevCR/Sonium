@@ -236,11 +236,14 @@ have `ffmpeg` installed.
 
 | Method | Path | Description |
 | --- | --- | --- |
-| `POST` | `/api/media/play` | Body `{"url": "http(s)://…", "client_ids": [], "group_ids": [], "volume": 0-100?}` → `202` with `{id, url, client_ids, volume, started_at}` |
+| `POST` | `/api/media/play` | Body `{"url": "http(s)://…", "client_ids": [], "group_ids": [], "volume": 0-100?, "mode": "duck"\|"replace"?, "duck_db": -60..0?, "attack_ms": ≤5000?, "release_ms": ≤10000?}` → `202` with `{id, url, client_ids, volume, mode, started_at}` |
 | `GET` | `/api/media` | Active media playbacks |
 | `DELETE` | `/api/media/{id}` | Stop one; clients return to their group stream |
 
-Only `http`/`https` URLs are accepted (`400` otherwise); unknown clients or
+`mode` defaults to `[announcements] mode` (`duck`): the music of the targets
+keeps playing, lowered by `duck_db`, with the announcement mixed on top and no
+interruption. `replace` silences the music instead. Only `http`/`https` URLs
+are accepted (`400` otherwise); unknown clients or
 groups return `404`. Playback starts once the first audio is decoded (a failing
 URL never interrupts current playback), then the targets switch to a temporary
 synchronized stream with an optional temporary volume and switch back after the
