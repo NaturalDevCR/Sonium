@@ -31,6 +31,67 @@ fn rms_dbfs(pcm: &[i16]) -> f32 {
     (20.0 * rms.log10()) as f32
 }
 
+/// Assigns continuous, real-time paced timestamps to outgoing chunks.
+///
+/// Mirrors Snapcast's stream readers: each chunk's timestamp is the previous
+/// one plus the chunk duration, and a chunk is never published before its
+/// timestamp. This throttles sources that deliver faster than real time
+/// (plain files, `cat file > fifo`, MPD/Mopidy FIFO outputs, ffmpeg decoding
+/// a URL, Icecast burst-on-connect) through normal pipe back-pressure, and
+/// removes read-scheduling jitter from the timestamps clients schedule on.
+///
+/// When the source falls behind (stall, idle gap) or the wall clock jumps by
+/// more than `tolerance_us`, the timeline re-anchors to "now".
+pub(crate) struct Pacer {
+    chunk_us: i64,
+    tolerance_us: i64,
+    next_ts_us: Option<i64>,
+}
+
+impl Pacer {
+    pub(crate) fn new(chunk_ms: u32, buffer_ms: u32) -> Self {
+        let chunk_us = i64::from(chunk_ms.max(1)) * 1000;
+        // Late data is still playable while it arrives within the client
+        // buffer, so tolerate up to half of it before re-anchoring.
+        let tolerance_us = (i64::from(buffer_ms) * 1000 / 2).clamp(2 * chunk_us, 1_000_000);
+        Self {
+            chunk_us,
+            tolerance_us,
+            next_ts_us: None,
+        }
+    }
+
+    /// Timestamp (µs, server wall clock) for the next chunk given `now_us`.
+    pub(crate) fn slot(&self, now_us: i64) -> i64 {
+        match self.next_ts_us {
+            Some(ts) if now_us - ts <= self.tolerance_us && ts - now_us <= self.tolerance_us => ts,
+            _ => now_us,
+        }
+    }
+
+    /// Mark the slot starting at `ts_us` as used.
+    pub(crate) fn advance(&mut self, ts_us: i64) {
+        self.next_ts_us = Some(ts_us + self.chunk_us);
+    }
+
+    /// Next slot timestamp and how long until it is due.
+    pub(crate) fn time_until_slot(&self) -> (i64, Duration) {
+        let now = sonium_sync::time_provider::now_us();
+        let ts = self.slot(now);
+        (ts, Duration::from_micros((ts - now).max(0) as u64))
+    }
+
+    /// Wait until the next slot is due and claim it. Returns its timestamp.
+    pub(crate) async fn wait_for_slot(&mut self) -> i64 {
+        let (ts, wait) = self.time_until_slot();
+        if !wait.is_zero() {
+            tokio::time::sleep(wait).await;
+        }
+        self.advance(ts);
+        ts
+    }
+}
+
 /// Read PCM from stdin, a named FIFO, TCP, or an external process, encode, and broadcast.
 ///
 /// Source format:
@@ -87,6 +148,7 @@ pub async fn run(
     let silence_on_idle = stream.silence_on_idle;
 
     let chunk_ms = stream_chunk_ms(&stream);
+    let mut pacer = Pacer::new(chunk_ms, stream.buffer_ms.unwrap_or(bc.buffer_ms));
 
     if stream.source == "-" {
         run_reader(
@@ -99,7 +161,7 @@ pub async fn run(
             &state,
             idle_timeout,
             silence_on_idle,
-            chunk_ms,
+            &mut pacer,
         )
         .await
     } else if stream.source.starts_with("pipe://") {
@@ -113,7 +175,7 @@ pub async fn run(
             &state,
             idle_timeout,
             silence_on_idle,
-            chunk_ms,
+            &mut pacer,
         )
         .await
     } else if let Some(tcp) = parse_tcp_source(&stream.source)? {
@@ -127,7 +189,7 @@ pub async fn run(
             &state,
             idle_timeout,
             silence_on_idle,
-            chunk_ms,
+            &mut pacer,
         )
         .await
     } else {
@@ -144,7 +206,7 @@ pub async fn run(
             &state,
             idle_timeout,
             silence_on_idle,
-            chunk_ms,
+            &mut pacer,
         )
         .await
     }
@@ -193,6 +255,7 @@ async fn run_meta(
         frame: crate::broadcaster::AudioFrame,
     }
     let (tx, mut rx) = tokio::sync::mpsc::channel::<Tagged>(1024);
+    let mut primary_header: Option<Bytes> = None;
 
     for (idx, source_id) in source_ids.iter().enumerate() {
         // Wait up to 5 s for each source broadcaster to register.
@@ -214,17 +277,31 @@ async fn run_meta(
             }
         };
 
-        // Borrow codec header from the first (highest-priority) source.
+        let mut attempts = 0;
+        while source_bc.codec_header().is_none() && attempts < 50 {
+            tokio::time::sleep(Duration::from_millis(100)).await;
+            attempts += 1;
+        }
+
+        // Borrow the codec header from the first (highest-priority) source.
+        // Encoded frames are forwarded as-is, so every other source must use
+        // exactly the same codec and sample format — clients only receive a new
+        // header when their stream changes, not when the meta stream fails over.
         if idx == 0 {
-            let mut attempts = 0;
-            while source_bc.codec_header().is_none() && attempts < 50 {
-                tokio::time::sleep(Duration::from_millis(100)).await;
-                attempts += 1;
-            }
             if let Some(hdr) = source_bc.codec_header() {
-                bc.set_codec_header(hdr);
+                bc.set_codec_header(hdr.clone());
+                primary_header = Some(hdr);
             } else {
                 warn!(meta = %stream.id, "Primary source has no codec header yet — clients may connect without one");
+            }
+        } else if let (Some(primary), Some(hdr)) = (&primary_header, source_bc.codec_header()) {
+            if *primary != hdr {
+                warn!(
+                    meta = %stream.id,
+                    source = %source_id,
+                    "Source uses a different codec or sample format than the primary source — skipping it (use the same codec/sample_format for all meta sources)"
+                );
+                continue;
             }
         }
 
@@ -341,7 +418,7 @@ async fn run_tcp(
     state: &Arc<ServerState>,
     idle_timeout: Option<Duration>,
     silence_on_idle: bool,
-    chunk_ms: u32,
+    pacer: &mut Pacer,
 ) -> anyhow::Result<()> {
     match tcp.mode {
         TcpMode::Connect => {
@@ -359,7 +436,7 @@ async fn run_tcp(
                 state,
                 idle_timeout,
                 silence_on_idle,
-                chunk_ms,
+                pacer,
             )
             .await
         }
@@ -382,7 +459,7 @@ async fn run_tcp(
                     state,
                     idle_timeout,
                     silence_on_idle,
-                    chunk_ms,
+                    pacer,
                 )
                 .await
                 {
@@ -408,7 +485,7 @@ async fn run_pipe(
     state: &Arc<ServerState>,
     idle_timeout: Option<Duration>,
     silence_on_idle: bool,
-    chunk_ms: u32,
+    pacer: &mut Pacer,
 ) -> anyhow::Result<()> {
     let (cmd, args) = parse_pipe_uri(uri)?;
 
@@ -452,7 +529,7 @@ async fn run_pipe(
             state,
             idle_timeout,
             silence_on_idle,
-            chunk_ms,
+            pacer,
         )
         .await;
 
@@ -545,7 +622,7 @@ async fn run_reader<R: AsyncReadExt + Unpin>(
     state: &Arc<ServerState>,
     idle_timeout: Option<Duration>,
     silence_on_idle: bool,
-    chunk_ms: u32,
+    pacer: &mut Pacer,
 ) -> anyhow::Result<()> {
     let silence_pcm: Vec<i16> = vec![0i16; pcm_buf.len() / 2];
     let mut is_idle = false;
@@ -581,11 +658,9 @@ async fn run_reader<R: AsyncReadExt + Unpin>(
                     }
 
                     if silence_on_idle {
-                        // Emit silence frames at chunk_ms intervals until data returns.
-                        let mut tick =
-                            tokio::time::interval(Duration::from_millis(chunk_ms as u64));
-                        tick.tick().await; // discard immediate first tick
+                        // Emit paced silence frames until data returns.
                         loop {
+                            let (silence_ts, silence_wait) = pacer.time_until_slot();
                             tokio::select! {
                                 biased;
                                 result = read_pcm_frame(&mut src, pcm_buf, &mut pcm_filled, None) => {
@@ -606,18 +681,25 @@ async fn run_reader<R: AsyncReadExt + Unpin>(
                                     }
                                     break; // exit silence loop, encode the received frame
                                 }
-                                _ = tick.tick() => {
+                                _ = tokio::time::sleep(silence_wait) => {
+                                    pacer.advance(silence_ts);
                                     enc_buf.clear();
                                     if encoder.encode(&silence_pcm, enc_buf).is_ok() {
-                                        let chunk = WireChunk::new(Timestamp::now(), enc_buf.clone());
+                                        let chunk = WireChunk::new(
+                                            Timestamp::from_micros(silence_ts),
+                                            enc_buf.clone(),
+                                        );
                                         bc.publish(Bytes::from(Message::WireChunk(chunk).encode()));
                                     }
                                 }
                             }
                         }
+                        // The silence loop only exits with a freshly read frame.
+                        true
+                    } else {
+                        // No complete frame yet; keep waiting (partial data is preserved).
+                        false
                     }
-                    // (If silence_on_idle is false, we simply looped back and try read again.)
-                    true
                 }
             }
         } else {
@@ -658,7 +740,9 @@ async fn run_reader<R: AsyncReadExt + Unpin>(
             continue;
         }
 
-        let chunk = WireChunk::new(Timestamp::now(), enc_buf.clone());
+        // Pace to real time and stamp with the continuous timeline.
+        let ts_us = pacer.wait_for_slot().await;
+        let chunk = WireChunk::new(Timestamp::from_micros(ts_us), enc_buf.clone());
         debug!(
             stream = stream_id,
             bytes = enc_buf.len(),
@@ -726,6 +810,51 @@ async fn read_pcm_frame<R: AsyncReadExt + Unpin>(
 mod tests {
     use super::*;
     use tokio::io::AsyncWriteExt;
+
+    #[test]
+    fn pacer_produces_continuous_timeline() {
+        let mut pacer = Pacer::new(20, 200);
+        let t0 = 1_000_000_000;
+        assert_eq!(pacer.slot(t0), t0);
+        pacer.advance(t0);
+        // Source delivered early: keep the timeline (caller waits).
+        assert_eq!(pacer.slot(t0 + 5_000), t0 + 20_000);
+        pacer.advance(t0 + 20_000);
+        // Slightly late data stays on the timeline (within tolerance).
+        assert_eq!(pacer.slot(t0 + 90_000), t0 + 40_000);
+    }
+
+    #[test]
+    fn pacer_reanchors_after_stall_or_clock_jump() {
+        let mut pacer = Pacer::new(20, 200);
+        let t0 = 1_000_000_000;
+        pacer.advance(t0);
+        // 100 ms tolerance (half of 200 ms buffer) exceeded -> re-anchor.
+        assert_eq!(pacer.slot(t0 + 500_000), t0 + 500_000);
+        // Wall clock stepped backwards -> re-anchor instead of sleeping.
+        assert_eq!(pacer.slot(t0 - 10_000_000), t0 - 10_000_000);
+    }
+
+    #[test]
+    fn pacer_tolerance_is_bounded() {
+        assert_eq!(Pacer::new(20, 10).tolerance_us, 40_000);
+        assert_eq!(Pacer::new(20, 60_000).tolerance_us, 1_000_000);
+    }
+
+    #[tokio::test]
+    async fn pacer_throttles_fast_source_to_real_time() {
+        let mut pacer = Pacer::new(10, 200);
+        let started = std::time::Instant::now();
+        let mut stamps = Vec::new();
+        for _ in 0..10 {
+            stamps.push(pacer.wait_for_slot().await);
+        }
+        // 10 chunks of 10 ms: the last one is due ~90 ms after the first.
+        assert!(started.elapsed() >= Duration::from_millis(85));
+        for pair in stamps.windows(2) {
+            assert_eq!(pair[1] - pair[0], 10_000);
+        }
+    }
 
     #[tokio::test]
     async fn read_pcm_frame_preserves_partial_data_after_idle() {
