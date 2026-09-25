@@ -746,6 +746,14 @@ Live v0.1.55 Wi-Fi validation:
   - Added explicit `output_prefill_ms` so network jitter depth and local audio-device prefill can be tuned separately. `0` preserves the previous automatic `buffer_ms / 4` behavior.
   - Added web UI presets for Stable TCP, Balanced TCP, Adaptive Wi-Fi, and RTP/UDP lab so these modes are selectable without hand-editing TOML.
 
+Status update (2026-06-04):
+
+- A fourth transport mode, `rist`, has been implemented **ahead of the original plan**: a Sonium-native ARQ/FEC path over UDP (NACK-based retransmission + XOR FEC) in `crates/transport/src/arq.rs`, `arq_sender.rs`, and `arq_receiver.rs`, exposed as `TransportMode::Rist`. The plan above deferred FEC (see "Future FEC"); it now exists as an experimental mode alongside `rtp_udp`.
+- Implemented transports today: `tcp` (stable default), `rtp_udp` (implemented, still validating), `rist` (experimental ARQ/FEC). `quic_dgram` remains a stub (`unimplemented!()`, Phase 5).
+- Phase 2.5 receiver reports are **partial**: RTP counters (`rtp_packets_received`, `rtp_sequence_gaps`, `rtp_decode_errors`, `rtp_concealed_packets`) ride in the HealthReport, but there is no formal RTCP-style report path.
+- **Not yet implemented:** Phase 4 configurable QoS (only a fixed DSCP EF mark is applied to sockets today — no `[network.qos]` config or network profiles), Phase 5 QUIC DATAGRAM, and Phase 6 transport negotiation / capability advertisement / automatic fallback (the transport mode is still snapshotted at session start, new-connections-only).
+- The main remaining work for `rtp_udp` / `rist` is **validation on real LAN/Wi-Fi hardware**, not new code.
+
 ---
 
 ## Phase 0 - Baseline and observability hardening

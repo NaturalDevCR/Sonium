@@ -48,6 +48,8 @@ pub enum MessageType {
     HealthReport = 9,
     /// Group-wide playout timeline synchronisation.
     GroupSync = 10,
+    /// Versioned announcement lifecycle control (Sonium extension, v1 payload).
+    AnnouncementControl = 11,
 }
 
 impl TryFrom<u16> for MessageType {
@@ -64,6 +66,7 @@ impl TryFrom<u16> for MessageType {
             8 => Ok(Self::ErrorMsg),
             9 => Ok(Self::HealthReport),
             10 => Ok(Self::GroupSync),
+            11 => Ok(Self::AnnouncementControl),
             n => Err(SoniumError::Protocol(format!("unknown message type {n}"))),
         }
     }
@@ -82,6 +85,7 @@ impl std::fmt::Display for MessageType {
             Self::ErrorMsg => "Error",
             Self::HealthReport => "Health",
             Self::GroupSync => "GroupSync",
+            Self::AnnouncementControl => "AnnouncementControl",
         };
         f.write_str(s)
     }
@@ -99,6 +103,7 @@ pub fn max_payload_size(msg_type: MessageType) -> usize {
         MessageType::ErrorMsg => 64 * 1024,
         MessageType::HealthReport => 1024,
         MessageType::GroupSync => 64,
+        MessageType::AnnouncementControl => 16 * 1024,
     }
 }
 
@@ -261,6 +266,7 @@ mod tests {
             (8, MessageType::ErrorMsg),
             (9, MessageType::HealthReport),
             (10, MessageType::GroupSync),
+            (11, MessageType::AnnouncementControl),
         ];
         for (raw, expected) in variants {
             let got = MessageType::try_from(raw).expect("should parse");
@@ -274,7 +280,7 @@ mod tests {
     fn unknown_type_returns_error() {
         // Type 6 is not assigned in the Sonium protocol
         assert!(MessageType::try_from(6u16).is_err());
-        assert!(MessageType::try_from(11u16).is_err());
+        assert!(MessageType::try_from(12u16).is_err());
         assert!(MessageType::try_from(u16::MAX).is_err());
     }
 

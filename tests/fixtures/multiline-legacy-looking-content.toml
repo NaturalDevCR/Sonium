@@ -1,0 +1,19 @@
+[metadata]
+basic_note = """
+["server"]
+buffer_ms = 1000
+"chunk_ms" = 20
+'output_prefill_ms' = 0
+"""
+
+literal_note = '''
+['server']
+buffer_ms = 1000
+"chunk_ms" = 20
+'output_prefill_ms' = 0
+'''
+
+[server.audio]
+buffer_ms = 200
+chunk_ms = 10
+output_prefill_ms = 0

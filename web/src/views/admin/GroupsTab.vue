@@ -175,7 +175,7 @@ const ungroupedClients = computed(() =>
         </div>
 
         <div class="flex items-center gap-2 shrink-0">
-          <StreamBadge v-if="stream" :status="stream.status" />
+          <StreamBadge v-if="stream" :status="stream.status" :recovery="stream.recovery" />
 
           <!-- Stream selector -->
           <select

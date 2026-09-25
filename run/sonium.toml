@@ -1,7 +1,11 @@
 [server]
 bind = "127.0.0.1"
+# The web UI/API and metrics listener remain local unless deliberately exposed.
+control_bind = "127.0.0.1"
 stream_port = 1710
 control_port = 1711
+max_clients = 64
+max_known_clients = 256
 mdns = false
 snapcast_compat = false
 

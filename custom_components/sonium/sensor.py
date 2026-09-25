@@ -20,6 +20,7 @@ _LOGGER = logging.getLogger(__name__)
 STREAM_STATUS_MAP = {
     "playing": "playing",
     "idle": "idle",
+    "recovering": "recovering",
     "error": "error",
 }
 
@@ -102,7 +103,13 @@ class SoniumStreamStatusSensor(SoniumEntity, SensorEntity):
         s = self._stream
         if s is None:
             return {}
-        return {"codec": s.codec, "format": s.format, "stream_id": s.id}
+        attributes = {"codec": s.codec, "format": s.format, "stream_id": s.id}
+        if s.recovery:
+            attributes.update(
+                recovery_attempt=s.recovery.attempt,
+                retry_in_ms=s.recovery.retry_in_ms,
+            )
+        return attributes
 
 
 class _ClientHealthSensor(SoniumEntity, SensorEntity):

@@ -66,6 +66,16 @@ The Linux installer downloads the right release package, writes
 systemd service. It also installs a narrowly scoped sudoers rule so the web UI
 can restart `sonium-server.service` after admin-approved config changes.
 
+The generated control listener is `127.0.0.1`, while the audio listener is
+available on the LAN. This is deliberately a trusted-LAN profile: media is not
+TLS-encrypted or authenticated. Do not expose Sonium through a router or public
+address. To administer from another LAN machine, change `control_bind`
+explicitly and restrict `control_port` with the host firewall.
+
+`/etc/sonium` is private (`0700`) because `users.json` within it holds password
+hashes and the persistent JWT signing secret. Keep that directory persistent,
+back it up securely, and never add its contents to a configuration repository.
+
 ```bash
 curl -fsSL https://github.com/NaturalDevCR/Sonium/releases/latest/download/install.sh | sudo bash
 ```
@@ -85,6 +95,23 @@ After installation:
 ```bash
 systemctl status sonium-server
 journalctl -u sonium-server -f
+```
+
+If upgrading an existing deployment, leave `users.json` in place. Old records
+without `session_version` migrate to version `0` on a successful startup; users
+must sign in again to obtain versioned tokens. A corrupt or unreadable existing
+account file stops the server and is deliberately not replaced—restore it from
+a known-good backup before retrying.
+
+The installer also checks an existing `sonium.toml` **before** it downloads,
+replaces binaries, or changes systemd. Phase 1 rejects legacy
+`buffer_ms`, `chunk_ms`, and `output_prefill_ms` keys under `[server]`; if it
+finds any, it aborts without stopping the existing service and tells you to move
+those same values under `[server.audio]`, then rerun. Check an upgrade file
+without installing anything with:
+
+```bash
+sudo bash install.sh --preflight-config /etc/sonium/sonium.toml
 ```
 
 If the admin UI says restart is not permitted, the service was likely installed
@@ -134,18 +161,66 @@ xattr -d com.apple.quarantine sonium-server sonium-client
 On Windows, run from PowerShell:
 
 ```powershell
+$adminPassword = Read-Host -AsSecureString "Initial Sonium admin password"
+$bstr = [Runtime.InteropServices.Marshal]::SecureStringToBSTR($adminPassword)
+try {
+  $plainPassword = [Runtime.InteropServices.Marshal]::PtrToStringBSTR($bstr)
+  $plainPassword | .\sonium-server.exe --config .\sonium.toml --init-admin
+  if ($LASTEXITCODE -ne 0) { throw "Initial admin setup failed" }
+}
+finally {
+  if ($null -ne $bstr) { [Runtime.InteropServices.Marshal]::ZeroFreeBSTR($bstr) }
+  Remove-Variable plainPassword -ErrorAction SilentlyContinue
+}
 .\sonium-server.exe --config .\sonium.toml
 .\sonium-client.exe 192.168.1.50
 ```
 
+The password is prompted rather than written into PowerShell history, TOML, or
+an environment file, then is passed over the child process's standard input.
+Run the bootstrap on the local trusted machine before the first normal server
+start; a server without `users.json` intentionally refuses to start. If you
+previously automated `--init-admin PASSWORD`, replace it with stdin input: the
+plaintext argument form is deliberately rejected.
+
 ## Docker Server
 
 Docker is useful for the server. The client should usually run directly on the
-playback device because it needs access to local audio hardware.
+playback device because it needs access to local audio hardware. On first boot,
+prompt for the administrator password without putting it in Compose, TOML, or
+shell history, then run the bootstrap profile before the server service:
 
 ```bash
-docker compose up -d
+read -r -s -p "Initial Sonium admin password: " SONIUM_INIT_ADMIN_PASSWORD
+printf '\n'
+export SONIUM_INIT_ADMIN_PASSWORD
+if docker compose --profile bootstrap run --rm init-admin; then
+  unset SONIUM_INIT_ADMIN_PASSWORD
+  docker compose up -d
+else
+  status=$?
+  unset SONIUM_INIT_ADMIN_PASSWORD
+  exit "$status"
+fi
 ```
+
+The Compose template supplies a strict, valid TOML file, persists `users.json`
+in the named volume, and publishes the control port only as
+`127.0.0.1:1711`. Open it on the Docker host or through an SSH tunnel. To make
+it reachable from a trusted LAN, deliberately change the published port and
+add host-firewall restrictions; that does not add TLS or media authentication.
+The included stream reads stdin as a placeholder. Replace it with a mounted
+file/FIFO source for a persistent deployment. Only recoverable file/FIFO
+open/read/EOF conditions enter `recovering` and reopen automatically; terminal
+path errors such as permissions, directories, unsupported paths, or symlink
+loops enter `error`. A `pipe://` child closing uses its separate restart loop
+and is not reported as this file/FIFO recovery state.
+
+The bootstrap profile temporarily receives the prompted value through its
+environment and its entrypoint pipes it to `sonium-server` over stdin; it never
+passes the password as a command-line argument. Unset the shell variable in
+both success and failure paths as shown. For a secret manager, supply the value
+only to that one bootstrap invocation, not to the long-running server service.
 
 The server exposes:
 

@@ -64,7 +64,7 @@ function fmtUptime(s: number) {
                 <p class="text-[11px] text-slate-500 font-mono">{{ stream.codec.toUpperCase() }} · {{ stream.format }}</p>
               </div>
             </div>
-            <StreamBadge :status="stream.status" />
+            <StreamBadge :status="stream.status" :recovery="stream.recovery" />
           </div>
         </div>
       </div>

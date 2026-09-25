@@ -15,6 +15,28 @@ Decisión del usuario: **dos fases** — primero endurecer estabilidad en buffer
 
 ---
 
+## Estado de implementación (2026-06-04)
+
+La mayor parte de este plan **ya está implementada**. Resumen verificado contra el código; el diseño detallado abajo se conserva como referencia.
+
+**Fase A — completa.**
+
+- **A1** quick-sync ramp: `client/src/controller.rs` (`quick_sync_remaining = 50`, tick de 100 ms hasta reunir ≥50 muestras, luego 1/s).
+- **A2** drift correction bidireccional drop + duplicate: `client/src/player.rs` (drop si `age_us > +2000`, duplicate si `age_us < -2000`).
+- **A3** unificación del playout path: el cliente migró a un único path callback-driven sobre `PlaybackTimeline` (`pop_due_exact`); el `SyncBuffer::pop_ready` directo quedó como ruta legacy. No se usó el flag `experimental_callback_playout` propuesto.
+- **A4** telemetría: `drift_drop_count` / `drift_dup_count` viajan en el `HealthReport` y se exponen en Prometheus + UI.
+- **A5** test de jitter: `crates/sync/tests/jitter_loopback.rs`.
+
+**Fase B — casi completa.**
+
+- **B1** clamp a 20 ms + `lead_us` reescalado: hecho (`set_target_buffer_ms` usa `.max(20_000)`, `lead_us = (target/4).clamp(5_000, 100_000)`).
+- **B2** resampling adaptativo `rubato`: hecho (`RateController` con `SincFixedIn`, engancha en modo low-latency `target ≤ 50 ms`).
+- **B3** `chunk_ms = 10`: permitido — de hecho es el default actual (`crates/common/src/config.rs`).
+- **B4** convergencia de time-sync adaptativa: **pendiente**. `TimeProvider::set_window_size` existe pero hoy es un no-op; la ventana mediana sigue fija.
+- **B5** validación e2e a 20 ms contra Snapcast real: **pendiente** (requiere `snapserver`/`snapclient` reales — validación en banco, no solo código).
+
+---
+
 ## Fase A — Estabilidad sin tocar el mínimo
 
 Orden: A1 → A2 → A4 → A5 → A3.

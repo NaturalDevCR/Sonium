@@ -155,7 +155,7 @@ async function createGroup() {
             </div>
             <div class="flex items-center gap-2 shrink-0">
               <LevelMeter v-if="stream" :rms-db="store.streamLevels[stream.id] ?? -90" />
-              <StreamBadge v-if="stream" :status="stream.status" :codec="stream.codec" />
+              <StreamBadge v-if="stream" :status="stream.status" :codec="stream.codec" :recovery="stream.recovery" />
             </div>
           </div>
 

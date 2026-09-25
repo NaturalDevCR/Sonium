@@ -24,6 +24,7 @@ from .api import CannotConnect, InvalidAuth, SoniumApiError
 from .const import DOMAIN
 from .coordinator import SoniumCoordinator
 from .entity import SoniumEntity
+from .group_mute import GroupMuteError, aggregate_group_mute, async_set_group_mute
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -241,13 +242,6 @@ class SoniumGroupMediaPlayer(_SoniumPlayer):
         return sum(c.volume for c in clients) / len(clients) / 100.0
 
     @property
-    def is_volume_muted(self) -> bool | None:
-        clients = self._clients
-        if not clients:
-            return None
-        return all(c.muted for c in clients)
-
-    @property
     def source(self) -> str | None:
         g = self._group
         if g is None:
@@ -258,6 +252,13 @@ class SoniumGroupMediaPlayer(_SoniumPlayer):
     @property
     def source_list(self) -> list[str]:
         return [s.name for s in self.coordinator.data.streams.values()]
+
+    @property
+    def is_volume_muted(self) -> bool | None:
+        g = self._group
+        if g is None:
+            return None
+        return aggregate_group_mute(g.client_ids, self.coordinator.data.clients)
 
     @property
     def group_members(self) -> list[str]:
@@ -289,11 +290,6 @@ class SoniumGroupMediaPlayer(_SoniumPlayer):
             )
         await self.coordinator.async_request_refresh()
 
-    async def async_mute_volume(self, mute: bool) -> None:
-        for client in self._clients:
-            await self._call(self.coordinator.api.set_volume(client.id, client.volume, mute))
-        await self.coordinator.async_request_refresh()
-
     async def async_select_source(self, source: str) -> None:
         stream = next(
             (s for s in self.coordinator.data.streams.values() if s.name == source),
@@ -303,6 +299,23 @@ class SoniumGroupMediaPlayer(_SoniumPlayer):
             raise HomeAssistantError(f"Sonium stream '{source}' not found")
         await self._call(self.coordinator.api.set_group_stream(self._group_id, stream.id))
         await self.coordinator.async_request_refresh()
+
+    async def async_mute_volume(self, mute: bool) -> None:
+        g = self._group
+        if g is None:
+            return
+        try:
+            await async_set_group_mute(
+                g.client_ids,
+                self.coordinator.data.clients,
+                self.coordinator.api.set_volume,
+                mute,
+            )
+        except GroupMuteError as err:
+            _LOGGER.error("Group %s mute update failed: %s", self._group_id, err)
+            raise HomeAssistantError(str(err)) from err
+        finally:
+            await self.coordinator.async_request_refresh()
 
     async def async_join_players(self, group_members: list[str]) -> None:
         """Move listed speaker entities into this zone."""

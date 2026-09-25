@@ -16,6 +16,11 @@ rename_client:
       example: "Bedroom Speaker"
       selector:
         text:
+    config_entry_id:
+      name: Config entry ID
+      description: Optional Sonium config-entry ID when multiple servers are configured.
+      selector:
+        text:
 
 rename_group:
   name: Rename Group
@@ -33,6 +38,11 @@ rename_group:
       description: The new name for the group.
       required: true
       example: "Living Room"
+      selector:
+        text:
+    config_entry_id:
+      name: Config entry ID
+      description: Optional Sonium config-entry ID when multiple servers are configured.
       selector:
         text:
 
@@ -54,6 +64,11 @@ create_group:
       example: "default"
       selector:
         text:
+    config_entry_id:
+      name: Config entry ID
+      description: Optional Sonium config-entry ID when multiple servers are configured.
+      selector:
+        text:
 
 delete_group:
   name: Delete Group
@@ -66,5 +81,126 @@ delete_group:
       description: The internal ID of the group to delete.
       required: true
       example: "garden"
+      selector:
+        text:
+    config_entry_id:
+      name: Config entry ID
+      description: Optional Sonium config-entry ID when multiple servers are configured.
+      selector:
+        text:
+
+play_announcement:
+  name: Play announcement
+  description: >
+    Schedule a bounded, ducked announcement on one or more Sonium zones. The
+    idempotency key must be reused if an automation retries the same request.
+  fields:
+    source:
+      name: Source URI
+      description: A reachable http(s) or media URI for the announcement.
+      required: true
+      example: "https://home.example/local/doorbell.ogg"
+      selector:
+        text:
+    idempotency_key:
+      name: Idempotency key
+      description: A stable 1–128 byte key for this logical announcement.
+      required: true
+      example: "front-door-20260901-001"
+      selector:
+        text:
+    group_ids:
+      name: Group IDs
+      description: Sonium group IDs to receive the announcement.
+      selector:
+        object:
+    target_entity_ids:
+      name: Sonium entities
+      description: Sonium group or client media-player entity IDs to resolve to zones.
+      selector:
+        entity:
+          filter:
+            domain: media_player
+          multiple: true
+    priority:
+      name: Priority
+      description: Higher priorities interrupt lower-priority announcements.
+      default: announcement
+      selector:
+        select:
+          options:
+            - music
+            - chime
+            - announcement
+            - emergency
+    attenuation_db:
+      name: Duck attenuation
+      description: Music attenuation while the announcement plays, from -60 to 0 dB.
+      default: -18
+      selector:
+        number:
+          min: -60
+          max: 0
+          step: 1
+          unit_of_measurement: dB
+          mode: box
+    attack_ms:
+      name: Duck attack
+      description: Milliseconds to ramp music down, from 0 to 5000.
+      default: 25
+      selector:
+        number:
+          min: 0
+          max: 5000
+          step: 1
+          unit_of_measurement: ms
+          mode: box
+    release_ms:
+      name: Duck release
+      description: Milliseconds to restore music, from 0 to 5000.
+      default: 100
+      selector:
+        number:
+          min: 0
+          max: 5000
+          step: 1
+          unit_of_measurement: ms
+          mode: box
+    max_duration_ms:
+      name: Maximum duration
+      description: Hard expiry for the announcement, from 1 to 120000 ms.
+      default: 30000
+      selector:
+        number:
+          min: 1
+          max: 120000
+          step: 1
+          unit_of_measurement: ms
+          mode: box
+    resume:
+      name: Resume previous audio
+      description: Restore the prior music program once after completion or cancellation.
+      default: true
+      selector:
+        boolean:
+    config_entry_id:
+      name: Config entry ID
+      description: Optional Sonium config-entry ID when multiple servers are configured.
+      selector:
+        text:
+
+cancel_announcement:
+  name: Cancel announcement
+  description: Cancel a scheduled or active Sonium announcement by its server ID.
+  fields:
+    announcement_id:
+      name: Announcement ID
+      description: The ID returned by Sonium after the announcement was created.
+      required: true
+      selector:
+        text:
+    config_entry_id:
+      name: Config entry ID
+      description: Optional Sonium config-entry ID when multiple servers are configured.
       selector:
         text:

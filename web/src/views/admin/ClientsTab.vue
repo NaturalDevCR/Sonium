@@ -241,7 +241,7 @@ function groupName(groupId: string) {
               v-else
               @click="startLatencyEdit(c.id, c.latency_ms)"
               class="latency-badge"
-              :title="`Latency offset: ${c.latency_ms}ms — click to adjust`"
+              :title="`Latency compensation: ${c.latency_ms}ms (positive plays earlier, e.g. Bluetooth) — click to adjust`"
             >
               {{ c.latency_ms > 0 ? '+' : '' }}{{ c.latency_ms }} ms
             </button>

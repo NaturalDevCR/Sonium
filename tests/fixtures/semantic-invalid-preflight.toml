@@ -1,0 +1,7 @@
+[server]
+control_port = 0
+
+[server.audio]
+buffer_ms = 200
+chunk_ms = 20
+output_prefill_ms = 0

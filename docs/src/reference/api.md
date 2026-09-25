@@ -228,3 +228,27 @@ subnets = ["10.0.1.0/24", "10.0.2.0/24"]
 The scanner probes each host on the Sonium control port (`1711`) with a
 concurrent TCP connect, then records responding hosts as `DiscoveredServer`
 entries.  A `/16` CIDR (65 536 hosts) is the maximum supported range.
+
+## One-shot media (announcements / TTS / URLs)
+
+Requires the `operator` or `admin` role (`GET` needs `viewer`). The server must
+have `ffmpeg` installed.
+
+| Method | Path | Description |
+| --- | --- | --- |
+| `POST` | `/api/media/play` | Body `{"url": "http(s)://…", "client_ids": [], "group_ids": [], "volume": 0-100?}` → `202` with `{id, url, client_ids, volume, started_at}` |
+| `GET` | `/api/media` | Active media playbacks |
+| `DELETE` | `/api/media/{id}` | Stop one; clients return to their group stream |
+
+Only `http`/`https` URLs are accepted (`400` otherwise); unknown clients or
+groups return `404`. Playback starts once the first audio is decoded (a failing
+URL never interrupts current playback), then the targets switch to a temporary
+synchronized stream with an optional temporary volume and switch back after the
+audio and their buffer have played out. A newer request supersedes an older one
+per client, and `PATCH /api/groups/{id}/stream` interrupts media on that group.
+WebSocket events: `media_started {media}` and `media_finished {media_id, client_ids}`.
+
+`PATCH /api/clients/{id}/latency` semantics (0.1.93+): positive `latency_ms`
+makes the client play earlier (delay = `buffer_ms − latency_ms`), matching
+Snapcast.
+
