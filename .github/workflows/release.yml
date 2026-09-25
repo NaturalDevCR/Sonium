@@ -200,6 +200,8 @@ jobs:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         with:
           tag_name: ${{ github.event_name == 'workflow_dispatch' && inputs.tag || github.ref_name }}
+          # Create a missing tag on the commit that was built, not the default branch.
+          target_commitish: ${{ github.sha }}
           files: target/${{ matrix.target }}/release/bundle/macos/*.app.tar.gz
 
   publish:
@@ -226,6 +228,8 @@ jobs:
         uses: softprops/action-gh-release@v2
         with:
           tag_name: ${{ github.event_name == 'workflow_dispatch' && inputs.tag || github.ref_name }}
+          # Create a missing tag on the commit that was built, not the default branch.
+          target_commitish: ${{ github.sha }}
           files: release-assets/*
           draft: false
           prerelease: ${{ contains(github.event_name == 'workflow_dispatch' && inputs.tag || github.ref_name, '-') }}
