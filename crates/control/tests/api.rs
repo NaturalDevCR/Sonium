@@ -347,3 +347,104 @@ async fn ws_events_endpoint_upgrades() {
         .expect("timeout waiting for WS reply");
     assert!(reply.is_some(), "WS closed unexpectedly");
 }
+
+// ── One-shot media ────────────────────────────────────────────────────────
+
+#[tokio::test]
+async fn media_play_rejects_non_http_urls() {
+    let (app, token) = make_app();
+    let resp = app
+        .oneshot(post_json(
+            "/media/play",
+            json!({ "url": "file:///etc/passwd", "group_ids": ["default"] }),
+            &token,
+        ))
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+}
+
+#[tokio::test]
+async fn media_play_unknown_client_is_404() {
+    let (app, token) = make_app();
+    let resp = app
+        .oneshot(post_json(
+            "/media/play",
+            json!({ "url": "http://example.com/a.mp3", "client_ids": ["nope"] }),
+            &token,
+        ))
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::NOT_FOUND);
+}
+
+#[tokio::test]
+async fn media_play_without_targets_is_400() {
+    let (app, token) = make_app();
+    // The default group exists but has no clients yet.
+    let resp = app
+        .oneshot(post_json(
+            "/media/play",
+            json!({ "url": "http://example.com/a.mp3", "group_ids": ["default"] }),
+            &token,
+        ))
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+}
+
+#[tokio::test]
+async fn media_play_forwards_to_backend() {
+    let (app, state, token) = make_app_with_state();
+    state.client_connected(
+        "kitchen-1",
+        "kitchen",
+        "Sonium",
+        "linux",
+        "aarch64",
+        "127.0.0.1:50000".parse::<SocketAddr>().unwrap(),
+        2,
+    );
+    let (tx, mut rx) = tokio::sync::mpsc::channel::<sonium_control::media::PlayMediaRequest>(1);
+    state.set_media_backend(tx);
+    tokio::spawn(async move {
+        let req = rx.recv().await.unwrap();
+        assert_eq!(req.client_ids, vec!["kitchen-1".to_string()]);
+        assert_eq!(req.volume, Some(40));
+        let _ = req.respond_to.send(Ok(sonium_control::media::MediaSession {
+            id: "media-test".into(),
+            url: req.url,
+            client_ids: req.client_ids,
+            volume: req.volume,
+            started_at: chrono::Utc::now(),
+        }));
+    });
+    let resp = app
+        .oneshot(post_json(
+            "/media/play",
+            json!({ "url": "http://example.com/a.mp3", "group_ids": ["default"], "volume": 40 }),
+            &token,
+        ))
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::ACCEPTED);
+    let body = json_body(resp.into_body()).await;
+    assert_eq!(body["id"], "media-test");
+}
+
+#[tokio::test]
+async fn delete_unknown_media_is_404() {
+    let (app, token) = make_app();
+    let resp = app
+        .oneshot(
+            Request::builder()
+                .method(Method::DELETE)
+                .uri("/media/nope")
+                .header(header::AUTHORIZATION, format!("Bearer {token}"))
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::NOT_FOUND);
+}

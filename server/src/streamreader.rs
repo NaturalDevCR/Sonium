@@ -212,7 +212,7 @@ pub async fn run(
     }
 }
 
-fn stream_chunk_ms(stream: &StreamSource) -> u32 {
+pub(crate) fn stream_chunk_ms(stream: &StreamSource) -> u32 {
     let ms = stream.chunk_ms.unwrap_or(20).clamp(10, 60);
     match stream.codec.as_str() {
         "opus" => match ms {
@@ -765,14 +765,14 @@ async fn run_reader<R: AsyncReadExt + Unpin>(
     Ok(())
 }
 
-enum FrameRead {
+pub(crate) enum FrameRead {
     Frame,
     Idle,
     Eof,
     Error(io::Error),
 }
 
-async fn read_pcm_frame<R: AsyncReadExt + Unpin>(
+pub(crate) async fn read_pcm_frame<R: AsyncReadExt + Unpin>(
     src: &mut R,
     pcm_buf: &mut [u8],
     filled: &mut usize,

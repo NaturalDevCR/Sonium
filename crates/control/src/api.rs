@@ -36,6 +36,7 @@ pub fn router(state: AppState) -> Router {
         .route("/clients", get(get_clients))
         .route("/groups", get(get_groups))
         .route("/streams", get(get_streams))
+        .route("/media", get(get_media))
         .route("/events", get(ws_handler)) // WS: also accepts ?token=
         .layer(middleware::from_fn(require_viewer));
 
@@ -52,6 +53,8 @@ pub fn router(state: AppState) -> Router {
         .route("/groups/:id", delete(delete_group))
         .route("/groups/:id", patch(patch_group))
         .route("/groups/:id/stream", patch(patch_group_stream))
+        .route("/media/play", post(post_media_play))
+        .route("/media/:id", delete(delete_media))
         .route("/server/transport", get(get_transport))
         .route("/server/transport", patch(patch_transport))
         .route("/discover/scan", get(get_discover_scan))
@@ -155,7 +158,7 @@ async fn patch_volume(
     Path(id): Path<String>,
     Json(body): Json<VolumeBody>,
 ) -> Response {
-    match s.set_volume(&id, body.volume, body.muted) {
+    match s.set_volume(&id, body.volume.min(100), body.muted) {
         Some(_) => StatusCode::NO_CONTENT.into_response(),
         None => StatusCode::NOT_FOUND.into_response(),
     }
@@ -399,6 +402,102 @@ async fn patch_transport(
 
 async fn get_streams(State(s): State<AppState>) -> impl IntoResponse {
     Json(s.all_streams())
+}
+
+// ── One-shot media (announcements / TTS / play_media) ────────────────────
+
+async fn get_media(State(s): State<AppState>) -> impl IntoResponse {
+    Json(s.all_media())
+}
+
+#[derive(Deserialize)]
+struct PlayMediaBody {
+    url: String,
+    #[serde(default)]
+    client_ids: Vec<String>,
+    #[serde(default)]
+    group_ids: Vec<String>,
+    /// Optional temporary volume (0–100) for the target clients.
+    #[serde(default)]
+    volume: Option<u8>,
+}
+
+/// Play a URL once on the given clients/groups, then return them to their
+/// group streams. Used for announcements and TTS.
+async fn post_media_play(State(s): State<AppState>, Json(body): Json<PlayMediaBody>) -> Response {
+    if let Err(e) = crate::media::validate_media_url(&body.url) {
+        return (StatusCode::BAD_REQUEST, e).into_response();
+    }
+    if matches!(body.volume, Some(v) if v > 100) {
+        return (StatusCode::BAD_REQUEST, "volume must be between 0 and 100").into_response();
+    }
+
+    let mut client_ids: Vec<String> = Vec::new();
+    for cid in &body.client_ids {
+        if s.get_client(cid).is_none() {
+            return (StatusCode::NOT_FOUND, format!("client not found: {cid}")).into_response();
+        }
+        if !client_ids.contains(cid) {
+            client_ids.push(cid.clone());
+        }
+    }
+    for gid in &body.group_ids {
+        let Some(group) = s.get_group(gid) else {
+            return (StatusCode::NOT_FOUND, format!("group not found: {gid}")).into_response();
+        };
+        for cid in group.client_ids {
+            if !client_ids.contains(&cid) {
+                client_ids.push(cid);
+            }
+        }
+    }
+    if client_ids.is_empty() {
+        return (
+            StatusCode::BAD_REQUEST,
+            "no target clients: pass client_ids and/or non-empty group_ids",
+        )
+            .into_response();
+    }
+
+    let Some(backend) = s.media_backend() else {
+        return (
+            StatusCode::SERVICE_UNAVAILABLE,
+            "media playback is not available on this server",
+        )
+            .into_response();
+    };
+    let (respond_to, response) = tokio::sync::oneshot::channel();
+    let request = crate::media::PlayMediaRequest {
+        url: body.url.trim().to_owned(),
+        client_ids,
+        volume: body.volume,
+        respond_to,
+    };
+    if backend.send(request).await.is_err() {
+        return (
+            StatusCode::SERVICE_UNAVAILABLE,
+            "media worker is not running",
+        )
+            .into_response();
+    }
+    match tokio::time::timeout(std::time::Duration::from_secs(10), response).await {
+        Ok(Ok(Ok(session))) => (StatusCode::ACCEPTED, Json(session)).into_response(),
+        Ok(Ok(Err(e))) => (StatusCode::UNPROCESSABLE_ENTITY, e).into_response(),
+        _ => (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "media worker did not respond",
+        )
+            .into_response(),
+    }
+}
+
+/// Stop a media playback; its clients return to their group streams.
+async fn delete_media(State(s): State<AppState>, Path(id): Path<String>) -> Response {
+    if s.end_media(&id) {
+        StatusCode::NO_CONTENT.into_response()
+    } else {
+        (StatusCode::NOT_FOUND, "media not found").into_response()
+    }
 }
 
 // ── WebSocket events ──────────────────────────────────────────────────────

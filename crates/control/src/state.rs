@@ -15,6 +15,7 @@ use std::collections::HashMap;
 use std::net::SocketAddr;
 use std::sync::Arc;
 
+use crate::media::{MediaSession, PlayMediaRequest};
 use crate::persistence::{PersistedClient, PersistedGroup, PersistedStream, PersistenceStore};
 use crate::ws::EventBus;
 use sonium_protocol::messages::{EqBand, HealthReport};
@@ -168,6 +169,18 @@ pub struct ServerState {
     transport: parking_lot::Mutex<TransportState>,
     /// IANA timezone identifier for log timestamps and web UI display.
     timezone: parking_lot::RwLock<Option<String>>,
+    /// Active one-shot media playbacks and per-client stream overrides.
+    media: RwLock<MediaState>,
+    /// Channel to the audio server's media worker (set at startup).
+    media_backend: parking_lot::Mutex<Option<tokio::sync::mpsc::Sender<PlayMediaRequest>>>,
+}
+
+/// Runtime-only one-shot media state (never persisted).
+#[derive(Default)]
+struct MediaState {
+    sessions: HashMap<String, MediaSession>,
+    /// client_id → media id (which is also the temporary stream id).
+    overrides: HashMap<String, String>,
 }
 
 impl ServerState {
@@ -273,6 +286,8 @@ impl ServerState {
                 server_udp_port: 0,
             }),
             timezone: parking_lot::RwLock::new(None),
+            media: RwLock::new(MediaState::default()),
+            media_backend: parking_lot::Mutex::new(None),
         }
     }
 
@@ -735,11 +750,15 @@ impl ServerState {
         }
         if let Some(g) = groups.get_mut(group_id) {
             g.stream_id = stream_id.into();
+            let members = g.client_ids.clone();
+            drop(groups);
+            // Picking a source explicitly interrupts any announcement/media
+            // playing on this group.
+            self.release_media_clients(&members);
             self.events.emit(crate::ws::Event::GroupStreamChanged {
                 group_id: group_id.into(),
                 stream_id: stream_id.into(),
             });
-            drop(groups);
             self.persist();
             true
         } else {
@@ -793,11 +812,141 @@ impl ServerState {
         self.groups.read().get(id).cloned()
     }
 
-    /// Returns the stream_id currently assigned to a client's group.
+    /// Returns the stream a client should currently receive: an active
+    /// one-shot media override, otherwise its group's stream.
     pub fn client_stream_id(&self, client_id: &str) -> Option<String> {
+        if let Some(media_id) = self.media.read().overrides.get(client_id) {
+            return Some(media_id.clone());
+        }
+        self.client_group_stream_id(client_id)
+    }
+
+    /// Returns the stream_id assigned to a client's group (ignoring overrides).
+    pub fn client_group_stream_id(&self, client_id: &str) -> Option<String> {
         let group_id = self.clients.read().get(client_id)?.group_id.clone();
         let stream_id = self.groups.read().get(&group_id)?.stream_id.clone();
         Some(stream_id)
+    }
+
+    /// Volume/mute to send to a client, honouring a temporary media volume.
+    pub fn effective_volume(&self, client_id: &str) -> Option<(u8, bool)> {
+        {
+            let media = self.media.read();
+            if let Some(volume) = media
+                .overrides
+                .get(client_id)
+                .and_then(|id| media.sessions.get(id))
+                .and_then(|s| s.volume)
+            {
+                return Some((volume, false));
+            }
+        }
+        self.get_volume(client_id)
+    }
+
+    // ── One-shot media ────────────────────────────────────────────────────
+
+    /// Install the audio server's media worker channel.
+    pub fn set_media_backend(&self, tx: tokio::sync::mpsc::Sender<PlayMediaRequest>) {
+        *self.media_backend.lock() = Some(tx);
+    }
+
+    /// Channel to the media worker, if the audio server provides one.
+    pub fn media_backend(&self) -> Option<tokio::sync::mpsc::Sender<PlayMediaRequest>> {
+        self.media_backend.lock().clone()
+    }
+
+    /// Start routing `session.client_ids` to the media stream `session.id`.
+    /// Clients already playing other media are moved to this one.
+    pub fn begin_media(&self, session: MediaSession) {
+        let mut superseded: HashMap<String, Vec<String>> = HashMap::new();
+        {
+            let mut media = self.media.write();
+            for cid in &session.client_ids {
+                if let Some(previous) = media.overrides.insert(cid.clone(), session.id.clone()) {
+                    superseded.entry(previous).or_default().push(cid.clone());
+                }
+            }
+            for (previous, cids) in &superseded {
+                if let Some(prev) = media.sessions.get_mut(previous) {
+                    prev.client_ids.retain(|c| !cids.contains(c));
+                }
+            }
+            media.sessions.insert(session.id.clone(), session.clone());
+        }
+        self.events
+            .emit(crate::ws::Event::MediaStarted { media: session });
+    }
+
+    /// End a media playback, returning its clients to their group streams.
+    pub fn end_media(&self, media_id: &str) -> bool {
+        let released = {
+            let mut media = self.media.write();
+            let existed = media.sessions.remove(media_id).is_some();
+            let mut released = Vec::new();
+            media.overrides.retain(|cid, mid| {
+                if mid == media_id {
+                    released.push(cid.clone());
+                    false
+                } else {
+                    true
+                }
+            });
+            if !existed && released.is_empty() {
+                return false;
+            }
+            released
+        };
+        self.events.emit(crate::ws::Event::MediaFinished {
+            media_id: media_id.into(),
+            client_ids: released,
+        });
+        true
+    }
+
+    /// Stop any media playing on these clients (e.g. the user picked a new
+    /// source). The media worker ends a playback once no clients remain.
+    pub fn release_media_clients(&self, client_ids: &[String]) {
+        let mut released: HashMap<String, Vec<String>> = HashMap::new();
+        {
+            let mut media = self.media.write();
+            for cid in client_ids {
+                if let Some(mid) = media.overrides.remove(cid) {
+                    released.entry(mid).or_default().push(cid.clone());
+                }
+            }
+            for (mid, cids) in &released {
+                if let Some(session) = media.sessions.get_mut(mid) {
+                    session.client_ids.retain(|c| !cids.contains(c));
+                }
+            }
+        }
+        for (media_id, client_ids) in released {
+            self.events.emit(crate::ws::Event::MediaFinished {
+                media_id,
+                client_ids,
+            });
+        }
+    }
+
+    /// Number of clients still routed to a media playback.
+    pub fn media_client_count(&self, media_id: &str) -> usize {
+        self.media
+            .read()
+            .overrides
+            .values()
+            .filter(|mid| mid.as_str() == media_id)
+            .count()
+    }
+
+    /// Media playback currently routed to a client, if any.
+    pub fn client_media_id(&self, client_id: &str) -> Option<String> {
+        self.media.read().overrides.get(client_id).cloned()
+    }
+
+    /// All active media playbacks.
+    pub fn all_media(&self) -> Vec<MediaSession> {
+        self.media.read().sessions.values().cloned().collect()
     }
 
     /// Register a new stream in the state (idempotent — updates status if already exists).
@@ -934,6 +1083,64 @@ mod tests {
 
     fn connect(s: &ServerState, id: &str) {
         s.client_connected(id, "pi", "Sonium", "linux", "aarch64", addr(), 2);
+    }
+
+    fn media(id: &str, clients: &[&str], volume: Option<u8>) -> MediaSession {
+        MediaSession {
+            id: id.into(),
+            url: "http://example.com/a.mp3".into(),
+            client_ids: clients.iter().map(|c| c.to_string()).collect(),
+            volume,
+            started_at: Utc::now(),
+        }
+    }
+
+    #[test]
+    fn media_overrides_stream_and_volume_until_it_ends() {
+        let s = state();
+        connect(&s, "a");
+        connect(&s, "b");
+        s.set_volume("a", 70, true);
+        s.begin_media(media("m1", &["a"], Some(35)));
+
+        assert_eq!(s.client_stream_id("a").as_deref(), Some("m1"));
+        assert_eq!(s.client_stream_id("b").as_deref(), Some("default"));
+        assert_eq!(s.client_group_stream_id("a").as_deref(), Some("default"));
+        assert_eq!(s.effective_volume("a"), Some((35, false)));
+        // The stored (persisted) volume is untouched.
+        assert_eq!(s.get_volume("a"), Some((70, true)));
+        assert_eq!(s.media_client_count("m1"), 1);
+
+        assert!(s.end_media("m1"));
+        assert_eq!(s.client_stream_id("a").as_deref(), Some("default"));
+        assert_eq!(s.effective_volume("a"), Some((70, true)));
+        assert!(s.all_media().is_empty());
+        assert!(!s.end_media("m1"));
+    }
+
+    #[test]
+    fn newer_media_supersedes_older_for_shared_clients() {
+        let s = state();
+        connect(&s, "a");
+        connect(&s, "b");
+        s.begin_media(media("m1", &["a", "b"], None));
+        s.begin_media(media("m2", &["b"], None));
+        assert_eq!(s.client_stream_id("a").as_deref(), Some("m1"));
+        assert_eq!(s.client_stream_id("b").as_deref(), Some("m2"));
+        assert_eq!(s.media_client_count("m1"), 1);
+        // Ending the older media must not release the newer one's client.
+        s.end_media("m1");
+        assert_eq!(s.client_stream_id("b").as_deref(), Some("m2"));
+    }
+
+    #[test]
+    fn selecting_a_group_source_interrupts_media() {
+        let s = state();
+        connect(&s, "a");
+        s.begin_media(media("m1", &["a"], None));
+        assert!(s.set_group_stream("default", "default"));
+        assert_eq!(s.client_stream_id("a").as_deref(), Some("default"));
+        assert_eq!(s.media_client_count("m1"), 0);
     }
 
     #[test]

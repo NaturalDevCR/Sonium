@@ -17,6 +17,7 @@ pub mod auth;
 pub mod auth_api;
 pub mod config_api;
 pub mod discovery;
+pub mod media;
 pub mod persistence;
 pub mod state;
 pub mod system_api;

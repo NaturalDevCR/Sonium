@@ -549,7 +549,7 @@ async fn session_loop(
         }
     }
 
-    let init_vol = state.get_volume(client_id).unwrap_or((100, false));
+    let init_vol = state.effective_volume(client_id).unwrap_or((100, false));
     let init_client = state.get_client(client_id);
     let init_latency = init_client.as_ref().map(|c| c.latency_ms).unwrap_or(0);
     let init_observability = init_client
@@ -814,10 +814,8 @@ async fn session_loop(
                         if cid == client_id =>
                     {
                         group_id = new_gid.clone();
-                        // Look up the stream assigned to the new group.
-                        if let Some(new_sid) = state.get_group(&new_gid)
-                            .map(|g| g.stream_id.clone())
-                        {
+                        // Look up the stream for the new group (or an active media override).
+                        if let Some(new_sid) = state.client_stream_id(client_id) {
                             switch_stream(
                                 &ctrl_tx, &registry,
                                 &mut audio_rx, &mut stream_id, &mut bc,
@@ -831,6 +829,8 @@ async fn session_loop(
                     Ok(Event::GroupStreamChanged { group_id: gid, stream_id: new_sid })
                         if gid == group_id =>
                     {
+                        // An active announcement keeps priority over the group stream.
+                        let new_sid = state.client_stream_id(client_id).unwrap_or(new_sid);
                         switch_stream(
                             &ctrl_tx, &registry,
                             &mut audio_rx, &mut stream_id, &mut bc,
@@ -869,6 +869,8 @@ async fn session_loop(
                     Ok(Event::VolumeChanged { client_id: cid, volume, muted })
                         if cid == client_id =>
                     {
+                        // A temporary announcement volume wins until the media ends.
+                        let (volume, muted) = state.effective_volume(client_id).unwrap_or((volume, muted));
                         let c = state.get_client(client_id);
                         let lat = c.as_ref().map(|c| c.latency_ms).unwrap_or(0);
                         let obs = c.as_ref().map(|c| c.observability_enabled).unwrap_or(false);
@@ -880,7 +882,7 @@ async fn session_loop(
                     Ok(Event::LatencyChanged { client_id: cid, latency_ms })
                         if cid == client_id =>
                     {
-                        let (vol, muted) = state.get_volume(client_id).unwrap_or((100, false));
+                        let (vol, muted) = state.effective_volume(client_id).unwrap_or((100, false));
                         let obs = state.get_client(client_id).map(|c| c.observability_enabled).unwrap_or(false);
                         let (eq, en) = state.get_stream_eq(&stream_id).unwrap_or_default();
                         send_server_settings_via_channel(&ctrl_tx, current_buffer_ms, vol, muted, latency_ms, eq, en, obs, effective_mode.to_string(), server_udp_port, cfg.server.audio.output_prefill_ms);
@@ -896,7 +898,7 @@ async fn session_loop(
                     Ok(Event::StreamEqChanged { stream_id: sid, eq_bands, enabled })
                         if sid == stream_id =>
                     {
-                        let (vol, muted) = state.get_volume(client_id).unwrap_or((100, false));
+                        let (vol, muted) = state.effective_volume(client_id).unwrap_or((100, false));
                         let c = state.get_client(client_id);
                         let lat = c.as_ref().map(|c| c.latency_ms).unwrap_or(0);
                         let obs = c.as_ref().map(|c| c.observability_enabled).unwrap_or(false);
@@ -904,8 +906,26 @@ async fn session_loop(
                         debug!(%peer, stream_id, "Stream EQ settings pushed to client");
                     }
 
+                    Ok(Event::MediaStarted { media })
+                        if media.client_ids.iter().any(|c| c == client_id) =>
+                    {
+                        media_switch(&state, client_id, &ctrl_tx, &registry, &mut audio_rx, &mut stream_id, &mut bc, &mut current_buffer_ms, &cfg, &effective_mode, server_udp_port)?;
+                    }
+
+                    Ok(Event::MediaFinished { client_ids, .. })
+                        if client_ids.iter().any(|c| c == client_id) =>
+                    {
+                        media_switch(&state, client_id, &ctrl_tx, &registry, &mut audio_rx, &mut stream_id, &mut bc, &mut current_buffer_ms, &cfg, &effective_mode, server_udp_port)?;
+                    }
+
                     Err(broadcast::error::RecvError::Lagged(n)) => {
                         warn!(%peer, dropped = n, "Event bus lagged");
+                        // Events may have been missed: resynchronise the stream.
+                        if let Some(sid) = state.client_stream_id(client_id) {
+                            if sid != stream_id {
+                                media_switch(&state, client_id, &ctrl_tx, &registry, &mut audio_rx, &mut stream_id, &mut bc, &mut current_buffer_ms, &cfg, &effective_mode, server_udp_port)?;
+                            }
+                        }
                     }
                     _ => {}
                 }
@@ -921,6 +941,52 @@ async fn session_loop(
         nack_router.unregister(ssrc).await;
     }
     result
+}
+
+/// Move the session to the client's effective stream after a media
+/// override started or ended, and push the (possibly temporary) volume.
+#[allow(clippy::too_many_arguments)]
+fn media_switch(
+    state: &Arc<ServerState>,
+    client_id: &str,
+    ctrl_tx: &mpsc::UnboundedSender<Vec<u8>>,
+    registry: &Arc<BroadcasterRegistry>,
+    audio_rx: &mut Option<broadcast::Receiver<AudioFrame>>,
+    stream_id: &mut String,
+    bc: &mut Option<Arc<crate::broadcaster::Broadcaster>>,
+    current_buffer_ms: &mut u32,
+    cfg: &ServerConfig,
+    effective_mode: &TransportMode,
+    server_udp_port: u16,
+) -> anyhow::Result<()> {
+    let Some(target) = state.client_stream_id(client_id) else {
+        return Ok(());
+    };
+    switch_stream(ctrl_tx, registry, audio_rx, stream_id, bc, &target)?;
+    *current_buffer_ms = bc
+        .as_ref()
+        .map(|x| x.buffer_ms)
+        .unwrap_or(cfg.server.audio.buffer_ms);
+
+    let (vol, muted) = state.effective_volume(client_id).unwrap_or((100, false));
+    let c = state.get_client(client_id);
+    let lat = c.as_ref().map(|c| c.latency_ms).unwrap_or(0);
+    let obs = c.as_ref().map(|c| c.observability_enabled).unwrap_or(false);
+    let (eq, en) = state.get_stream_eq(stream_id).unwrap_or_default();
+    send_server_settings_via_channel(
+        ctrl_tx,
+        *current_buffer_ms,
+        vol,
+        muted,
+        lat,
+        eq,
+        en,
+        obs,
+        effective_mode.to_string(),
+        server_udp_port,
+        cfg.server.audio.output_prefill_ms,
+    );
+    Ok(())
 }
 
 /// Re-subscribe to a different stream broadcaster and notify the client.

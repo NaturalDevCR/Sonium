@@ -1,6 +1,7 @@
 mod broadcaster;
 mod control_server;
 mod encoder;
+mod media;
 mod metrics;
 mod nack_router;
 mod session;
@@ -216,6 +217,13 @@ async fn main() -> anyhow::Result<()> {
         );
         drop((cancel, handle));
     }
+
+    // ── One-shot media worker (announcements / TTS / play_media) ─────────
+    state.set_media_backend(media::spawn_worker(
+        registry.clone(),
+        state.clone(),
+        cfg.clone(),
+    ));
 
     // ── Heartbeat task (pushes uptime to connected web UIs every 5 s) ─────
     {

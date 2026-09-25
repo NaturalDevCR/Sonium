@@ -87,6 +87,16 @@ pub enum Event {
         client_id: String,
         health: HealthReport,
     },
+    /// One-shot media (announcement / TTS / `play_media`) started on clients.
+    MediaStarted {
+        media: crate::media::MediaSession,
+    },
+    /// One-shot media finished or was stopped for these clients; they return
+    /// to their group's stream.
+    MediaFinished {
+        media_id: String,
+        client_ids: Vec<String>,
+    },
     /// Emitted when the operator changes the active media transport mode.
     TransportModeChanged {
         mode: String,
