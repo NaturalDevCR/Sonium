@@ -39,8 +39,9 @@ async def async_setup_entry(
 class SoniumClientLatencyNumber(SoniumEntity, NumberEntity):
     """Adjust the audio latency offset for a client in milliseconds.
 
-    Positive values delay playback (useful for slow Bluetooth speakers).
-    Negative values advance playback (rarely needed).
+    Positive values make the speaker play earlier to compensate for extra
+    output delay (Bluetooth speakers, AV receivers, TVs). Negative values
+    delay it. Keep it below the server's buffer_ms.
     """
 
     _attr_name = "Latency Offset"

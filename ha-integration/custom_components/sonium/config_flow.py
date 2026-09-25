@@ -41,6 +41,62 @@ async def _validate_input(hass, data: dict) -> dict:
 class SoniumConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
     VERSION = 1
 
+    def __init__(self) -> None:
+        self._discovered: dict = {}
+
+    async def async_step_zeroconf(self, discovery_info) -> FlowResult:
+        """Handle a server advertised as `_sonium-http._tcp` on the LAN."""
+        host = str(discovery_info.host)
+        port = int(discovery_info.port or DEFAULT_PORT)
+        if ":" in host:
+            # Skip IPv6 link-local announcements; the IPv4 one follows.
+            return self.async_abort(reason="not_ipv4_address")
+
+        for entry in self._async_current_entries(include_ignore=False):
+            if entry.data.get(CONF_HOST) == host and int(entry.data.get(CONF_PORT, 0)) == port:
+                return self.async_abort(reason="already_configured")
+
+        await self.async_set_unique_id(f"{host}:{port}")
+        self._abort_if_unique_id_configured()
+
+        self._discovered = {CONF_HOST: host, CONF_PORT: port}
+        name = discovery_info.name.split(".")[0] if discovery_info.name else host
+        self.context["title_placeholders"] = {"name": name}
+        return await self.async_step_zeroconf_confirm()
+
+    async def async_step_zeroconf_confirm(
+        self, user_input: dict | None = None
+    ) -> FlowResult:
+        errors: dict[str, str] = {}
+        if user_input is not None:
+            data = {**self._discovered, CONF_SSL: False, **user_input}
+            try:
+                info = await _validate_input(self.hass, data)
+            except CannotConnect:
+                errors["base"] = "cannot_connect"
+            except InvalidAuth:
+                errors["base"] = "invalid_auth"
+            except Exception:
+                _LOGGER.exception("Unexpected error during Sonium setup")
+                errors["base"] = "unknown"
+            else:
+                return self.async_create_entry(title=info["title"], data=data)
+
+        return self.async_show_form(
+            step_id="zeroconf_confirm",
+            data_schema=vol.Schema(
+                {
+                    vol.Required(CONF_USERNAME): str,
+                    vol.Required(CONF_PASSWORD): str,
+                }
+            ),
+            description_placeholders={
+                "host": self._discovered.get(CONF_HOST, ""),
+                "port": str(self._discovered.get(CONF_PORT, "")),
+            },
+            errors=errors,
+        )
+
     async def async_step_user(self, user_input: dict | None = None) -> FlowResult:
         errors: dict[str, str] = {}
 

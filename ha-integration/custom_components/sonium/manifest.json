@@ -1,15 +1,24 @@
 {
   "domain": "sonium",
   "name": "Sonium",
-  "version": "0.1.90",
+  "after_dependencies": [],
+  "codeowners": [
+    "@NaturalDevCR"
+  ],
   "config_flow": true,
+  "dependencies": [
+    "media_source"
+  ],
+  "documentation": "https://naturaldevcr.github.io/Sonium/integrations/home-assistant",
   "integration_type": "hub",
   "iot_class": "local_push",
-  "documentation": "https://github.com/NaturalDevCR/Sonium/tree/main/custom_components/sonium",
   "issue_tracker": "https://github.com/NaturalDevCR/Sonium/issues",
-  "codeowners": ["@NaturalDevCR"],
+  "loggers": [
+    "custom_components.sonium"
+  ],
   "requirements": [],
-  "dependencies": [],
-  "after_dependencies": [],
-  "loggers": ["custom_components.sonium"]
+  "version": "0.1.91",
+  "zeroconf": [
+    "_sonium-http._tcp.local."
+  ]
 }

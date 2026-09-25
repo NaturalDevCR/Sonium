@@ -38,6 +38,9 @@ class SoniumClient:
     arch: str
     remote_addr: str
     health: Optional[HealthReport] = None
+    # Active one-shot media (announcement / TTS) playing on this client.
+    media_id: Optional[str] = None
+    media_url: Optional[str] = None
 
     @property
     def name(self) -> str:

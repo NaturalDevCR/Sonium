@@ -6,13 +6,15 @@ A Home Assistant integration for [Sonium](https://github.com/NaturalDevCR/Sonium
 
 - **Media Players** for each group (zone) and each client (speaker)
 - **Source selection** — assign a stream to a group, or move a client between groups
-- **Volume & mute** control per client
+- **Announcements & TTS** — `tts.speak`, `media_player.play_media` (with `announce: true`) and the media browser play once on a speaker or zone, then the previous source resumes
+- **Volume & mute** control per client and per zone (zone volume shifts all speakers, keeping their balance)
+- **Auto-discovery** via zeroconf (`_sonium-http._tcp`)
 - **Grouping** — move speakers into zones via the HA media player grouping feature
 - **Stream status sensors** — detect when a stream is playing, idle, or in error
 - **Client health sensors** — jitter, buffer depth, and underrun count per speaker
 - **Connected binary sensor** — per-speaker online/offline state
 - **Zone select** — change a speaker's zone directly
-- **Latency offset** — fine-tune audio sync per speaker (±1000 ms)
+- **Latency offset** — per-speaker compensation (±1000 ms; positive plays earlier, e.g. for Bluetooth)
 - **Real-time updates** via WebSocket (events propagate instantly)
 - **Domain services** — create/delete/rename groups, rename clients
 

@@ -14,12 +14,21 @@
         "data_description": {
           "host": "IP address or hostname of your Sonium server.",
           "port": "Control port (default: 1711).",
-          "ssl": "Enable if your server is behind an HTTPS reverse proxy."
+          "ssl": "Enable if your server is behind an HTTPS reverse proxy.",
+          "username": "A Sonium user with the operator or admin role (needed for volume, zones and announcements)."
         }
       },
       "reauth_confirm": {
         "title": "Re-authenticate Sonium",
         "description": "Your Sonium credentials need to be updated.",
+        "data": {
+          "username": "Username",
+          "password": "Password"
+        }
+      },
+      "zeroconf_confirm": {
+        "title": "Sonium server found",
+        "description": "A Sonium server was discovered at {host}:{port}. Enter a Sonium user with the operator or admin role.",
         "data": {
           "username": "Username",
           "password": "Password"
@@ -33,7 +42,16 @@
     },
     "abort": {
       "already_configured": "This Sonium server is already configured.",
-      "reauth_successful": "Re-authentication was successful."
+      "reauth_successful": "Re-authentication was successful.",
+      "not_ipv4_address": "Only IPv4 discoveries are supported."
+    },
+    "flow_title": "{name}"
+  },
+  "entity": {
+    "sensor": {
+      "stream_status": {
+        "name": "Status"
+      }
     }
   }
 }
