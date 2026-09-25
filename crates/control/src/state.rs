@@ -219,8 +219,17 @@ pub struct ServerState {
 #[derive(Default)]
 struct MediaState {
     sessions: HashMap<String, MediaSession>,
-    /// client_id → media id (which is also the temporary stream id).
-    overrides: HashMap<String, String>,
+    /// client_id → the media playback and temporary stream it receives.
+    overrides: HashMap<String, MediaRoute>,
+    /// Ducked (mixed) stream id → the music stream it is derived from.
+    /// Switching between the two is seamless (same codec and timeline).
+    duck_bases: HashMap<String, String>,
+}
+
+#[derive(Clone)]
+struct MediaRoute {
+    media_id: String,
+    stream_id: String,
 }
 
 impl ServerState {
@@ -1202,8 +1211,8 @@ impl ServerState {
     /// Returns the stream a client should currently receive: an active
     /// one-shot media override, otherwise its group's stream.
     pub fn client_stream_id(&self, client_id: &str) -> Option<String> {
-        if let Some(media_id) = self.media.read().overrides.get(client_id) {
-            return Some(media_id.clone());
+        if let Some(route) = self.media.read().overrides.get(client_id) {
+            return Some(route.stream_id.clone());
         }
         self.client_group_stream_id(client_id)
     }
@@ -1222,7 +1231,7 @@ impl ServerState {
             if let Some(volume) = media
                 .overrides
                 .get(client_id)
-                .and_then(|id| media.sessions.get(id))
+                .and_then(|route| media.sessions.get(&route.media_id))
                 .and_then(|s| s.volume)
             {
                 return Some((volume, false));
@@ -1246,12 +1255,40 @@ impl ServerState {
     /// Start routing `session.client_ids` to the media stream `session.id`.
     /// Clients already playing other media are moved to this one.
     pub fn begin_media(&self, session: MediaSession) {
+        let routes = session
+            .client_ids
+            .iter()
+            .map(|c| (c.clone(), session.id.clone()))
+            .collect();
+        self.begin_media_routed(session, routes, Vec::new());
+    }
+
+    /// Start a media playback with an explicit client → stream routing.
+    ///
+    /// `duck_bases` lists ducked (mixed) streams and the music stream each
+    /// one is derived from; sessions switch between them without resetting
+    /// the client's decoder or buffer.
+    pub fn begin_media_routed(
+        &self,
+        session: MediaSession,
+        routes: Vec<(String, String)>,
+        duck_bases: Vec<(String, String)>,
+    ) {
         let mut superseded: HashMap<String, Vec<String>> = HashMap::new();
         {
             let mut media = self.media.write();
-            for cid in &session.client_ids {
-                if let Some(previous) = media.overrides.insert(cid.clone(), session.id.clone()) {
-                    superseded.entry(previous).or_default().push(cid.clone());
+            for (stream_id, base) in duck_bases {
+                media.duck_bases.insert(stream_id, base);
+            }
+            for (cid, stream_id) in routes {
+                let route = MediaRoute {
+                    media_id: session.id.clone(),
+                    stream_id,
+                };
+                if let Some(previous) = media.overrides.insert(cid.clone(), route) {
+                    if previous.media_id != session.id {
+                        superseded.entry(previous.media_id).or_default().push(cid);
+                    }
                 }
             }
             for (previous, cids) in &superseded {
@@ -1271,8 +1308,8 @@ impl ServerState {
             let mut media = self.media.write();
             let existed = media.sessions.remove(media_id).is_some();
             let mut released = Vec::new();
-            media.overrides.retain(|cid, mid| {
-                if mid == media_id {
+            media.overrides.retain(|cid, route| {
+                if route.media_id == media_id {
                     released.push(cid.clone());
                     false
                 } else {
@@ -1291,6 +1328,15 @@ impl ServerState {
         true
     }
 
+    /// Forget the ducked streams of a finished playback (after its clients
+    /// have switched back).
+    pub fn forget_duck_streams(&self, stream_ids: &[String]) {
+        let mut media = self.media.write();
+        for sid in stream_ids {
+            media.duck_bases.remove(sid);
+        }
+    }
+
     /// Stop any media playing on these clients (e.g. the user picked a new
     /// source). The media worker ends a playback once no clients remain.
     pub fn release_media_clients(&self, client_ids: &[String]) {
@@ -1298,8 +1344,11 @@ impl ServerState {
         {
             let mut media = self.media.write();
             for cid in client_ids {
-                if let Some(mid) = media.overrides.remove(cid) {
-                    released.entry(mid).or_default().push(cid.clone());
+                if let Some(route) = media.overrides.remove(cid) {
+                    released
+                        .entry(route.media_id)
+                        .or_default()
+                        .push(cid.clone());
                 }
             }
             for (mid, cids) in &released {
@@ -1322,13 +1371,32 @@ impl ServerState {
             .read()
             .overrides
             .values()
-            .filter(|mid| mid.as_str() == media_id)
+            .filter(|route| route.media_id == media_id)
             .count()
+    }
+
+    /// Number of clients currently routed to a temporary media stream.
+    pub fn media_stream_client_count(&self, stream_id: &str) -> usize {
+        self.media
+            .read()
+            .overrides
+            .values()
+            .filter(|route| route.stream_id == stream_id)
+            .count()
+    }
+
+    /// The music stream a ducked media stream is mixed from, if any.
+    pub fn duck_stream_base(&self, stream_id: &str) -> Option<String> {
+        self.media.read().duck_bases.get(stream_id).cloned()
     }
 
     /// Media playback currently routed to a client, if any.
     pub fn client_media_id(&self, client_id: &str) -> Option<String> {
-        self.media.read().overrides.get(client_id).cloned()
+        self.media
+            .read()
+            .overrides
+            .get(client_id)
+            .map(|route| route.media_id.clone())
     }
 
     /// All active media playbacks.
@@ -1490,6 +1558,7 @@ mod tests {
             url: "http://example.com/a.mp3".into(),
             client_ids: clients.iter().map(|c| c.to_string()).collect(),
             volume,
+            mode: Default::default(),
             started_at: Utc::now(),
         }
     }

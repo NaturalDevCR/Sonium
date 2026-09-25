@@ -251,6 +251,24 @@ sonium-client --on-server 192.168.1.100
 When `--on-server` is active, network time sync is skipped (offset = 0) because
 both processes share the same system clock.
 
+### Announcements
+
+Announcements, TTS and URLs played through `POST /api/media/play` (or Home
+Assistant) use these defaults, each overridable per request:
+
+```toml
+[announcements]
+mode       = "duck"   # "duck": music keeps playing, lowered underneath
+                      # "replace": music is silenced during the announcement
+duck_db    = -18.0    # music attenuation while ducked (-60..0)
+attack_ms  = 150      # fade-down before the announcement starts
+release_ms = 600      # fade-up after it ends
+```
+
+Duck mode mixes on the server, per music stream, with the same codec and
+timeline, so clients never re-open their audio device. Speakers whose music is
+idle fall back to replace mode automatically. The server needs `ffmpeg`.
+
 ### Bluetooth Latency Compensation
 
 Bluetooth speakers typically add 100–250 ms of latency. Use `latency_ms` to

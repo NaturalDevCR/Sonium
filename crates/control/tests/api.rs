@@ -697,6 +697,7 @@ async fn media_play_forwards_to_backend() {
             url: req.url,
             client_ids: req.client_ids,
             volume: req.volume,
+            mode: Default::default(),
             started_at: chrono::Utc::now(),
         }));
     });

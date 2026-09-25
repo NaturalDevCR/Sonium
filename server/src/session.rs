@@ -741,6 +741,13 @@ async fn session_loop(
     metrics::observe_active_transport(client_id, &effective_mode.to_string());
 
     let mut audio_rx: Option<broadcast::Receiver<AudioFrame>> = bc.as_ref().map(|b| b.subscribe());
+    // Music receiver kept alive while a ducked announcement stream plays.
+    let mut shadow_rx: Option<(String, broadcast::Receiver<AudioFrame>)> = None;
+    // Timestamp of the last forwarded chunk; frames at or before it are
+    // skipped after a seamless switch so nothing plays twice.
+    let mut last_forwarded_ts: Option<i64> = None;
+    // After a seamless switch: drop every chunk at or before this timestamp.
+    let mut drop_through_ts: Option<i64> = None;
     let mut events_rx = state.events().subscribe();
     let mut announcement_rx = state.subscribe_announcement_controls();
     let mut announcement_queue = AnnouncementControlQueue::new(ctrl_tx.clone());
@@ -857,6 +864,18 @@ async fn session_loop(
             frame = recv_audio(&mut audio_rx) => {
                 match frame {
                     Ok(f) => {
+                        if let Some(ts) = wire_chunk_timestamp_us(&f.wire_bytes) {
+                            if let Some(through) = drop_through_ts {
+                                if ts <= through {
+                                    continue;
+                                }
+                                drop_through_ts = None;
+                            }
+                            if already_forwarded(last_forwarded_ts, ts) {
+                                continue;
+                            }
+                            last_forwarded_ts = Some(ts);
+                        }
                         if audio_tx.try_send(f.wire_bytes.clone()).is_err() {
                             let queue_cap = audio_tx.max_capacity();
                             warn!(%peer, queue_cap, "Audio queue FULL — frame dropped (client cannot consume)");
@@ -1048,7 +1067,7 @@ async fn session_loop(
                     Ok(Event::MediaStarted { media })
                         if media.client_ids.iter().any(|c| c == client_id) =>
                     {
-                        if let Err(error) = media_switch(&state, client_id, &ctrl_tx, &registry, &mut audio_rx, &mut stream_id, &mut bc, &mut current_buffer_ms, &cfg, &effective_mode, server_udp_port) {
+                        if let Err(error) = media_switch(&state, client_id, &ctrl_tx, &registry, &mut audio_rx, &mut stream_id, &mut bc, &mut current_buffer_ms, &cfg, &effective_mode, server_udp_port, &mut shadow_rx, &mut last_forwarded_ts, &mut drop_through_ts) {
                             break Err(error);
                         }
                     }
@@ -1056,7 +1075,7 @@ async fn session_loop(
                     Ok(Event::MediaFinished { client_ids, .. })
                         if client_ids.iter().any(|c| c == client_id) =>
                     {
-                        if let Err(error) = media_switch(&state, client_id, &ctrl_tx, &registry, &mut audio_rx, &mut stream_id, &mut bc, &mut current_buffer_ms, &cfg, &effective_mode, server_udp_port) {
+                        if let Err(error) = media_switch(&state, client_id, &ctrl_tx, &registry, &mut audio_rx, &mut stream_id, &mut bc, &mut current_buffer_ms, &cfg, &effective_mode, server_udp_port, &mut shadow_rx, &mut last_forwarded_ts, &mut drop_through_ts) {
                             break Err(error);
                         }
                     }
@@ -1066,7 +1085,7 @@ async fn session_loop(
                         // Events may have been missed: resynchronise the stream.
                         if let Some(sid) = state.client_stream_id(client_id) {
                             if sid != stream_id {
-                                if let Err(error) = media_switch(&state, client_id, &ctrl_tx, &registry, &mut audio_rx, &mut stream_id, &mut bc, &mut current_buffer_ms, &cfg, &effective_mode, server_udp_port) {
+                                if let Err(error) = media_switch(&state, client_id, &ctrl_tx, &registry, &mut audio_rx, &mut stream_id, &mut bc, &mut current_buffer_ms, &cfg, &effective_mode, server_udp_port, &mut shadow_rx, &mut last_forwarded_ts, &mut drop_through_ts) {
                             break Err(error);
                         }
                             }
@@ -1106,11 +1125,46 @@ fn media_switch(
     cfg: &ServerConfig,
     effective_mode: &TransportMode,
     server_udp_port: u16,
+    shadow: &mut Option<(String, broadcast::Receiver<AudioFrame>)>,
+    last_ts: &mut Option<i64>,
+    drop_through: &mut Option<i64>,
 ) -> anyhow::Result<()> {
     let Some(target) = state.client_stream_id(client_id) else {
         return Ok(());
     };
-    switch_stream(ctrl_tx, registry, audio_rx, stream_id, bc, &target)?;
+    let into_duck = target != *stream_id
+        && state.duck_stream_base(&target).as_deref() == Some(stream_id.as_str());
+    let back_from_duck = shadow.as_ref().is_some_and(|(sid, _)| *sid == target);
+    let target_bc = lookup(registry, &target);
+
+    if into_duck && target_bc.is_some() {
+        // Ducked announcement: same codec and timeline as the music stream, so
+        // no CodecHeader (the client keeps its decoder and buffer). Keep the
+        // music receiver buffering to switch back without a gap.
+        info!(old = %stream_id, new = %target, "Seamless switch to ducked media stream");
+        if let Some(rx) = audio_rx.take() {
+            *shadow = Some((stream_id.clone(), rx));
+        }
+        *audio_rx = target_bc.as_ref().map(|b| b.subscribe());
+        *stream_id = target.clone();
+        *bc = target_bc;
+        *drop_through = *last_ts;
+    } else if back_from_duck {
+        info!(old = %stream_id, new = %target, "Seamless switch back from ducked media stream");
+        if let Some((_, rx)) = shadow.take() {
+            *audio_rx = Some(rx);
+        }
+        *stream_id = target.clone();
+        *bc = target_bc;
+        // The kept music receiver holds everything published meanwhile:
+        // skip all of it up to what the client already got.
+        *drop_through = *last_ts;
+    } else {
+        *shadow = None;
+        *last_ts = None;
+        *drop_through = None;
+        switch_stream(ctrl_tx, registry, audio_rx, stream_id, bc, &target)?;
+    }
     *current_buffer_ms = bc
         .as_ref()
         .map(|x| x.buffer_ms)
@@ -1120,7 +1174,11 @@ fn media_switch(
     let c = state.get_client(client_id);
     let lat = c.as_ref().map(|c| c.latency_ms).unwrap_or(0);
     let obs = c.as_ref().map(|c| c.observability_enabled).unwrap_or(false);
-    let (eq, en) = state.get_stream_eq(stream_id).unwrap_or_default();
+    // A ducked stream keeps the EQ of the music it is mixed from.
+    let eq_stream = state
+        .duck_stream_base(stream_id)
+        .unwrap_or_else(|| stream_id.clone());
+    let (eq, en) = state.get_stream_eq(&eq_stream).unwrap_or_default();
     send_server_settings_via_channel(
         ctrl_tx,
         *current_buffer_ms,
@@ -1134,6 +1192,20 @@ fn media_switch(
         server_udp_port,
         cfg.server.audio.output_prefill_ms,
     )
+}
+
+/// Server timestamp (µs) of an encoded `WireChunk` message.
+fn wire_chunk_timestamp_us(wire: &[u8]) -> Option<i64> {
+    let ts = wire.get(HEADER_SIZE..HEADER_SIZE + 8)?;
+    let sec = i32::from_le_bytes(ts[0..4].try_into().ok()?);
+    let usec = i32::from_le_bytes(ts[4..8].try_into().ok()?);
+    Some(i64::from(sec) * 1_000_000 + i64::from(usec))
+}
+
+/// `true` for a chunk already covered by what was forwarded (seamless
+/// stream switches). Large backward jumps (wall-clock steps) pass through.
+fn already_forwarded(last_ts: Option<i64>, ts: i64) -> bool {
+    matches!(last_ts, Some(last) if ts <= last && last - ts < 2_000_000)
 }
 
 /// Re-subscribe to a different stream broadcaster and notify the client.

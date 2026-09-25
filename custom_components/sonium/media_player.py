@@ -71,6 +71,37 @@ async def async_setup_entry(
     entry.async_on_unload(coordinator.async_add_listener(_async_add_new_entities))
 
 
+def _announce_options(extra: dict[str, Any] | None) -> dict[str, Any]:
+    """Announcement routing options from `extra`.
+
+    `mode`: "duck" (music keeps playing, lowered under the announcement) or
+    "replace" (music silenced). `duck_db` (alias `attenuation_db`),
+    `attack_ms` and `release_ms` tune the ducking; they may also be nested
+    under `duck: {...}` like Sonium's scheduled announcements.
+    """
+    if not extra:
+        return {}
+    duck = extra.get("duck") if isinstance(extra.get("duck"), dict) else {}
+    options: dict[str, Any] = {}
+    mode = extra.get("mode")
+    if mode is not None:
+        mode = str(mode).lower()
+        if mode not in ("duck", "replace"):
+            raise HomeAssistantError(f"Invalid announcement mode '{mode}' (use duck or replace)")
+        options["mode"] = mode
+    db = duck.get("attenuation_db", duck.get("duck_db", extra.get("duck_db", extra.get("attenuation_db"))))
+    try:
+        if db is not None:
+            options["duck_db"] = max(-60.0, min(0.0, float(db)))
+        for key in ("attack_ms", "release_ms"):
+            value = duck.get(key, extra.get(key))
+            if value is not None:
+                options[key] = max(0, int(value))
+    except (TypeError, ValueError) as err:
+        raise HomeAssistantError(f"Invalid announcement options: {err}") from err
+    return options
+
+
 def _announce_volume(extra: dict[str, Any] | None) -> int | None:
     """Optional temporary volume from `extra: {volume: ...}`.
 
@@ -120,7 +151,9 @@ class _SoniumPlayer(SoniumEntity, MediaPlayerEntity):
             media_id = sourced.url
         media_id = async_process_play_media_url(self.hass, media_id)
 
-        volume = _announce_volume(kwargs.get(ATTR_MEDIA_EXTRA))
+        extra = kwargs.get(ATTR_MEDIA_EXTRA)
+        volume = _announce_volume(extra)
+        options = _announce_options(extra)
         _LOGGER.debug(
             "Playing %s on %s (announce=%s, volume=%s)",
             media_id,
@@ -129,7 +162,9 @@ class _SoniumPlayer(SoniumEntity, MediaPlayerEntity):
             volume,
         )
         result = await self._call(
-            self.coordinator.api.play_media(media_id, volume=volume, **self._target())
+            self.coordinator.api.play_media(
+                media_id, volume=volume, options=options, **self._target()
+            )
         )
         if result and result.get("id"):
             for client_id in result.get("client_ids", []):

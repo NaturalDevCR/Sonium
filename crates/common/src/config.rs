@@ -78,6 +78,64 @@ pub struct ServerConfig {
     /// e.g. "America/Costa_Rica", "Europe/Berlin", "UTC".
     /// Defaults to system local time if not set.
     pub timezone: Option<String>,
+
+    /// Defaults for one-shot announcements / TTS (`[announcements]`).
+    pub announcements: AnnouncementConfig,
+}
+
+/// How an announcement interacts with the music already playing.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum AnnouncementMode {
+    /// Lower the music and play the announcement on top of it.
+    #[default]
+    Duck,
+    /// Silence the music and play only the announcement.
+    Replace,
+}
+
+/// Defaults for announcements, overridable per request.
+///
+/// ```toml
+/// [announcements]
+/// mode       = "duck"   # or "replace"
+/// duck_db    = -18.0    # music attenuation while ducked
+/// attack_ms  = 150      # fade-down time before the announcement starts
+/// release_ms = 600      # fade-up time after it ends
+/// ```
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct AnnouncementConfig {
+    pub mode: AnnouncementMode,
+    pub duck_db: f32,
+    pub attack_ms: u32,
+    pub release_ms: u32,
+}
+
+impl Default for AnnouncementConfig {
+    fn default() -> Self {
+        Self {
+            mode: AnnouncementMode::Duck,
+            duck_db: -18.0,
+            attack_ms: 150,
+            release_ms: 600,
+        }
+    }
+}
+
+impl AnnouncementConfig {
+    pub fn validate(&self) -> anyhow::Result<()> {
+        if !(-60.0..=0.0).contains(&self.duck_db) {
+            anyhow::bail!("announcements.duck_db must be between -60 and 0");
+        }
+        if self.attack_ms > 5_000 {
+            anyhow::bail!("announcements.attack_ms must be at most 5000");
+        }
+        if self.release_ms > 10_000 {
+            anyhow::bail!("announcements.release_ms must be at most 10000");
+        }
+        Ok(())
+    }
 }
 
 /// Network and feature flags for the server.
@@ -209,6 +267,7 @@ impl Default for ServerConfig {
             streams: vec![StreamSource::default()],
             log: LogConfig::default(),
             timezone: None,
+            announcements: AnnouncementConfig::default(),
         }
     }
 }
@@ -306,6 +365,7 @@ impl ServerConfig {
 
     /// Check values that TOML's type system cannot express safely.
     pub fn validate(&self) -> anyhow::Result<()> {
+        self.announcements.validate()?;
         self.server
             .bind
             .parse::<std::net::IpAddr>()

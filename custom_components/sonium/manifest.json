@@ -17,7 +17,7 @@
     "custom_components.sonium"
   ],
   "requirements": [],
-  "version": "0.1.93",
+  "version": "0.1.94",
   "zeroconf": [
     "_sonium-http._tcp.local."
   ]
