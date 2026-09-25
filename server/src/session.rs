@@ -672,11 +672,11 @@ async fn session_loop(
     let read_task = tokio::spawn(socket_reader(reader, incoming_tx));
     let mut health_tracker = HealthTransitionTracker::default();
 
-    // Group sync broadcast: shared timeline for multi-room sync.
-    // 100 ms interval (was 500 ms) keeps group convergence under 1 s with
-    // the adaptive nudge in TimeProvider::nudge_group_offset.
-    let mut group_sync_tick = tokio::time::interval(tokio::time::Duration::from_millis(100));
-    group_sync_tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+    // Note: the server intentionally no longer broadcasts GroupSync. Earlier
+    // releases asked every client to pull its clock offset towards the group
+    // median, which undoes per-client clock sync. Without GroupSync messages,
+    // older clients keep a zero group offset and play on their own measured
+    // server offset, which is what keeps a group in sync.
 
     // ── Spawn the dedicated writer task ──────────────────────────────
     let audio_write_task = if let Some(media) = udp_media {
@@ -911,26 +911,6 @@ async fn session_loop(
                 }
             }
 
-            // ── Group sync broadcast ──────────────────────────────────────
-            _ = group_sync_tick.tick() => {
-                let server_now_us = sonium_sync::time_provider::now_us();
-                // Compute the target group offset as the median of all connected
-                // clients' NTP clock offsets in this group.  Every client should
-                // converge its total offset (NTP + group) to this value.
-                let group_offset_us = state
-                    .group_median_clock_offset_us(&group_id)
-                    .unwrap_or(0);
-                let gs = sonium_protocol::messages::GroupSync::new(
-                    server_now_us,
-                    group_offset_us,
-                    0, // rate_ppm: future drift correction
-                    0.0, // source_quality: will be populated from chrony status when available
-                );
-                let mut hdr = MessageHeader::new(MessageType::GroupSync, 24);
-                hdr.id = next_id();
-                let _ = ctrl_tx.send(Message::GroupSync(gs).encode_with_header(hdr));
-                tracing::trace!(%peer, server_now_us, group_offset_us, "GroupSync broadcast");
-            }
         }
     };
 
