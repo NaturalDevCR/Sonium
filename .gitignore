@@ -39,3 +39,17 @@ Thumbs.db
 # Credentials
 *.pem
 *.key
+
+# Local runtime state (never commit credentials, JWT secrets or client state)
+users.json
+sonium-state.json
+sonium.log
+/run/*
+!/run/sonium.toml
+/scratch/
+/test_median*
+/test_audio.rs
+
+# Python
+__pycache__/
+*.pyc
