@@ -1,0 +1,15 @@
+[server]
+bind = "0.0.0.0"
+stream_port = 1710
+control_port = 1711
+"buffer_ms" = 1000
+"chunk_ms" = 20
+"output_prefill_ms" = 0
+
+[[streams]]
+id = "default"
+source = "/tmp/sonium.fifo"
+codec = "opus"
+
+[log]
+level = "info"

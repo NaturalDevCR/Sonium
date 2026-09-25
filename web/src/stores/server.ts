@@ -145,7 +145,13 @@ export const useServerStore = defineStore('server', () => {
 
       case 'stream_status':
         streams.value = streams.value.map((s) =>
-          s.id === event.stream_id ? { ...s, status: event.status as Stream['status'] } : s,
+          s.id === event.stream_id
+            ? {
+                ...s,
+                status: event.status as Stream['status'],
+                recovery: event.recovery ?? null,
+              }
+            : s,
         );
         break;
 

@@ -148,12 +148,16 @@ async fn setup(State(store): State<AuthState>, Json(body): Json<SetupBody>) -> R
         return (StatusCode::CONFLICT, "already initialized").into_response();
     }
     match store.create_user(&body.username, &body.password, Role::Admin) {
-        Some(user) => {
+        Ok(Some(user)) => {
             let full_user = store.authenticate(&body.username, &body.password).unwrap();
             let token = store.create_token(&full_user, 24);
             (StatusCode::CREATED, Json(TokenResponse { token, user })).into_response()
         }
-        None => (StatusCode::CONFLICT, "username taken").into_response(),
+        Ok(None) => (StatusCode::CONFLICT, "username taken").into_response(),
+        Err(error) => {
+            warn!("Failed to persist initial admin account: {error}");
+            (StatusCode::INTERNAL_SERVER_ERROR, "could not persist user").into_response()
+        }
     }
 }
 
@@ -208,8 +212,12 @@ async fn create_user(
         return e;
     }
     match store.create_user(&body.username, &body.password, body.role) {
-        Some(u) => (StatusCode::CREATED, Json(u)).into_response(),
-        None => (StatusCode::CONFLICT, "username already taken").into_response(),
+        Ok(Some(u)) => (StatusCode::CREATED, Json(u)).into_response(),
+        Ok(None) => (StatusCode::CONFLICT, "username already taken").into_response(),
+        Err(error) => {
+            warn!("Failed to persist created user: {error}");
+            (StatusCode::INTERNAL_SERVER_ERROR, "could not persist user").into_response()
+        }
     }
 }
 
@@ -237,10 +245,13 @@ async fn update_user(
         return (StatusCode::FORBIDDEN, "role change requires admin").into_response();
     }
 
-    if store.update_user(&id, body.role, body.password.as_deref()) {
-        StatusCode::NO_CONTENT.into_response()
-    } else {
-        (StatusCode::NOT_FOUND, "user not found").into_response()
+    match store.update_user(&id, body.role, body.password.as_deref()) {
+        Ok(true) => StatusCode::NO_CONTENT.into_response(),
+        Ok(false) => (StatusCode::NOT_FOUND, "user not found").into_response(),
+        Err(error) => {
+            warn!("Failed to persist updated user: {error}");
+            (StatusCode::INTERNAL_SERVER_ERROR, "could not persist user").into_response()
+        }
     }
 }
 
@@ -255,9 +266,12 @@ async fn delete_user(
     if caller.0.sub == id {
         return (StatusCode::BAD_REQUEST, "cannot delete your own account").into_response();
     }
-    if store.delete_user(&id) {
-        StatusCode::NO_CONTENT.into_response()
-    } else {
-        (StatusCode::NOT_FOUND, "user not found or last admin").into_response()
+    match store.delete_user(&id) {
+        Ok(true) => StatusCode::NO_CONTENT.into_response(),
+        Ok(false) => (StatusCode::NOT_FOUND, "user not found or last admin").into_response(),
+        Err(error) => {
+            warn!("Failed to persist deleted user: {error}");
+            (StatusCode::INTERNAL_SERVER_ERROR, "could not persist user").into_response()
+        }
     }
 }

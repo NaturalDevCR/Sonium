@@ -4,7 +4,8 @@
 //! The server emits events from the [`crate::state::ServerState`] mutation
 //! methods; connected WebSocket handlers subscribe and forward them as JSON.
 
-use crate::state::{ClientInfo, Group, StreamStatus};
+use crate::announcements::AnnouncementLifecycle;
+use crate::state::{ClientInfo, Group, StreamRecovery, StreamStatus};
 use serde::Serialize;
 use sonium_protocol::messages::{EqBand, HealthReport};
 use tokio::sync::broadcast;
@@ -61,6 +62,8 @@ pub enum Event {
     StreamStatus {
         stream_id: String,
         status: StreamStatus,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        recovery: Option<StreamRecovery>,
     },
     StreamRestarted {
         stream_id: String,
@@ -87,10 +90,27 @@ pub enum Event {
         client_id: String,
         health: HealthReport,
     },
+    /// One-shot media (announcement / TTS / `play_media`) started on clients.
+    MediaStarted {
+        media: crate::media::MediaSession,
+    },
+    /// One-shot media finished or was stopped for these clients; they return
+    /// to their group's stream.
+    MediaFinished {
+        media_id: String,
+        client_ids: Vec<String>,
+    },
     /// Emitted when the operator changes the active media transport mode.
     TransportModeChanged {
         mode: String,
         server_udp_port: u16,
+    },
+    /// Bounded announcement lifecycle transition for the control-plane UI.
+    AnnouncementLifecycle {
+        announcement_id: String,
+        group_id: String,
+        lifecycle: AnnouncementLifecycle,
+        resume: bool,
     },
 }
 

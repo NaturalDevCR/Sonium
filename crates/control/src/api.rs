@@ -3,12 +3,13 @@
 //! Mount with [`router`] inside the server's `axum` application.
 //! All handlers share [`AppState`] via `axum::extract::State`.
 
-use crate::auth::UserStore;
-use crate::auth_api::AuthUser;
+use crate::announcements::{AnnouncementError, AnnouncementIntent, AnnouncementLifecycle};
+use crate::auth::{UserStore, WsTicketIssueError};
+use crate::auth_api::{AuthUser, RawToken};
 use crate::state::ServerState;
 use axum::{
-    extract::{Path, Query, Request, State, WebSocketUpgrade},
-    http::{header, StatusCode},
+    extract::{DefaultBodyLimit, Path, Query, Request, State, WebSocketUpgrade},
+    http::{header, HeaderMap, StatusCode},
     middleware::{self, Next},
     response::{IntoResponse, Json, Response},
     routing::{delete, get, patch, post},
@@ -36,8 +37,13 @@ pub fn router(state: AppState) -> Router {
         .route("/clients", get(get_clients))
         .route("/groups", get(get_groups))
         .route("/streams", get(get_streams))
-        .route("/events", get(ws_handler)) // WS: also accepts ?token=
+        .route("/media", get(get_media))
+        .route("/events/ticket", post(post_ws_ticket))
         .layer(middleware::from_fn(require_viewer));
+
+    // Browsers cannot attach Authorization headers to WebSocket upgrades, so
+    // they first exchange the JWT for a short-lived, one-use subprotocol ticket.
+    let ws_routes = Router::new().route("/events", get(ws_handler));
 
     // Operator or admin only
     let write_routes = Router::new()
@@ -52,14 +58,30 @@ pub fn router(state: AppState) -> Router {
         .route("/groups/:id", delete(delete_group))
         .route("/groups/:id", patch(patch_group))
         .route("/groups/:id/stream", patch(patch_group_stream))
+        .route("/media/play", post(post_media_play))
+        .route("/media/:id", delete(delete_media))
         .route("/server/transport", get(get_transport))
         .route("/server/transport", patch(patch_transport))
         .route("/discover/scan", get(get_discover_scan))
         .route("/discover/local-subnet", get(get_discover_local_subnet))
+        .route(
+            "/announcements",
+            get(get_announcements).post(post_announcement),
+        )
+        .route("/announcements/:id", delete(delete_announcement))
+        .route(
+            "/announcements/:id/lifecycle",
+            post(post_announcement_lifecycle),
+        )
+        // Intent metadata is bounded separately from Axum's normal JSON
+        // limit so an authenticated caller cannot create an oversized queue
+        // or control payload.
+        .layer(DefaultBodyLimit::max(16 * 1024))
         .layer(middleware::from_fn(require_operator));
 
     Router::new()
         .merge(read_routes)
+        .merge(ws_routes)
         .merge(write_routes)
         .with_state(state)
 }
@@ -67,19 +89,11 @@ pub fn router(state: AppState) -> Router {
 // ── Auth middleware ───────────────────────────────────────────────────────
 
 fn extract_token(req: &Request) -> Option<String> {
-    // 1. Authorization: Bearer <token>
     req.headers()
         .get(header::AUTHORIZATION)
         .and_then(|v| v.to_str().ok())
         .and_then(|s| s.strip_prefix("Bearer "))
         .map(String::from)
-        // 2. ?token= query param (required for WebSocket — browsers can't set WS headers)
-        .or_else(|| {
-            req.uri().query()?.split('&').find_map(|pair| {
-                let (k, v) = pair.split_once('=')?;
-                (k == "token").then(|| v.to_owned())
-            })
-        })
 }
 
 async fn require_viewer(
@@ -87,11 +101,11 @@ async fn require_viewer(
     mut req: Request,
     next: Next,
 ) -> Response {
-    match extract_token(&req)
-        .as_deref()
-        .and_then(|t| auth.verify_token(t))
-    {
+    let token = extract_token(&req);
+    match token.as_deref().and_then(|t| auth.verify_token(t)) {
         Some(claims) => {
+            req.extensions_mut()
+                .insert(RawToken(token.expect("token just verified")));
             req.extensions_mut().insert(AuthUser(claims));
             next.run(req).await
         }
@@ -155,7 +169,7 @@ async fn patch_volume(
     Path(id): Path<String>,
     Json(body): Json<VolumeBody>,
 ) -> Response {
-    match s.set_volume(&id, body.volume, body.muted) {
+    match s.set_volume(&id, body.volume.min(100), body.muted) {
         Some(_) => StatusCode::NO_CONTENT.into_response(),
         None => StatusCode::NOT_FOUND.into_response(),
     }
@@ -401,21 +415,259 @@ async fn get_streams(State(s): State<AppState>) -> impl IntoResponse {
     Json(s.all_streams())
 }
 
-// ── WebSocket events ──────────────────────────────────────────────────────
+// ── One-shot media (announcements / TTS / play_media) ────────────────────
 
-async fn ws_handler(ws: WebSocketUpgrade, State(s): State<AppState>) -> Response {
-    ws.on_upgrade(move |socket| handle_ws(socket, s))
+async fn get_media(State(s): State<AppState>) -> impl IntoResponse {
+    Json(s.all_media())
 }
 
-async fn handle_ws(mut socket: axum::extract::ws::WebSocket, state: AppState) {
+#[derive(Deserialize)]
+struct PlayMediaBody {
+    url: String,
+    #[serde(default)]
+    client_ids: Vec<String>,
+    #[serde(default)]
+    group_ids: Vec<String>,
+    /// Optional temporary volume (0–100) for the target clients.
+    #[serde(default)]
+    volume: Option<u8>,
+}
+
+/// Play a URL once on the given clients/groups, then return them to their
+/// group streams. Used for announcements and TTS.
+async fn post_media_play(State(s): State<AppState>, Json(body): Json<PlayMediaBody>) -> Response {
+    if let Err(e) = crate::media::validate_media_url(&body.url) {
+        return (StatusCode::BAD_REQUEST, e).into_response();
+    }
+    if matches!(body.volume, Some(v) if v > 100) {
+        return (StatusCode::BAD_REQUEST, "volume must be between 0 and 100").into_response();
+    }
+
+    let mut client_ids: Vec<String> = Vec::new();
+    for cid in &body.client_ids {
+        if s.get_client(cid).is_none() {
+            return (StatusCode::NOT_FOUND, format!("client not found: {cid}")).into_response();
+        }
+        if !client_ids.contains(cid) {
+            client_ids.push(cid.clone());
+        }
+    }
+    for gid in &body.group_ids {
+        let Some(group) = s.get_group(gid) else {
+            return (StatusCode::NOT_FOUND, format!("group not found: {gid}")).into_response();
+        };
+        for cid in group.client_ids {
+            if !client_ids.contains(&cid) {
+                client_ids.push(cid);
+            }
+        }
+    }
+    if client_ids.is_empty() {
+        return (
+            StatusCode::BAD_REQUEST,
+            "no target clients: pass client_ids and/or non-empty group_ids",
+        )
+            .into_response();
+    }
+
+    let Some(backend) = s.media_backend() else {
+        return (
+            StatusCode::SERVICE_UNAVAILABLE,
+            "media playback is not available on this server",
+        )
+            .into_response();
+    };
+    let (respond_to, response) = tokio::sync::oneshot::channel();
+    let request = crate::media::PlayMediaRequest {
+        url: body.url.trim().to_owned(),
+        client_ids,
+        volume: body.volume,
+        respond_to,
+    };
+    if backend.send(request).await.is_err() {
+        return (
+            StatusCode::SERVICE_UNAVAILABLE,
+            "media worker is not running",
+        )
+            .into_response();
+    }
+    match tokio::time::timeout(std::time::Duration::from_secs(10), response).await {
+        Ok(Ok(Ok(session))) => (StatusCode::ACCEPTED, Json(session)).into_response(),
+        Ok(Ok(Err(e))) => (StatusCode::UNPROCESSABLE_ENTITY, e).into_response(),
+        _ => (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "media worker did not respond",
+        )
+            .into_response(),
+    }
+}
+
+/// Stop a media playback; its clients return to their group streams.
+async fn delete_media(State(s): State<AppState>, Path(id): Path<String>) -> Response {
+    if s.end_media(&id) {
+        StatusCode::NO_CONTENT.into_response()
+    } else {
+        (StatusCode::NOT_FOUND, "media not found").into_response()
+    }
+}
+
+// ── WebSocket events ──────────────────────────────────────────────────────
+// ── Announcements ────────────────────────────────────────────────────────
+
+fn now_ms() -> i64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_millis()
+        .try_into()
+        .unwrap_or(i64::MAX)
+}
+
+fn announcement_error(error: AnnouncementError) -> Response {
+    let status = match error {
+        AnnouncementError::NotFound(_) => StatusCode::NOT_FOUND,
+        AnnouncementError::QueueDepthExceeded(_) | AnnouncementError::QueueDurationExceeded(_) => {
+            StatusCode::TOO_MANY_REQUESTS
+        }
+        AnnouncementError::IdempotencyConflict | AnnouncementError::InvalidLifecycle => {
+            StatusCode::CONFLICT
+        }
+        _ => StatusCode::BAD_REQUEST,
+    };
+    (status, error.to_string()).into_response()
+}
+
+async fn get_announcements(State(s): State<AppState>) -> impl IntoResponse {
+    s.expire_announcements(now_ms());
+    Json(s.all_announcements())
+}
+
+async fn post_announcement(
+    State(s): State<AppState>,
+    Json(intent): Json<AnnouncementIntent>,
+) -> Response {
+    s.expire_announcements(now_ms());
+    match s.admit_announcement(intent, now_ms()) {
+        Ok(admission) => {
+            let status = if admission.duplicate {
+                StatusCode::OK
+            } else {
+                StatusCode::CREATED
+            };
+            (status, Json(admission)).into_response()
+        }
+        Err(error) => announcement_error(error),
+    }
+}
+
+async fn delete_announcement(State(s): State<AppState>, Path(id): Path<String>) -> Response {
+    s.expire_announcements(now_ms());
+    match s.cancel_announcement(&id) {
+        Ok(()) => StatusCode::NO_CONTENT.into_response(),
+        Err(error) => announcement_error(error),
+    }
+}
+
+#[derive(Deserialize)]
+struct AnnouncementLifecycleBody {
+    group_id: String,
+    lifecycle: AnnouncementLifecycle,
+}
+
+async fn post_announcement_lifecycle(
+    State(s): State<AppState>,
+    Path(id): Path<String>,
+    Json(body): Json<AnnouncementLifecycleBody>,
+) -> Response {
+    s.expire_announcements(now_ms());
+    match s.acknowledge_announcement(&id, &body.group_id, body.lifecycle) {
+        Ok(()) => StatusCode::NO_CONTENT.into_response(),
+        Err(error) => announcement_error(error),
+    }
+}
+
+// ── WebSocket events ──────────────────────────────────────────────────────
+
+#[derive(Serialize)]
+struct WsTicketResponse {
+    ticket: String,
+}
+
+async fn post_ws_ticket(
+    Extension(auth): Extension<Arc<UserStore>>,
+    Extension(raw): Extension<RawToken>,
+) -> Response {
+    match auth.issue_ws_ticket(&raw.0) {
+        Ok(ticket) => (StatusCode::CREATED, Json(WsTicketResponse { ticket })).into_response(),
+        Err(WsTicketIssueError::InvalidToken) => {
+            (StatusCode::UNAUTHORIZED, "invalid or expired token").into_response()
+        }
+        Err(WsTicketIssueError::CapacityExceeded) => (
+            StatusCode::TOO_MANY_REQUESTS,
+            "WebSocket ticket capacity reached; retry shortly",
+        )
+            .into_response(),
+    }
+}
+
+async fn ws_handler(
+    ws: WebSocketUpgrade,
+    State(s): State<AppState>,
+    Extension(auth): Extension<Arc<UserStore>>,
+    headers: HeaderMap,
+) -> Response {
+    let Some(ticket) = headers
+        .get(header::SEC_WEBSOCKET_PROTOCOL)
+        .and_then(|value| value.to_str().ok())
+        .and_then(|value| {
+            let mut protocols = value.split(',').map(str::trim);
+            let ticket = protocols.next()?;
+            (protocols.next().is_none() && !ticket.is_empty()).then_some(ticket)
+        })
+        .map(str::to_owned)
+    else {
+        return (StatusCode::UNAUTHORIZED, "missing WebSocket ticket").into_response();
+    };
+    let Some(admitted) = auth.consume_ws_ticket(&ticket) else {
+        return (
+            StatusCode::UNAUTHORIZED,
+            "invalid or expired WebSocket ticket",
+        )
+            .into_response();
+    };
+
+    ws.protocols([ticket])
+        .on_upgrade(move |socket| handle_ws(socket, s, auth, admitted))
+}
+
+async fn handle_ws(
+    mut socket: axum::extract::ws::WebSocket,
+    state: AppState,
+    auth: Arc<UserStore>,
+    admitted: crate::auth::WsTicketClaims,
+) {
     use axum::extract::ws::Message as WsMsg;
+    use tokio::time::Duration;
+
     let mut rx = state.events().subscribe();
+    let mut session_check = tokio::time::interval(Duration::from_secs(1));
+    session_check.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
 
     loop {
         tokio::select! {
+            _ = session_check.tick() => {
+                if !auth.verify_ws_ticket_claims(&admitted) {
+                    let _ = socket.close().await;
+                    break;
+                }
+            }
             event = rx.recv() => {
                 match event {
                     Ok(ev) => {
+                        if !auth.verify_ws_ticket_claims(&admitted) {
+                            let _ = socket.close().await;
+                            break;
+                        }
                         if let Ok(json) = serde_json::to_string(&ev) {
                             if socket.send(WsMsg::Text(json)).await.is_err() {
                                 break;

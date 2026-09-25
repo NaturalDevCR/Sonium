@@ -38,6 +38,7 @@ mkfifo /tmp/sonium.fifo
 cat > sonium.toml <<'EOF'
 [server]
 bind = "0.0.0.0"
+control_bind = "127.0.0.1"
 stream_port = 1710
 control_port = 1711
 mdns = true
@@ -55,8 +56,21 @@ silence_on_idle = true
 level = "info"
 EOF
 
-sonium-server --config sonium.toml
+read -r -s -p "Initial Sonium admin password: " SONIUM_INIT_ADMIN_PASSWORD
+printf '\n'
+if printf '%s' "$SONIUM_INIT_ADMIN_PASSWORD" | ./target/release/sonium-server --config sonium.toml --init-admin; then
+  unset SONIUM_INIT_ADMIN_PASSWORD
+  ./target/release/sonium-server --config sonium.toml
+else
+  status=$?
+  unset SONIUM_INIT_ADMIN_PASSWORD
+  exit "$status"
+fi
 ```
+
+`--init-admin` takes no password argument: it reads this one-time secret from
+standard input. Migrate any old `--init-admin PASSWORD` automation to a stdin
+pipe or protected inherited file descriptor.
 
 Open the web UI:
 

@@ -9,9 +9,16 @@ from homeassistant.core import HomeAssistant, callback
 from homeassistant.exceptions import ConfigEntryAuthFailed
 from homeassistant.helpers.update_coordinator import DataUpdateCoordinator, UpdateFailed
 
-from .api import CannotConnect, InvalidAuth, SoniumApiClient
+from .api import CannotConnect, InvalidAuth, SoniumApiClient, SoniumApiError
 from .const import CONF_HOST, CONF_PASSWORD, CONF_PORT, CONF_USERNAME
-from .models import HealthReport, SoniumClient, SoniumData, SoniumGroup, SoniumStream
+from .models import (
+    HealthReport,
+    SoniumClient,
+    SoniumData,
+    SoniumGroup,
+    SoniumStream,
+    StreamRecovery,
+)
 
 _LOGGER = logging.getLogger(__name__)
 SCAN_INTERVAL = timedelta(seconds=60)
@@ -45,32 +52,46 @@ class SoniumCoordinator(DataUpdateCoordinator[SoniumData]):
             raise ConfigEntryAuthFailed("Invalid credentials") from err
         except CannotConnect as err:
             raise UpdateFailed(str(err)) from err
+        if self.api.must_change_password:
+            _LOGGER.warning(
+                "The Sonium user '%s' still has to change its initial password; "
+                "log in to the Sonium web UI to set a new one",
+                self._username,
+            )
 
     async def _async_update_data(self) -> SoniumData:
+        # The API client re-authenticates transparently when the token expires.
         try:
-            clients_raw, groups_raw, streams_raw = await asyncio.gather(
+            clients_raw, groups_raw, streams_raw, media_raw = await asyncio.gather(
                 self.api.get_clients(),
                 self.api.get_groups(),
                 self.api.get_streams(),
+                self._get_media(),
             )
-        except InvalidAuth:
-            try:
-                await self.api.authenticate(self._username, self._password)
-                clients_raw, groups_raw, streams_raw = await asyncio.gather(
-                    self.api.get_clients(),
-                    self.api.get_groups(),
-                    self.api.get_streams(),
-                )
-            except (InvalidAuth, CannotConnect) as err:
-                raise UpdateFailed(str(err)) from err
-        except CannotConnect as err:
+        except InvalidAuth as err:
+            raise ConfigEntryAuthFailed("Invalid credentials") from err
+        except (CannotConnect, SoniumApiError) as err:
             raise UpdateFailed(str(err)) from err
 
-        return SoniumData(
+        data = SoniumData(
             clients={c["id"]: SoniumClient.from_dict(c) for c in clients_raw},
             groups={g["id"]: SoniumGroup.from_dict(g) for g in groups_raw},
             streams={s["id"]: SoniumStream.from_dict(s) for s in streams_raw},
         )
+        for media in media_raw:
+            for client_id in media.get("client_ids", []):
+                client = data.clients.get(client_id)
+                if client:
+                    client.media_id = media.get("id")
+                    client.media_url = media.get("url")
+        return data
+
+    async def _get_media(self) -> list[dict]:
+        """Active announcements; older servers without the endpoint return none."""
+        try:
+            return await self.api.get_media() or []
+        except SoniumApiError:
+            return []
 
     async def async_start_websocket(self) -> None:
         if self._ws_task and not self._ws_task.done():
@@ -82,11 +103,18 @@ class SoniumCoordinator(DataUpdateCoordinator[SoniumData]):
 
     async def _ws_loop(self) -> None:
         backoff = 5
+        first_connect = True
         while True:
             try:
                 _LOGGER.debug("WebSocket connecting to %s", self.server_id)
+                resynced = first_connect
+                first_connect = False
                 async for event in self.api.subscribe_events():
                     backoff = 5
+                    if not resynced:
+                        # Events may have been missed while disconnected.
+                        resynced = True
+                        await self.async_request_refresh()
                     self._apply_event(event)
             except asyncio.CancelledError:
                 return
@@ -174,6 +202,31 @@ class SoniumCoordinator(DataUpdateCoordinator[SoniumData]):
             s = data.streams.get(event["stream_id"])
             if s:
                 s.status = event["status"]
+                s.recovery = (
+                    StreamRecovery.from_dict(event["recovery"])
+                    if event.get("recovery")
+                    else None
+                )
+
+        elif ev_type == "media_started":
+            media = event.get("media") or {}
+            for client_id in media.get("client_ids", []):
+                c = data.clients.get(client_id)
+                if c:
+                    c.media_id = media.get("id")
+                    c.media_url = media.get("url")
+
+        elif ev_type == "media_finished":
+            for client_id in event.get("client_ids", []):
+                c = data.clients.get(client_id)
+                if c and c.media_id == event.get("media_id"):
+                    c.media_id = None
+                    c.media_url = None
+
+        elif ev_type in ("stream_restarted", "stream_removed"):
+            # Stream list changed server-side: reload everything.
+            self.hass.async_create_task(self.async_request_refresh())
+            changed = False
 
         elif ev_type == "client_health":
             c = data.clients.get(event["client_id"])

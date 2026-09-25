@@ -21,6 +21,7 @@ use serde::{Deserialize, Serialize};
 
 /// Fully describes a linear PCM stream.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct SampleFormat {
     /// Samples per second (e.g. 44100, 48000).
     pub rate: u32,
@@ -72,6 +73,23 @@ impl SampleFormat {
     /// Result is rounded towards zero.
     pub fn frames_for_ms(&self, ms: f64) -> usize {
         (ms / 1000.0 * self.rate as f64) as usize
+    }
+
+    /// Bytes required for an integral-duration PCM frame.
+    ///
+    /// Unlike [`Self::frames_for_ms`], this is intended for allocation sizes:
+    /// every multiplication is checked and the final value must fit `usize`.
+    pub fn frame_bytes_for_ms(&self, ms: u32) -> Option<usize> {
+        if self.bits == 0 || !self.bits.is_multiple_of(8) {
+            return None;
+        }
+        let bytes_per_sample = u64::from(self.bits / 8);
+        let bytes = u64::from(self.rate)
+            .checked_mul(u64::from(ms))?
+            .checked_div(1_000)?
+            .checked_mul(u64::from(self.channels))?
+            .checked_mul(bytes_per_sample)?;
+        usize::try_from(bytes).ok()
     }
 }
 
@@ -149,5 +167,14 @@ mod tests {
             channels: 0,
         };
         assert_eq!(fmt.frame_count(1024), 0);
+    }
+
+    #[test]
+    fn frame_bytes_for_ms_uses_checked_integer_arithmetic() {
+        let stereo = SampleFormat::new(48_000, 16, 2);
+        assert_eq!(stereo.frame_bytes_for_ms(20), Some(3_840));
+
+        let extreme = SampleFormat::new(u32::MAX, u16::MAX, u16::MAX);
+        assert_eq!(extreme.frame_bytes_for_ms(u32::MAX), None);
     }
 }

@@ -233,3 +233,12 @@ means packets arrive more evenly. Give the median filter ~3 minutes to converge.
 - [Snapcast time sync discussion](https://github.com/badaix/snapcast/issues/1478)
 - [Chrony documentation](https://chrony-project.org/documentation.html)
 - [IEEE 1588 PTP overview](https://www.ni.com/en-us/innovations/white-papers/14/what-is-ieee-1588-.html)
+
+## GroupSync (legacy, telemetry only)
+
+Since 0.1.93 the server no longer broadcasts `GroupSync` and clients ignore it.
+Earlier releases asked every client to pull its clock offset towards the median
+of the group, which re-introduced the clock differences that the NTP-style
+exchange removes. Each client now plays on its own measured server offset, which
+is what keeps a group in sync.
+

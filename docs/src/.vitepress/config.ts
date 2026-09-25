@@ -55,6 +55,7 @@ export default defineConfig({
         text: 'Integrations',
         items: [
           { text: 'Home Assistant', link: '/integrations/home-assistant' },
+          { text: 'Music Assistant / Announcements', link: '/integrations/music-assistant' },
         ],
       },
       {

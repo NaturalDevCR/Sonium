@@ -127,6 +127,13 @@ export interface EqBand {
   enabled:     boolean;
 }
 
+export type StreamStatus = 'playing' | 'idle' | 'recovering' | 'error';
+
+export interface StreamRecovery {
+  attempt: number;
+  retry_in_ms: number;
+}
+
 export interface Stream {
   id:           string;
   display_name?: string | null;
@@ -139,7 +146,8 @@ export interface Stream {
   chunk_ms_overridden?: boolean;
   idle_timeout_ms?: number | null;
   silence_on_idle: boolean;
-  status:       'playing' | 'idle' | 'error';
+  status:       StreamStatus;
+  recovery?:    StreamRecovery | null;
   eq_bands?:    EqBand[];
   eq_enabled?:  boolean;
 }
@@ -223,12 +231,16 @@ export type Event =
   | { type: 'group_deleted';       group_id: string }
   | { type: 'group_renamed';       group_id: string; name: string }
   | { type: 'group_stream_changed';group_id: string; stream_id: string }
-  | { type: 'stream_status';       stream_id: string; status: string }
+  | { type: 'stream_status';       stream_id: string; status: StreamStatus; recovery?: StreamRecovery | null }
   | { type: 'heartbeat';           uptime_s: number }
   | { type: 'stream_level';        stream_id: string; rms_db: number }
   | { type: 'stream_eq_changed';   stream_id: string; eq_bands: EqBand[]; enabled: boolean }
   | { type: 'client_health';       client_id: string; health: HealthReport }
   | { type: 'transport_mode_changed'; mode: TransportMode; server_udp_port: number };
+
+interface WsTicketResponse {
+  ticket: string;
+}
 
 // ── HTTP helpers ──────────────────────────────────────────────────────────
 
@@ -411,19 +423,34 @@ export function subscribeEvents(
   onClose?: () => void,
 ): () => void {
   const protocol = location.protocol === 'https:' ? 'wss' : 'ws';
-  const tokenParam = _token ? `?token=${encodeURIComponent(_token)}` : '';
-  const ws = new WebSocket(`${protocol}://${location.host}/api/events${tokenParam}`);
+  let ws: WebSocket | null = null;
+  let cancelled = false;
 
-  ws.onmessage = (msg) => {
+  void (async () => {
     try {
-      onEvent(JSON.parse(msg.data) as Event);
-    } catch {
-      console.warn('Failed to parse event:', msg.data);
+      const { ticket } = await post<WsTicketResponse>('/events/ticket', {});
+      if (cancelled) return;
+
+      ws = new WebSocket(`${protocol}://${location.host}/api/events`, ticket);
+      ws.onmessage = (msg) => {
+        try {
+          onEvent(JSON.parse(msg.data) as Event);
+        } catch {
+          console.warn('Failed to parse event:', msg.data);
+        }
+      };
+      ws.onclose = () => onClose?.();
+      ws.onerror = (e) => console.error('WS error', e);
+    } catch (error) {
+      if (!cancelled) {
+        console.error('WS ticket error', error);
+        onClose?.();
+      }
     }
+  })();
+
+  return () => {
+    cancelled = true;
+    ws?.close();
   };
-
-  ws.onclose = () => onClose?.();
-  ws.onerror = (e) => console.error('WS error', e);
-
-  return () => ws.close();
 }

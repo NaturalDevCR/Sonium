@@ -12,7 +12,7 @@ use sonium_transport::arq::{decode_time_echo, encode_time_probe};
 use sonium_transport::{ArqReceiver, RtpPacket, RTP_CLOCK_RATE};
 use std::sync::atomic::{AtomicU64, Ordering};
 
-use sonium_common::config::ClientConfig;
+use sonium_common::config::{ClientConfig, MAX_CLIENT_ID_LEN};
 use sonium_protocol::{
     header::{validate_payload_size, HEADER_SIZE},
     messages::{EqBand, HealthReport, Hello, Message, TimeMsg},
@@ -22,6 +22,7 @@ use sonium_sync::time_provider::now_us;
 use sonium_sync::{PcmChunk, SyncBuffer, TimeProvider};
 
 use crate::decoder::ActiveDecoder;
+use crate::ducking::{DuckEnvelope, DuckGain};
 use crate::eq::SmoothedEqProcessor;
 use crate::player::Player;
 
@@ -44,16 +45,63 @@ enum UdpMediaEvent {
 const MAX_CONCEALMENT_PACKETS_PER_GAP: u16 = 10;
 
 const READ_TIMEOUT: Duration = Duration::from_secs(20);
+
+/// Upper bounds for server-provided timing values (defensive clamps).
+const MAX_BUFFER_MS: i32 = 60_000;
+const MAX_LATENCY_MS: i32 = 10_000;
+
+/// Delay (ms) between a chunk's server timestamp and its playout.
+///
+/// Same semantics as Snapcast: the stream buffer minus the per-client
+/// latency offsets. A positive latency makes this client play *earlier*, which
+/// compensates for extra output delay after the DAC (Bluetooth speakers, AV
+/// receivers, TVs). Adding the latency instead would push such a speaker even
+/// further behind the rest of the group.
+fn playout_delay_ms(server_buffer_ms: i32, client_latency_ms: i32, server_latency_ms: i32) -> i64 {
+    (i64::from(server_buffer_ms) - i64::from(client_latency_ms) - i64::from(server_latency_ms))
+        .max(0)
+}
 const WRITE_TIMEOUT: Duration = Duration::from_secs(5);
+const CONTROL_QUEUE_CAPACITY: usize = 64;
+
+/// Derive a stable protocol-safe ID from an arbitrary local hostname.
+fn client_id_from_hostname(hostname: &str, instance: u32) -> String {
+    let mut normalized = String::with_capacity(hostname.len());
+    for byte in hostname.bytes() {
+        if byte.is_ascii_alphanumeric() {
+            normalized.push((byte as char).to_ascii_lowercase());
+        } else if !normalized.ends_with('-') {
+            normalized.push('-');
+        }
+    }
+    let normalized = normalized.trim_matches('-');
+    let normalized = if normalized.is_empty() {
+        "sonium-client"
+    } else {
+        normalized
+    };
+    let instance_suffix = format!("-{instance}");
+    if normalized.len() + instance_suffix.len() <= MAX_CLIENT_ID_LEN {
+        return format!("{normalized}{instance_suffix}");
+    }
+
+    let disambiguator = format!("-{:08x}", stable_hostname_hash(hostname));
+    let prefix_len = MAX_CLIENT_ID_LEN - disambiguator.len() - instance_suffix.len();
+    let prefix = normalized[..prefix_len].trim_end_matches('-');
+    format!("{prefix}{disambiguator}{instance_suffix}")
+}
+
+fn stable_hostname_hash(hostname: &str) -> u32 {
+    hostname.bytes().fold(0x811c_9dc5, |hash, byte| {
+        (hash ^ u32::from(byte)).wrapping_mul(0x0100_0193)
+    })
+}
 
 /// Dedicated TCP writer task — owns the write half exclusively so the
 /// main select! loop never blocks on a TCP write.  Control messages
-/// (time-sync requests, health reports) arrive via an unbounded channel
-/// and are written to the socket sequentially.
-async fn tcp_writer_task(
-    mut writer: OwnedWriteHalf,
-    mut ctrl_rx: mpsc::UnboundedReceiver<Vec<u8>>,
-) {
+/// (time-sync requests, health reports, announcement ACKs) arrive via a
+/// bounded channel and are written to the socket sequentially.
+async fn tcp_writer_task(mut writer: OwnedWriteHalf, mut ctrl_rx: mpsc::Receiver<Vec<u8>>) {
     loop {
         let Some(buf) = ctrl_rx.recv().await else {
             break;
@@ -164,7 +212,7 @@ async fn connect_and_run(
         .map(|h| h.to_string_lossy().to_string())
         .unwrap_or_else(|_| "sonium-client".into());
     let display_name = cfg.client_name.as_deref().unwrap_or(&hostname);
-    let client_id = format!("{}-{}", hostname, cfg.instance);
+    let client_id = client_id_from_hostname(&hostname, cfg.instance);
 
     let mut hello_msg = Hello::new(display_name, &client_id);
     hello_msg.hostname = display_name.to_owned();
@@ -175,8 +223,9 @@ async fn connect_and_run(
 
     // Channel and writer task: all subsequent writes go through the channel
     // so the main select! loop never blocks on TCP backpressure.
-    let (ctrl_tx, ctrl_rx) = mpsc::unbounded_channel::<Vec<u8>>();
+    let (ctrl_tx, ctrl_rx) = mpsc::channel::<Vec<u8>>(CONTROL_QUEUE_CAPACITY);
     let writer_task = tokio::spawn(tcp_writer_task(writer, ctrl_rx));
+    let mut announcement_acks = AnnouncementAckQueue::new(ctrl_tx.clone());
 
     // 2. Wait for CodecHeader, then ServerSettings
     let mut decoder: Option<ActiveDecoder> = None;
@@ -184,12 +233,15 @@ async fn connect_and_run(
     let mut sync_buf: Option<SyncBuffer> = None;
     let mut playback_handle: Option<crate::player::PlaybackHandle> = None;
     let mut playback_offset: Option<std::sync::Arc<std::sync::atomic::AtomicI64>> = None;
+    let duck_gain = DuckGain::default();
+    let mut duck_envelope = DuckEnvelope::new(duck_gain.clone());
     let mut volume: u8 = 100;
     let mut muted = false;
+    let mut soft_volume = SoftVolume::default();
     let mut eq_bands: Vec<EqBand> = vec![];
     let mut eq_enabled = false;
     let mut eq_processor: Option<SmoothedEqProcessor> = None;
-    let mut server_buffer_ms: i32 = cfg.latency_ms + 500; // Default buffer depth
+    let mut server_buffer_ms: i32 = 500; // Default buffer depth until ServerSettings arrives
     let mut server_latency_ms: i32 = 0;
     // Last group target broadcast by the server, used to compute sync_error_to_group_us.
     let mut last_group_target_us: Option<i64> = None;
@@ -231,6 +283,11 @@ async fn connect_and_run(
             // behaviour: if a chunk is due, play it.  The Player ring buffer absorbs
             // jitter; underruns are handled by the CPAL callback fade-to-silence.
             _ = audio_tick.tick() => {
+                let now_server_ms = time_provider.to_server_time(now_us()) / 1_000;
+                if !announcement_acks.send(duck_envelope.tick(now_server_ms)) {
+                    warn!("Control queue saturated — disconnecting before announcement ACKs can grow unbounded");
+                    break Ok(());
+                }
                 if playback_handle.is_some() {
                     continue;
                 }
@@ -300,7 +357,7 @@ async fn connect_and_run(
                         .map(|p| (p.buffered_us().max(0) / 1000) as u32)
                         .unwrap_or(0);
                     let target_playout_latency_ms =
-                        (server_buffer_ms + cfg.latency_ms + server_latency_ms).max(0) as u32;
+                        playout_delay_ms(server_buffer_ms, cfg.latency_ms, server_latency_ms) as u32;
 
                     // Pull playout-error percentiles from whichever buffer is active.
                     let (playout_p50, playout_p95, playout_p99) =
@@ -369,8 +426,8 @@ async fn connect_and_run(
                 }
 
                 let msg = Message::HealthReport(report_msg).encode();
-                if ctrl_tx.send(msg).is_err() {
-                    warn!("Writer task died — cannot send health report");
+                if ctrl_tx.try_send(msg).is_err() {
+                    warn!("Control queue saturated — disconnecting slow server connection");
                     break Ok(());
                 }
             }
@@ -403,9 +460,14 @@ async fn connect_and_run(
                             None
                         };
 
-                        let p   = Player::new(fmt, cfg.device.as_deref(), playback.clone())?;
+                        let p   = Player::new(fmt, cfg.device.as_deref(), playback.clone(), duck_gain.clone())?;
                         let mut buf = SyncBuffer::new(fmt);
-                        buf.set_target_buffer_ms(server_buffer_ms + cfg.latency_ms + server_latency_ms);
+                        let target_buffer_ms =
+                            playout_delay_ms(server_buffer_ms, cfg.latency_ms, server_latency_ms) as i32;
+                        buf.set_target_buffer_ms(target_buffer_ms);
+                        if let Some(playback) = playback.as_ref() {
+                            playback.set_target_buffer_ms(target_buffer_ms);
+                        }
                         eq_processor = Some(SmoothedEqProcessor::new(eq_enabled, &eq_bands, fmt.rate, fmt.channels as usize));
                         decoder  = Some(dec);
                         player   = Some(p);
@@ -423,12 +485,17 @@ async fn connect_and_run(
                         muted    = ss.muted;
                         eq_bands = ss.eq_bands;
                         eq_enabled = ss.eq_enabled;
-                        server_buffer_ms = ss.buffer_ms;
-                        server_latency_ms = ss.latency;
-                        let target_buffer_ms = server_buffer_ms + cfg.latency_ms + server_latency_ms;
+                        // Clamp network-provided values before doing arithmetic on them.
+                        server_buffer_ms = ss.buffer_ms.clamp(0, MAX_BUFFER_MS);
+                        server_latency_ms = ss.latency.clamp(-MAX_LATENCY_MS, MAX_LATENCY_MS);
+                        let target_buffer_ms =
+                            playout_delay_ms(server_buffer_ms, cfg.latency_ms, server_latency_ms) as i32;
                         info!(server_buffer_ms, client_latency_ms = cfg.latency_ms, server_latency_ms, target_buffer_ms, "ServerSettings applied — buffer target");
                         if let Some(buf) = sync_buf.as_mut() {
                             buf.set_target_buffer_ms(target_buffer_ms);
+                        }
+                        if let Some(playback) = playback_handle.as_ref() {
+                            playback.set_target_buffer_ms(target_buffer_ms);
                         }
                         if server_buffer_ms <= 50 {
                             time_provider.set_window_size(50);
@@ -436,7 +503,7 @@ async fn connect_and_run(
                             time_provider.set_window_size(200);
                         }
                         if let Some(pl) = player.as_mut() {
-                            pl.set_buffer_limit_ms((server_buffer_ms + cfg.latency_ms + server_latency_ms).max(80));
+                            pl.set_buffer_limit_ms(target_buffer_ms.max(80));
                         }
                         if let Some(dec) = decoder.as_ref() {
                             let fmt = dec.sample_format();
@@ -568,25 +635,41 @@ async fn connect_and_run(
                             (decoder.as_mut(), player.as_mut(), sync_buf.as_mut())
                         {
                             let mut samples = Vec::new();
-                            dec.decode(&chunk.data, &mut samples)?;
-                            apply_volume(&mut samples, volume, muted);
+                            if let Err(e) = dec.decode(&chunk.data, &mut samples) {
+                                // One corrupt frame must not tear down the whole session.
+                                warn!("Dropping undecodable audio chunk: {e}");
+                                samples.clear();
+                            }
+                            let channels = dec.sample_format().channels as usize;
+                            soft_volume.apply(&mut samples, channels, volume, muted);
                             if let Some(ref mut eq) = eq_processor {
                                 eq.apply(&mut samples);
                             }
 
                             // Calculate absolute playout time in server clock
                             let playout_us = chunk.timestamp.to_micros()
-                                + (server_buffer_ms as i64 * 1000)
-                                + (cfg.latency_ms as i64 * 1000)
-                                + (server_latency_ms as i64 * 1000);
+                                + playout_delay_ms(server_buffer_ms, cfg.latency_ms, server_latency_ms) * 1000;
 
                             let now_server = time_provider.to_server_time(now_us());
-                            let pcm_chunk = PcmChunk::new(playout_us, samples, dec.sample_format());
-                            if let Some(playback) = playback_handle.as_ref() {
-                                playback.push(pcm_chunk, now_server);
-                            } else if let Some(buf) = sync_buf.as_mut() {
-                                buf.push(pcm_chunk, now_server);
+                            if !samples.is_empty() {
+                                let pcm_chunk = PcmChunk::new(playout_us, samples, dec.sample_format());
+                                if let Some(playback) = playback_handle.as_ref() {
+                                    playback.push(pcm_chunk, now_server);
+                                } else if let Some(buf) = sync_buf.as_mut() {
+                                    buf.push(pcm_chunk, now_server);
+                                }
                             }
+                        }
+                    }
+
+                    MessageType::AnnouncementControl => {
+                        let control = sonium_protocol::messages::AnnouncementControlV1::decode(&payload)?;
+                        let now_server_ms = time_provider.to_server_time(now_us()) / 1_000;
+                        let acknowledgements =
+                            duck_envelope.handle_control(control, now_server_ms);
+                        if !announcement_acks.send(acknowledgements) {
+                            warn!("Control queue saturated — disconnecting before announcement ACKs can grow unbounded");
+                            break Ok(());
                         }
                     }
 
@@ -619,39 +702,14 @@ async fn connect_and_run(
                     }
 
                     MessageType::GroupSync => {
+                        // Telemetry only. Older servers broadcast the median of all
+                        // clients' clock offsets and asked each client to converge its
+                        // own offset towards it. That is incorrect: every client needs
+                        // its *own* server-local offset, so pulling it towards a group
+                        // median re-introduces exactly the clock differences NTP-style
+                        // sync removed (up to +/-50 ms). The measured offset is used as-is.
                         if let Ok(Message::GroupSync(gs)) = Message::from_payload(&hdr, &payload) {
-                            // Remember the latest target so the HealthReport can carry the
-                            // current sync_error_to_group_us regardless of nudge state.
                             last_group_target_us = Some(gs.group_offset_us);
-                            // Ignore group sync until NTP offset has converged a bit.
-                            if time_provider.sample_count() < 10 {
-                                debug!("GroupSync ignored: NTP sync not yet stable");
-                                continue;
-                            }
-                            // diff = (current total offset) - (target group offset from server)
-                            // We want total_offset to converge to group_offset_us.
-                            let diff_us = time_provider.total_offset_us() - gs.group_offset_us;
-                            let diff_ms = diff_us / 1000;
-                            // Ignore single network spikes (> 100 ms).
-                            if diff_ms.abs() > 100 {
-                                warn!(diff_ms, "GroupSync spike ignored (network jitter?)");
-                            } else {
-                                if diff_ms.abs() > 5 {
-                                    debug!(diff_ms, target_ms = gs.group_offset_us / 1000, "GroupSync nudging");
-                                } else {
-                                    debug!(diff_ms, target_ms = gs.group_offset_us / 1000, "GroupSync on target");
-                                }
-                                time_provider.nudge_group_offset(diff_us);
-                            }
-                            // Propagate the corrected total offset to the audio callback,
-                            // but only if the change is large enough to matter (> 0.5 ms).
-                            if let Some(offset) = playback_offset.as_ref() {
-                                let new_total = time_provider.total_offset_us();
-                                let old_total = offset.load(std::sync::atomic::Ordering::Relaxed);
-                                if (new_total - old_total).abs() > 500 {
-                                    offset.store(new_total, std::sync::atomic::Ordering::Relaxed);
-                                }
-                            }
                         }
                     }
 
@@ -726,16 +784,15 @@ async fn connect_and_run(
                                     })
                                     .unwrap_or(20_000);
                                 let current_playout_us = chunk.timestamp.to_micros()
-                                    + (server_buffer_ms as i64 * 1000)
-                                    + (cfg.latency_ms as i64 * 1000)
-                                    + (server_latency_ms as i64 * 1000);
+                                    + playout_delay_ms(server_buffer_ms, cfg.latency_ms, server_latency_ms) * 1000;
                                 let first_missing_back = i64::from(conceal_count);
                                 // Snapshot server time once for the whole concealment burst;
                                 // also used as the arrival timestamp in SyncBuffer::push.
                                 let now_server = time_provider.to_server_time(now_us());
                                 // Mirror the stale-drop threshold from SyncBuffer::pop_ready so
                                 // we never insert a frame that would be discarded immediately.
-                                let target_buffer_us = (server_buffer_ms + cfg.latency_ms + server_latency_ms) as i64 * 1000;
+                                let target_buffer_us =
+                                    playout_delay_ms(server_buffer_ms, cfg.latency_ms, server_latency_ms) * 1000;
                                 let stale_threshold_us =
                                     (target_buffer_us / 2).clamp(100_000, 2_000_000);
                                 for i in 0..conceal_count {
@@ -749,7 +806,12 @@ async fn connect_and_run(
                                     if playout_us + interval_us < now_server - stale_threshold_us {
                                         continue;
                                     }
-                                    apply_volume(&mut samples, volume, muted);
+                                    soft_volume.apply(
+                                        &mut samples,
+                                        dec.sample_format().channels as usize,
+                                        volume,
+                                        muted,
+                                    );
                                     if let Some(ref mut eq) = eq_processor {
                                         eq.apply(&mut samples);
                                     }
@@ -765,21 +827,26 @@ async fn connect_and_run(
                             }
 
                             let mut samples = Vec::new();
-                            dec.decode(&chunk.data, &mut samples)?;
-                            apply_volume(&mut samples, volume, muted);
+                            if let Err(e) = dec.decode(&chunk.data, &mut samples) {
+                                warn!("Dropping undecodable RTP audio chunk: {e}");
+                                rtp_decode_error_count = rtp_decode_error_count.saturating_add(1);
+                                samples.clear();
+                            }
+                            let channels = dec.sample_format().channels as usize;
+                            soft_volume.apply(&mut samples, channels, volume, muted);
                             if let Some(ref mut eq) = eq_processor {
                                 eq.apply(&mut samples);
                             }
                             let playout_us = chunk.timestamp.to_micros()
-                                + (server_buffer_ms as i64 * 1000)
-                                + (cfg.latency_ms as i64 * 1000)
-                                + (server_latency_ms as i64 * 1000);
+                                + playout_delay_ms(server_buffer_ms, cfg.latency_ms, server_latency_ms) * 1000;
                             let now_server = time_provider.to_server_time(now_us());
-                            let pcm_chunk = PcmChunk::new(playout_us, samples, dec.sample_format());
-                            if let Some(playback) = playback_handle.as_ref() {
-                                playback.push(pcm_chunk, now_server);
-                            } else if let Some(buf) = sync_buf.as_mut() {
-                                buf.push(pcm_chunk, now_server);
+                            if !samples.is_empty() {
+                                let pcm_chunk = PcmChunk::new(playout_us, samples, dec.sample_format());
+                                if let Some(playback) = playback_handle.as_ref() {
+                                    playback.push(pcm_chunk, now_server);
+                                } else if let Some(buf) = sync_buf.as_mut() {
+                                    buf.push(pcm_chunk, now_server);
+                                }
                             }
                         }
                         last_rtp_sequence = Some(sequence);
@@ -803,6 +870,56 @@ async fn connect_and_run(
         task.abort();
     }
     result
+}
+
+struct AnnouncementAckQueue {
+    ctrl_tx: mpsc::Sender<Vec<u8>>,
+    last_enqueued: Option<(String, String, u8, i64)>,
+}
+
+impl AnnouncementAckQueue {
+    fn new(ctrl_tx: mpsc::Sender<Vec<u8>>) -> Self {
+        Self {
+            ctrl_tx,
+            last_enqueued: None,
+        }
+    }
+
+    fn send(
+        &mut self,
+        acknowledgements: Vec<sonium_protocol::messages::AnnouncementControlV1>,
+    ) -> bool {
+        for acknowledgement in acknowledgements {
+            let fingerprint = (
+                acknowledgement.announcement_id.clone(),
+                acknowledgement.group_id.clone(),
+                announcement_lifecycle_rank(acknowledgement.lifecycle),
+                acknowledgement.scheduled_at_ms,
+            );
+            if self.last_enqueued.as_ref() == Some(&fingerprint) {
+                continue;
+            }
+            if self
+                .ctrl_tx
+                .try_send(Message::AnnouncementControl(acknowledgement).encode())
+                .is_err()
+            {
+                return false;
+            }
+            self.last_enqueued = Some(fingerprint);
+        }
+        true
+    }
+}
+
+fn announcement_lifecycle_rank(lifecycle: sonium_protocol::messages::AnnouncementLifecycle) -> u8 {
+    match lifecycle {
+        sonium_protocol::messages::AnnouncementLifecycle::Scheduled => 0,
+        sonium_protocol::messages::AnnouncementLifecycle::Started => 1,
+        sonium_protocol::messages::AnnouncementLifecycle::Completed => 2,
+        sonium_protocol::messages::AnnouncementLifecycle::Cancelled => 3,
+        sonium_protocol::messages::AnnouncementLifecycle::Failed => 4,
+    }
 }
 
 fn configure_tcp_stream(stream: &TcpStream) {
@@ -839,7 +956,7 @@ fn configure_tcp_stream(stream: &TcpStream) {
 /// clock-sync algorithm measures client→server→client transit, which starts
 /// when we create the message, not when the kernel puts it on the wire.
 fn queue_time_request(
-    ctrl_tx: &mpsc::UnboundedSender<Vec<u8>>,
+    ctrl_tx: &mpsc::Sender<Vec<u8>>,
     sync_seq: &mut u16,
     pending_time: &mut Option<(u16, i64)>,
 ) {
@@ -848,8 +965,9 @@ fn queue_time_request(
     hdr.id = *sync_seq;
     let sent_us = hdr.sent.to_micros();
     let msg = Message::Time(TimeMsg::zero()).encode_with_header(hdr);
-    let _ = ctrl_tx.send(msg);
-    *pending_time = Some((*sync_seq, sent_us));
+    if ctrl_tx.try_send(msg).is_ok() {
+        *pending_time = Some((*sync_seq, sent_us));
+    }
 }
 
 async fn read_exact_with_timeout(reader: &mut OwnedReadHalf, buf: &mut [u8]) -> anyhow::Result<()> {
@@ -973,18 +1091,193 @@ async fn udp_time_probe_loop(
     }
 }
 
-fn apply_volume(samples: &mut [i16], volume: u8, muted: bool) {
-    if muted {
-        samples.fill(0);
-        return;
+/// Client-side software volume.
+///
+/// Uses the same exponential curve as Snapcast's software mixer so that the
+/// 0-100 slider (and Home Assistant's `volume_level`) feels perceptually even,
+/// and ramps gain changes across a chunk so volume/mute changes never click.
+#[derive(Default)]
+struct SoftVolume {
+    gain: Option<f32>,
+}
+
+impl SoftVolume {
+    fn target_gain(volume: u8, muted: bool) -> f32 {
+        if muted {
+            return 0.0;
+        }
+        let v = f32::from(volume.min(100)) / 100.0;
+        // (10^v - 1) / 9: 0 -> 0, 0.5 -> ~0.24 (-12 dB), 1 -> 1.
+        (10f32.powf(v) - 1.0) / 9.0
     }
 
-    if volume >= 100 {
-        return;
+    fn apply(&mut self, samples: &mut [i16], channels: usize, volume: u8, muted: bool) {
+        let target = Self::target_gain(volume, muted);
+        let start = self.gain.unwrap_or(target);
+        self.gain = Some(target);
+
+        let channels = channels.max(1);
+        let frames = samples.len() / channels;
+        if frames == 0 {
+            return;
+        }
+
+        if (start - target).abs() < 1e-6 {
+            if target >= 1.0 {
+                return;
+            }
+            if target <= 0.0 {
+                samples.fill(0);
+                return;
+            }
+            for sample in samples.iter_mut() {
+                *sample = (f32::from(*sample) * target) as i16;
+            }
+            return;
+        }
+
+        // Linear gain ramp over the chunk (10-60 ms) — inaudible, click-free.
+        let step = (target - start) / frames as f32;
+        for (i, frame) in samples.chunks_mut(channels).enumerate() {
+            let gain = start + step * (i + 1) as f32;
+            for sample in frame {
+                *sample = (f32::from(*sample) * gain) as i16;
+            }
+        }
+    }
+}
+
+#[cfg(test)]
+mod sync_volume_tests {
+    use super::*;
+
+    #[test]
+    fn positive_latency_plays_earlier() {
+        assert_eq!(playout_delay_ms(200, 0, 0), 200);
+        // Bluetooth speaker with 150 ms extra output delay must start 150 ms earlier.
+        assert_eq!(playout_delay_ms(200, 150, 0), 50);
+        assert_eq!(playout_delay_ms(200, 100, 50), 50);
+        // Negative latency delays the client.
+        assert_eq!(playout_delay_ms(200, -20, 0), 220);
+        // Never schedules before the chunk was captured.
+        assert_eq!(playout_delay_ms(100, 300, 0), 0);
+        // No overflow on extreme inputs.
+        assert_eq!(
+            playout_delay_ms(i32::MAX, i32::MIN, 0),
+            i64::from(i32::MAX) * 2 + 1
+        );
     }
 
-    let gain = volume as f32 / 100.0;
-    for sample in samples {
-        *sample = (*sample as f32 * gain).clamp(i16::MIN as f32, i16::MAX as f32) as i16;
+    #[test]
+    fn soft_volume_curve_endpoints() {
+        assert_eq!(SoftVolume::target_gain(100, false), 1.0);
+        assert_eq!(SoftVolume::target_gain(0, false), 0.0);
+        assert_eq!(SoftVolume::target_gain(80, true), 0.0);
+        let half = SoftVolume::target_gain(50, false);
+        assert!(
+            (0.2..0.3).contains(&half),
+            "50% should be about -12 dB, got {half}"
+        );
+    }
+
+    #[test]
+    fn soft_volume_ramps_instead_of_jumping() {
+        let mut vol = SoftVolume::default();
+        let mut first = vec![10_000i16; 8];
+        vol.apply(&mut first, 2, 100, false);
+        assert!(first.iter().all(|s| *s == 10_000));
+
+        // Mute: gain ramps down across the chunk and ends at silence.
+        let mut chunk = vec![10_000i16; 8];
+        vol.apply(&mut chunk, 2, 100, true);
+        assert!(chunk[0] > 0 && chunk[0] < 10_000);
+        assert_eq!(chunk[6], 0);
+        assert_eq!(chunk[7], 0);
+        for pair in chunk.chunks(2).collect::<Vec<_>>().windows(2) {
+            assert!(pair[1][0] <= pair[0][0]);
+        }
+
+        // Stays muted afterwards.
+        let mut next = vec![10_000i16; 8];
+        vol.apply(&mut next, 2, 100, true);
+        assert!(next.iter().all(|s| *s == 0));
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use sonium_common::config::{validate_client_id, MAX_CLIENT_ID_LEN};
+
+    #[test]
+    fn client_id_normalizes_fqdn_hostname_into_the_protocol_charset() {
+        let id = client_id_from_hostname("living.room.example", 7);
+
+        assert_eq!(id, "living-room-example-7");
+        assert!(validate_client_id(&id).is_ok());
+    }
+
+    #[test]
+    fn long_hostnames_are_stably_bounded_without_colliding_on_the_prefix() {
+        let first_host = format!("{}-a.example.internal", "a".repeat(120));
+        let second_host = format!("{}-b.example.internal", "a".repeat(120));
+        let first = client_id_from_hostname(&first_host, 42);
+        let second = client_id_from_hostname(&second_host, 42);
+
+        assert!(first.len() <= MAX_CLIENT_ID_LEN);
+        assert!(validate_client_id(&first).is_ok());
+        assert_eq!(first, client_id_from_hostname(&first_host, 42));
+        assert_ne!(first, second);
+    }
+
+    #[test]
+    fn announcement_ack_batch_is_encoded_on_the_existing_control_writer() {
+        use sonium_protocol::messages::{AnnouncementControlV1, AnnouncementLifecycle};
+
+        let (tx, mut rx) = mpsc::channel(2);
+        let mut acknowledgements = AnnouncementAckQueue::new(tx);
+        let acknowledgement = AnnouncementControlV1 {
+            version: 1,
+            announcement_id: "doorbell".into(),
+            group_id: "default".into(),
+            lifecycle: AnnouncementLifecycle::Started,
+            scheduled_at_ms: 10_250,
+            max_duration_ms: 1_000,
+            intent: None,
+        };
+
+        assert!(acknowledgements.send(vec![acknowledgement.clone()]));
+        let bytes = rx.try_recv().unwrap();
+        let header = MessageHeader::from_bytes(&bytes[..HEADER_SIZE]).unwrap();
+        let decoded = Message::from_payload(&header, &bytes[HEADER_SIZE..]).unwrap();
+        assert!(matches!(
+            decoded,
+            Message::AnnouncementControl(message) if message == acknowledgement
+        ));
+    }
+
+    #[test]
+    fn announcement_ack_queue_is_bounded_and_coalesces_exact_replays() {
+        use sonium_protocol::messages::{AnnouncementControlV1, AnnouncementLifecycle};
+
+        let (tx, mut rx) = mpsc::channel(1);
+        let mut queue = AnnouncementAckQueue::new(tx);
+        let scheduled = AnnouncementControlV1 {
+            version: 1,
+            announcement_id: "doorbell".into(),
+            group_id: "default".into(),
+            lifecycle: AnnouncementLifecycle::Scheduled,
+            scheduled_at_ms: 10_250,
+            max_duration_ms: 1_000,
+            intent: None,
+        };
+
+        assert!(queue.send(vec![scheduled.clone()]));
+        assert!(queue.send(vec![scheduled.clone()]));
+
+        let mut started = scheduled;
+        started.lifecycle = AnnouncementLifecycle::Started;
+        assert!(!queue.send(vec![started]));
+        assert!(rx.try_recv().is_ok());
     }
 }
